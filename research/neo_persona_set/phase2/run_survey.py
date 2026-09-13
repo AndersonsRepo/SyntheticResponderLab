@@ -383,6 +383,14 @@ def load_survey(path: Path) -> Any:
     return schemas.SurveySchema(**payload)
 
 
+def survey_for_prompt(survey: Any, description_policy: str) -> Any:
+    """The survey as the model should see it. The markdown before the first question ("Survey Setup":
+    target population, LOI, what was cut) lands in `description`; `drop` removes it on a copy."""
+    if description_policy == "keep" or survey.description is None:
+        return survey
+    return survey.model_copy(update={"description": None})
+
+
 def load_contexts() -> Tuple[Any, Any]:
     return presets.get_neo_business_product_defaults(), presets.get_neo_market_defaults()
 
@@ -906,7 +914,7 @@ def write_run_outputs(
 
     with open(run_dir / "questions.csv", "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["question_id", "question_type", "min_value", "max_value", "options", "text"])
+        writer.writerow(["question_id", "question_type", "min_value", "max_value", "options", "text", "preamble"])
         for question in survey.questions:
             writer.writerow(
                 [
@@ -916,6 +924,7 @@ def write_run_outputs(
                     "" if question.max_value is None else question.max_value,
                     "|".join(str(option) for option in (question.options or [])),
                     question.text,
+                    getattr(question, "preamble", None) or "",
                 ]
             )
 
@@ -1129,6 +1138,7 @@ def run_one(
     census_lookup: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Run one model once over all personas. Returns the manifest dict (status completed|failed)."""
+    survey = survey_for_prompt(survey, getattr(args, "survey_description", "drop"))
     started = utcnow()
     run_id = make_run_id(model, repeat, limit=args.limit, tag=args.run_tag, now=started)
     out_dir = Path(args.out_dir)
@@ -1160,6 +1170,7 @@ def run_one(
         "prompt_variant": args.prompt_variant,
         "likert_label_map": not args.no_likert_label_map,
         "prompt_builder": "backend.simulation.prompt_builder.build_openrouter_prompt_payload",
+        "survey_description_sent": survey.description is not None,
         "survey": {"path": str(args.survey), "sha256": sha256_of_file(Path(args.survey)), "title": survey.survey_title, "question_count": len(survey.questions), "question_ids": [q.id for q in survey.questions]},
         "personas": {
             "path": str(args.personas),
@@ -1416,6 +1427,7 @@ def run_one(
 
 
 def dry_run(*, personas: List[Any], survey: Any, contexts: Tuple[Any, Any], args: argparse.Namespace) -> int:
+    survey = survey_for_prompt(survey, getattr(args, "survey_description", "drop"))
     product, market = contexts
     builder = TaggingPromptBuilder(prompt_builder, max_tokens=args.max_tokens, temperature=args.temperature)
     payload = builder.build_openrouter_prompt_payload(
@@ -1426,6 +1438,12 @@ def dry_run(*, personas: List[Any], survey: Any, contexts: Tuple[Any, Any], args
     est_out = 900
     print(f"personas: {len(personas)} (variant={args.prompt_variant})  questions: {len(survey.questions)}")
     print("question ids:", ", ".join(q.id for q in survey.questions))
+    with_preamble = [q for q in survey.questions if getattr(q, "preamble", None)]
+    print(f"questions with a preamble: {len(with_preamble)} ({', '.join(q.id for q in with_preamble) or 'none'})")
+    print(f"survey description sent: {survey.description is not None}")
+    for question in with_preamble:
+        if question.id in ("Q1", "Q9A"):
+            print(f"--- PREAMBLE {question.id} ---\n{question.preamble}\n")
     print(f"prompt for {personas[0].persona_id}: {chars} chars ≈ {est_in} input tokens; assuming ≈{est_out} output tokens")
     print()
     for message in payload["messages"]:
@@ -1551,6 +1569,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--seed-base", type=int, default=DEFAULT_SEED_BASE, help="seed = seed_base*10 + repeat")
     parser.add_argument("--prompt-variant", choices=PROMPT_VARIANTS, default="full")
+    parser.add_argument("--survey-description", choices=("keep", "drop"), default="drop",
+                        help="send the markdown before the first question (the 'Survey Setup' block) to the model, or drop it (default)")
     parser.add_argument(
         "--keep-file-buckets",
         action="store_true",

@@ -301,7 +301,7 @@ def _args(tmp_path: Path, persona_csv: Path, **overrides) -> argparse.Namespace:
         max_tokens=4000, temperature=0.2, timeout=5, max_retries=0, concurrency=2, prompt_variant="full",
         provider_order=None, provider_ignore=["DigitalOcean"], no_provider_fallbacks=False, json_mode=False, reasoning_effort="off",
         no_likert_label_map=False, fallback_threshold=0.01, price_in=None, price_out=None, progress_every=1000,
-        repair_rounds=2, max_failed_respondent_share=0.005, keep_file_buckets=False,
+        repair_rounds=2, max_failed_respondent_share=0.005, keep_file_buckets=False, survey_description="drop",
     )
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -418,3 +418,34 @@ def test_bucket_matching_for_consistency_checks() -> None:
     assert run_survey.bucket_for(104999, income_options) == "$100,000–$149,999"
     assert run_survey.bucket_for(40000, income_options) == "Less than $50,000"
     assert run_survey.bucket_for(250000, income_options) == "$200,000 or more"
+
+
+def test_questions_csv_carries_preambles_and_the_manifest_records_the_description_policy(tmp_path: Path, persona_csv: Path, survey) -> None:
+    personas = run_survey.load_personas(persona_csv, limit=None, prompt_variant="full")
+    args = _args(tmp_path, persona_csv)
+    args.out_dir.mkdir(parents=True)
+    manifest = run_survey.run_one(
+        model="stub/model", repeat=1, seed=1, personas=personas, survey=survey, contexts=run_survey.load_contexts(),
+        args=args, client=StubClient(survey), census_lookup={},
+    )
+    assert manifest["status"] == "completed", manifest["guardrails"]
+    assert manifest["survey_description_sent"] is False
+    run_dir = Path(manifest["run_dir"])
+    with open(run_dir / "questions.csv", newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert list(rows[0].keys()) == ["question_id", "question_type", "min_value", "max_value", "options", "text", "preamble"]
+    by_id = {row["question_id"]: row for row in rows}
+    assert "117-square-foot" in by_id["Q1"]["preamble"]
+    assert "Concept 1: Backyard Home Office" in by_id["Q9A"]["preamble"]
+    assert by_id["S3"]["preamble"] == ""
+    prompt_sample = (run_dir / "prompt_sample.txt").read_text(encoding="utf-8")
+    assert '"preamble"' in prompt_sample and "117-square-foot" in prompt_sample
+    assert "What was cut" not in prompt_sample
+    assert survey.description is not None  # the shared fixture was copied, not mutated
+    kept = _args(tmp_path, persona_csv, survey_description="keep", run_tag="keep")
+    manifest_keep = run_survey.run_one(
+        model="stub/model", repeat=1, seed=1, personas=personas, survey=survey, contexts=run_survey.load_contexts(),
+        args=kept, client=StubClient(survey), census_lookup={},
+    )
+    assert manifest_keep["survey_description_sent"] is True
+    assert "What was cut" in (Path(manifest_keep["run_dir"]) / "prompt_sample.txt").read_text(encoding="utf-8")
