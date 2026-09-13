@@ -213,3 +213,59 @@ def test_highmed_preambles_survive_normalization_and_validation(test_settings):
     assert by_id["Q5_1"]["preamble"] == by_id["Q5_2"]["preamble"]
     assert by_id["Q0A"]["preamble"] is None
     assert "---" not in (payload["description"] or "")
+
+
+def _persona(schemas):
+    return schemas.PersonaProfile(
+        persona_id="PERS_001", segment_label="Remote Professionals", fit_tier="strong", age_bucket="30-39",
+        income_bucket="$100k-$149k", ownership="owner", home_type="Single-family", work_mode="remote",
+        likely_use_case="Home office", likely_barrier="Cost",
+    )
+
+
+def _payload(prompt_builder, schemas, questions: list) -> dict:
+    return prompt_builder.build_openrouter_prompt_payload(
+        persona=_persona(schemas), survey_schema=schemas.SurveySchema(survey_title="Preamble Test", questions=questions),
+        business_product_context=None, market_context=None, audience_filter=None,
+    )
+
+
+def _context_json(payload: dict) -> dict:
+    user = payload["messages"][1]["content"]
+    start = user.index("CONTEXT_JSON:\n") + len("CONTEXT_JSON:\n")
+    return json.loads(user[start:user.index("\n\n", start)])
+
+
+def test_preamble_reaches_the_prompt_for_that_question_only(prompt_builder, schemas):
+    payload = _payload(prompt_builder, schemas, [
+        schemas.SurveyQuestion(id="Q1", text="Interest?", question_type="open_text", preamble="The Widget costs $1,000."),
+        schemas.SurveyQuestion(id="Q2", text="Why?", question_type="open_text"),
+    ])
+    questions = {q["id"]: q for q in _context_json(payload)["survey"]["questions"]}
+    assert questions["Q1"]["preamble"] == "The Widget costs $1,000."
+    assert "preamble" not in questions["Q2"]
+    user = payload["messages"][1]["content"]
+    assert prompt_builder.PREAMBLE_INSTRUCTION in user
+    assert "do not answer it" in prompt_builder.PREAMBLE_INSTRUCTION
+    assert user.index(prompt_builder.PREAMBLE_INSTRUCTION) < user.index("Output requirements:")
+    assert payload["temperature"] == 0.2 and payload["max_tokens"] == 1200
+
+
+def test_a_survey_without_preambles_keeps_its_prompt_unchanged(prompt_builder, schemas):
+    payload = _payload(prompt_builder, schemas, [schemas.SurveyQuestion(id="Q1", text="Interest?", question_type="open_text")])
+    assert "preamble" not in payload["messages"][1]["content"]
+    assert set(_context_json(payload)["survey"]["questions"][0]) == {"id", "text", "question_type", "options", "min_value", "max_value", "required"}
+
+
+def test_override_survey_section_lists_the_preamble_under_its_question(schemas):
+    from src.adapters.legacy_backend.domain import _build_prompt_override_sections
+
+    survey = schemas.SurveySchema(survey_title="T", description="Setup notes that must not be sent", questions=[
+        schemas.SurveyQuestion(id="Q1", text="Interest?", question_type="single_choice", options=["Yes", "No"], preamble="Concept 1: Office\nA quiet office."),
+        schemas.SurveyQuestion(id="Q2", text="Why?", question_type="open_text"),
+    ])
+    sections = _build_prompt_override_sections(persona=_persona(schemas), survey_schema=survey, business_product_context=None, market_context=None, audience_filter=None)
+    assert sections["survey_section"] == (
+        "Survey\n- Title: T\n1. Q1 [single_choice] Interest?\n   Preamble: Concept 1: Office\n   A quiet office.\n   Options: Yes, No\n2. Q2 [open_text] Why?"
+    )
+    assert "Setup notes" not in sections["survey_section"]

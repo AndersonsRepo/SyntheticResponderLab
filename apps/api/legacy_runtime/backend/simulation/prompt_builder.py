@@ -7,6 +7,12 @@ from typing import Any
 
 from backend.schemas import AudienceFilter, BusinessProductContext, MarketContext, PersonaProfile, SurveySchema
 
+# Sent only when at least one question carries a preamble, so surveys without one keep their prompt.
+PREAMBLE_INSTRUCTION = (
+	"A question's \"preamble\" is material the respondent read just before that question. "
+	"Read it before answering; do not answer it."
+)
+
 
 def build_openrouter_prompt_payload(
 	*,
@@ -19,17 +25,19 @@ def build_openrouter_prompt_payload(
 	"""Build OpenRouter chat payload for one respondent persona."""
 	survey_questions = []
 	for question in survey_schema.questions:
-		survey_questions.append(
-			{
-				"id": question.id,
-				"text": question.text,
-				"question_type": question.question_type,
-				"options": question.options,
-				"min_value": question.min_value,
-				"max_value": question.max_value,
-				"required": question.required,
-			}
-		)
+		question_payload = {
+			"id": question.id,
+			"text": question.text,
+			"question_type": question.question_type,
+			"options": question.options,
+			"min_value": question.min_value,
+			"max_value": question.max_value,
+			"required": question.required,
+		}
+		if question.preamble:
+			question_payload["preamble"] = question.preamble
+		survey_questions.append(question_payload)
+	has_preamble = any("preamble" in q for q in survey_questions)
 
 	context_bundle = {
 		"persona_profile": persona.model_dump(),
@@ -58,9 +66,11 @@ def build_openrouter_prompt_payload(
 		]
 	}
 
+	preamble_note = f"{PREAMBLE_INSTRUCTION}\n\n" if has_preamble else ""
 	user_instruction = (
 		"Use the following context and produce survey answers.\n\n"
 		f"CONTEXT_JSON:\n{json.dumps(context_bundle, ensure_ascii=False)}\n\n"
+		f"{preamble_note}"
 		"Output requirements:\n"
 		"1) Return one answer per question id.\n"
 		"2) For single_choice, answer must be one listed option exactly.\n"

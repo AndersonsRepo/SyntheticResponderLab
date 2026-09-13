@@ -265,6 +265,9 @@ def _build_prompt_override_sections(
         survey_lines.append(
             f"{index}. {question.id} [{question.question_type}] {question.text}"
         )
+        preamble = getattr(question, "preamble", None)
+        if preamble:
+            survey_lines.append("   Preamble: " + str(preamble).replace("\n", "\n   "))
         options = list(getattr(question, "options", []) or [])
         if options:
             survey_lines.append(f"   Options: {', '.join(str(option) for option in options)}")
