@@ -301,7 +301,7 @@ def _args(tmp_path: Path, persona_csv: Path, **overrides) -> argparse.Namespace:
         max_tokens=4000, temperature=0.2, timeout=5, max_retries=0, concurrency=2, prompt_variant="full",
         provider_order=None, provider_ignore=["DigitalOcean"], no_provider_fallbacks=False, json_mode=False, reasoning_effort="off",
         no_likert_label_map=False, fallback_threshold=0.01, price_in=None, price_out=None, progress_every=1000,
-        repair_rounds=2, max_failed_respondent_share=0.005, keep_file_buckets=False, survey_description="drop",
+        repair_rounds=2, max_failed_respondent_share=0.005, keep_file_buckets=False, survey_description="drop", persona_ids=None,
     )
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -464,3 +464,38 @@ def test_csv_outputs_start_with_bom_and_read_cleanly(tmp_path: Path, persona_csv
             header = csv.DictReader(handle).fieldnames
         assert header[0] in ("run_id", "question_id"), header[0]  # no stray BOM inside the first column name
     assert (args.out_dir / "index.csv").read_bytes()[:3] == b"\xef\xbb\xbf"
+
+
+def test_persona_ids_filter_keeps_file_order_and_rejects_unknown(tmp_path: Path, persona_csv: Path) -> None:
+    ids_file = tmp_path / "panel.txt"
+    ids_file.write_text("# panel\nP003\nP001\n\n", encoding="utf-8")
+    ids = run_survey.read_persona_ids(ids_file)
+    assert ids == ["P003", "P001"]
+    personas = run_survey.load_personas(persona_csv, limit=None, prompt_variant="full", persona_ids=ids)
+    assert [p.persona_id for p in personas] == ["P001", "P003"]  # file order, not list order
+    with pytest.raises(ValueError, match="P999"):
+        run_survey.load_personas(persona_csv, limit=None, prompt_variant="full", persona_ids=["P001", "P999"])
+    (tmp_path / "dup.txt").write_text("P001\nP001\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate"):
+        run_survey.read_persona_ids(tmp_path / "dup.txt")
+
+
+def test_run_id_panel_suffix() -> None:
+    from datetime import datetime, timezone
+    now = datetime(2026, 9, 12, 1, 2, 3, tzinfo=timezone.utc)
+    assert run_survey.make_run_id("qwen/qwen3.7-plus", 1, limit=None, tag="matched", now=now, panel_size=150) == "20260912T010203Z_qwen3.7-plus_r1_p150_matched"
+    assert run_survey.make_run_id("qwen/qwen3.7-plus", 2, limit=5, tag=None, now=now) == "20260912T010203Z_qwen3.7-plus_r2_n5"
+
+
+def test_manifest_records_the_panel_file(tmp_path: Path, persona_csv: Path, survey) -> None:
+    ids_file = tmp_path / "panel.txt"
+    ids_file.write_text("P002\nP003\n", encoding="utf-8")
+    personas = run_survey.load_personas(persona_csv, limit=None, prompt_variant="full", persona_ids=run_survey.read_persona_ids(ids_file))
+    args = _args(tmp_path, persona_csv, persona_ids=ids_file)
+    args.out_dir.mkdir(parents=True)
+    manifest = run_survey.run_one(model="stub/model", repeat=1, seed=1, personas=personas, survey=survey,
+                                  contexts=run_survey.load_contexts(), args=args, client=StubClient(survey), census_lookup={})
+    assert manifest["personas"]["rows_used"] == 2
+    assert manifest["personas"]["persona_ids_file"] == str(ids_file)
+    assert len(manifest["personas"]["persona_ids_sha256"]) == 64
+    assert "_p2" in manifest["run_id"]

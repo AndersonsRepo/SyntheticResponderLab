@@ -338,8 +338,23 @@ def build_persona(row: Dict[str, str], prompt_variant: str, *, recompute_buckets
     return RichPersonaProfile(**fields)
 
 
+def read_persona_ids(path: Path) -> List[str]:
+    """One persona id per line; blank lines and '#' comments are skipped; duplicates are an error."""
+    ids: List[str] = []
+    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            ids.append(line)
+    duplicates = sorted({pid for pid in ids if ids.count(pid) > 1})
+    if duplicates:
+        raise ValueError(f"duplicate persona ids in {path}: {duplicates[:5]}")
+    if not ids:
+        raise ValueError(f"no persona ids in {path}")
+    return ids
+
+
 def load_personas(
-    path: Path, *, limit: Optional[int], prompt_variant: str, recompute_buckets: bool = True
+    path: Path, *, limit: Optional[int], prompt_variant: str, recompute_buckets: bool = True, persona_ids: Optional[List[str]] = None
 ) -> List[RichPersonaProfile]:
     with open(path, newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
@@ -348,6 +363,13 @@ def load_personas(
         if "persona_id" not in header:
             raise ValueError(f"{path} has no persona_id column")
         rows = list(reader)
+    if persona_ids is not None:
+        wanted = set(persona_ids)
+        present = {row["persona_id"] for row in rows}
+        missing = [pid for pid in persona_ids if pid not in present]
+        if missing:
+            raise ValueError(f"persona ids not in {path}: {missing[:5]}")
+        rows = [row for row in rows if row["persona_id"] in wanted]
     if limit is not None:
         rows = rows[: int(limit)]
     LAST_LOAD_STATS["age_bucket_recomputed"] = 0
@@ -414,11 +436,13 @@ def model_slug(model: str) -> str:
     return model.split("/")[-1].replace(":", "-")
 
 
-def make_run_id(model: str, repeat: int, *, limit: Optional[int], tag: Optional[str], now: Optional[datetime] = None) -> str:
+def make_run_id(model: str, repeat: int, *, limit: Optional[int], tag: Optional[str], now: Optional[datetime] = None, panel_size: Optional[int] = None) -> str:
     stamp = (now or utcnow()).strftime("%Y%m%dT%H%M%SZ")
     run_id = f"{stamp}_{model_slug(model)}_r{repeat}"
     if limit is not None:
         run_id += f"_n{limit}"
+    if panel_size is not None:
+        run_id += f"_p{panel_size}"
     if tag:
         run_id += f"_{re.sub(r'[^A-Za-z0-9_-]+', '-', tag)}"
     return run_id
@@ -1141,7 +1165,8 @@ def run_one(
     """Run one model once over all personas. Returns the manifest dict (status completed|failed)."""
     survey = survey_for_prompt(survey, getattr(args, "survey_description", "drop"))
     started = utcnow()
-    run_id = make_run_id(model, repeat, limit=args.limit, tag=args.run_tag, now=started)
+    panel_size = len(personas) if getattr(args, "persona_ids", None) else None
+    run_id = make_run_id(model, repeat, limit=args.limit, tag=args.run_tag, now=started, panel_size=panel_size)
     out_dir = Path(args.out_dir)
     run_dir = out_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
@@ -1178,6 +1203,8 @@ def run_one(
             "sha256": sha256_of_file(Path(args.personas)),
             "rows_used": len(personas),
             "limit": args.limit,
+            "persona_ids_file": str(args.persona_ids) if getattr(args, "persona_ids", None) else None,
+            "persona_ids_sha256": sha256_of_file(Path(args.persona_ids)) if getattr(args, "persona_ids", None) else None,
             "first_id": personas[0].persona_id,
             "last_id": personas[-1].persona_id,
             "buckets_recomputed_from_exact_values": not getattr(args, "keep_file_buckets", False),
@@ -1550,7 +1577,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--survey", type=Path, default=DEFAULT_SURVEY)
     parser.add_argument("--models", nargs="+", default=list(DEFAULT_MODELS))
     parser.add_argument("--repeats", type=int, default=2)
-    parser.add_argument("--limit", type=int, default=None, help="use only the first N personas (smoke test)")
+    subset = parser.add_mutually_exclusive_group()
+    subset.add_argument("--limit", type=int, default=None, help="use only the first N personas (smoke test)")
+    subset.add_argument("--persona-ids", type=Path, default=None, help="file with one persona id per line: run exactly this panel, in file order")
     parser.add_argument("--max-tokens", type=int, default=6000)
     parser.add_argument("--concurrency", type=int, default=int(env_value("SIMULATION_MAX_CONCURRENCY", "8") or 8))
     parser.add_argument("--timeout", type=int, default=240)
@@ -1596,6 +1625,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     args.personas = assert_not_real_data(args.personas, "--personas")
     args.survey = assert_not_real_data(args.survey, "--survey")
     args.out_dir = assert_not_real_data(args.out_dir, "--out-dir")
+    if args.persona_ids:
+        args.persona_ids = assert_not_real_data(args.persona_ids, "--persona-ids")
     args.concurrency = max(1, min(int(args.concurrency), 32))
 
     survey = load_survey(args.survey)
@@ -1607,8 +1638,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         (args.out_dir / "cross_run_summary.md").write_text(text, encoding="utf-8")
         return 0
 
+    persona_ids = read_persona_ids(args.persona_ids) if args.persona_ids else None
     personas = load_personas(
-        args.personas, limit=args.limit, prompt_variant=args.prompt_variant, recompute_buckets=not args.keep_file_buckets
+        args.personas, limit=args.limit, prompt_variant=args.prompt_variant, recompute_buckets=not args.keep_file_buckets, persona_ids=persona_ids
     )
     if LAST_LOAD_STATS["age_bucket_recomputed"] or LAST_LOAD_STATS["income_bucket_recomputed"]:
         print(
