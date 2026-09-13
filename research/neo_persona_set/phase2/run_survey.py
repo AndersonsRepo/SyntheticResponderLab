@@ -418,6 +418,22 @@ def load_contexts() -> Tuple[Any, Any]:
     return presets.get_neo_business_product_defaults(), presets.get_neo_market_defaults()
 
 
+def neutral_contexts(product: Any, market: Any) -> Tuple[Any, Any]:
+    """Product and market facts without the sponsor's research goal, pain points, barriers and objections.
+
+    Those fields tell the respondent what the sponsor expects to hear ("Validate demand, barriers, and
+    strongest positioning"; "Upfront cost"; "Price sensitivity"), which is not something a survey
+    respondent ever sees.
+    """
+    def _strip(model: Any, update: Dict[str, Any]) -> Any:
+        known = getattr(type(model), "model_fields", {})
+        return model.model_copy(update={k: v for k, v in update.items() if k in known})
+
+    product_neutral = _strip(product, {"primary_goal": None, "main_pain_points_solved": [], "main_barriers_or_concerns": [], "notes": None})
+    market_neutral = _strip(market, {"common_objections": [], "notes": None})
+    return product_neutral, market_neutral
+
+
 def build_config(*, run_id: str, survey: Any, personas: List[Any], model: str, notes: str) -> Any:
     return schemas.SimulationRunConfig(
         run_id=run_id,
@@ -1183,6 +1199,8 @@ def run_one(
     run_dir = out_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     product, market = contexts
+    if getattr(args, "no_sponsor_context", False):
+        product, market = neutral_contexts(product, market)
     price_in, price_out, price_source = price_for(model, args.price_in, args.price_out)
     git = git_info()
 
@@ -1224,7 +1242,7 @@ def run_one(
             "age_bucket_recomputed_rows": LAST_LOAD_STATS.get("age_bucket_recomputed", 0),
             "income_bucket_recomputed_rows": LAST_LOAD_STATS.get("income_bucket_recomputed", 0),
         },
-        "context": {"business_product": "backend.presets.get_neo_business_product_defaults", "market": "backend.presets.get_neo_market_defaults", "audience_filter": None, "context_sha256": sha256_of_text(json.dumps({"product": product.model_dump(), "market": market.model_dump()}, sort_keys=True, default=str))},
+        "context": {"business_product": "backend.presets.get_neo_business_product_defaults", "market": "backend.presets.get_neo_market_defaults", "audience_filter": None, "sponsor_context_removed": bool(getattr(args, "no_sponsor_context", False)), "context_sha256": sha256_of_text(json.dumps({"product": product.model_dump(), "market": market.model_dump()}, sort_keys=True, default=str))},
         "generation_debug": None,
         "counts": None,
         "tokens": None,
@@ -1473,6 +1491,8 @@ def run_one(
 def dry_run(*, personas: List[Any], survey: Any, contexts: Tuple[Any, Any], args: argparse.Namespace) -> int:
     survey = survey_for_prompt(survey, getattr(args, "survey_description", "drop"))
     product, market = contexts
+    if getattr(args, "no_sponsor_context", False):
+        product, market = neutral_contexts(product, market)
     builder = TaggingPromptBuilder(prompt_builder, max_tokens=args.max_tokens, temperature=args.temperature)
     payload = builder.build_openrouter_prompt_payload(
         persona=personas[0], survey_schema=survey, business_product_context=product, market_context=market, audience_filter=None
@@ -1613,6 +1633,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--price-in", type=float, default=None, help="USD per million input tokens (override)")
     parser.add_argument("--price-out", type=float, default=None, help="USD per million output tokens (override)")
     parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--no-sponsor-context", action="store_true", help="drop the sponsor's goal, pain points, barriers and objections from the prompt")
     parser.add_argument("--temperature-jitter", type=float, default=0.0, help="vary temperature per persona by ±F around --temperature (deterministic per seed)")
     parser.add_argument("--seed-base", type=int, default=DEFAULT_SEED_BASE, help="seed = seed_base*10 + repeat")
     parser.add_argument("--prompt-variant", choices=PROMPT_VARIANTS, default="full")

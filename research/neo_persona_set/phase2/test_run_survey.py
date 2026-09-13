@@ -302,7 +302,7 @@ def _args(tmp_path: Path, persona_csv: Path, **overrides) -> argparse.Namespace:
         provider_order=None, provider_ignore=["DigitalOcean"], no_provider_fallbacks=False, json_mode=False, reasoning_effort="off",
         no_likert_label_map=False, fallback_threshold=0.01, price_in=None, price_out=None, progress_every=1000,
         repair_rounds=2, max_failed_respondent_share=0.005, keep_file_buckets=False, survey_description="drop", persona_ids=None,
-        temperature_jitter=0.0,
+        temperature_jitter=0.0, no_sponsor_context=False,
     )
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -513,3 +513,17 @@ def test_temperature_jitter_is_per_persona_and_deterministic(survey, persona_csv
     plain = run_survey.TaggingPromptBuilder(run_survey.prompt_builder, max_tokens=4000, temperature=0.2)
     assert plain.build_openrouter_prompt_payload(persona=personas[0], survey_schema=survey, business_product_context=product, market_context=market, audience_filter=None)["temperature"] == 0.2
     assert run_survey.persona_temperature(1.4, 0.3, 1, "P001") <= 1.5 and run_survey.persona_temperature(0.1, 0.3, 1, "P001") >= 0.0
+
+
+def test_no_sponsor_context_removes_goal_and_objections(tmp_path: Path, persona_csv: Path, survey) -> None:
+    product, market = run_survey.neutral_contexts(*run_survey.load_contexts())
+    assert product.primary_goal is None and product.main_barriers_or_concerns == [] and market.common_objections == []
+    assert product.product_name == "Tahoe Mini" and product.price_range
+    personas = run_survey.load_personas(persona_csv, limit=None, prompt_variant="full")
+    args = _args(tmp_path, persona_csv, no_sponsor_context=True)
+    args.out_dir.mkdir(parents=True)
+    manifest = run_survey.run_one(model="stub/model", repeat=1, seed=1, personas=personas, survey=survey, contexts=run_survey.load_contexts(),
+                                  args=args, client=StubClient(survey), census_lookup={})
+    sample = (Path(manifest["run_dir"]) / "prompt_sample.txt").read_text(encoding="utf-8")
+    assert "Validate demand" not in sample and "Price sensitivity" not in sample and "Tahoe Mini" in sample
+    assert manifest["context"]["sponsor_context_removed"] is True
