@@ -29,6 +29,18 @@ _MULTI_SELECT_PATTERNS = [
 	re.compile(r"check\s+all\s+that\s+apply", re.IGNORECASE),
 ]
 
+# A markdown horizontal rule. It separates sections and says nothing to the respondent.
+_HORIZONTAL_RULE = re.compile(r"[-*_]{3,}")
+
+# Headings that address the researcher, not the respondent. `### Concept 1: ...` is kept.
+_RESEARCHER_HEADING_PREFIXES = ("Section ", "Survey Setup", "Closing", "RQ Coverage")
+
+# `[Product image]`, `*[Fallback link ...]*`, `**[Respondents read the following ...]**`.
+_BRACKETED_LINE = re.compile(r"[*_]*\[[^\]]*\][*_]*")
+
+# `**[Instructions to respondent:]** *text*`: the label goes, the text is what was read.
+_BRACKET_LABEL_PREFIX = re.compile(r"^[*_]*\[[^\]]*\][*_]*\s*")
+
 
 from backend.survey.pdf_form_parser import reconstruct_google_forms_export
 
@@ -116,6 +128,10 @@ def parse_text_to_raw_payload(text: str, source_format: str) -> Dict[str, Any]:
 	pending_table_labels: Optional[List[str]] = None
 	# Track matrix rows (barrier-style tables).
 	pending_matrix_rows: List[Dict[str, Any]] = []
+	# Prose read since the last question: it is what the respondent saw before the next one.
+	pending_preamble: List[str] = []
+	# Only markdown carries trustworthy prose; DOCX/PDF text arrives flat, table cells included.
+	keep_prose = str(source_format or "").lower() == "md"
 
 	for raw_line in lines:
 		line = raw_line.strip()
@@ -140,12 +156,14 @@ def parse_text_to_raw_payload(text: str, source_format: str) -> Dict[str, Any]:
 				"min_value": None,
 				"max_value": None,
 				"help_text": None,
+				"preamble": "\n".join(pending_preamble) or None,
 			}
+			pending_preamble = []
 			continue
 
 		# Capture description text before first question.
 		if current_question is None:
-			if not line.startswith("#"):
+			if not line.startswith("#") and not _HORIZONTAL_RULE.fullmatch(line):
 				description_lines.append(line)
 			continue
 
@@ -213,8 +231,11 @@ def parse_text_to_raw_payload(text: str, source_format: str) -> Dict[str, Any]:
 				pending_table_labels = labels
 				continue
 
-		# Skip other lines (blockquotes, headings, prose, etc.).
-		continue
+		# Anything else is prose the respondent read before the next question.
+		if keep_prose:
+			cleaned = _clean_preamble_line(line)
+			if cleaned is not None:
+				pending_preamble.append(cleaned)
 
 	# Flush any remaining question + matrix rows.
 	if current_question is not None:
@@ -306,12 +327,36 @@ def _flush_matrix_rows(
 			"min_value": min_value,
 			"max_value": max_value,
 			"help_text": parent_question.get("help_text"),
+			"preamble": parent_question.get("preamble"),
 		}
 		questions.append(sub_question)
 
 	parse_warnings.append(
 		f"Expanded matrix question {parent_id} into {len(matrix_rows)} sub-questions ({parent_id}_1 .. {parent_id}_{len(matrix_rows)})."
 	)
+
+
+def _clean_preamble_line(line: str) -> Optional[str]:
+	"""Return what a respondent read on a non-question line, or None if it carried nothing."""
+	text = line.strip()
+	if not text or _HORIZONTAL_RULE.fullmatch(text):
+		return None
+	if text.startswith("|") and text.endswith("|"):
+		return None
+	if text.startswith("#"):
+		heading = text.lstrip("#").strip().replace("**", "").strip()
+		if not heading or "(RQ" in heading or heading.startswith(_RESEARCHER_HEADING_PREFIXES):
+			return None
+		return heading
+	if text.startswith(">"):
+		text = text.lstrip(">").strip()
+	if _BRACKETED_LINE.fullmatch(text):
+		return None
+	text = _BRACKET_LABEL_PREFIX.sub("", text, count=1)
+	text = text.replace("**", "").strip()
+	if len(text) >= 2 and text.startswith("*") and text.endswith("*"):
+		text = text[1:-1].strip()
+	return text or None
 
 
 def _match_question_start(line: str) -> Optional[tuple[Optional[str], str]]:
