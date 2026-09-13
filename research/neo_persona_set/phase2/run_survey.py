@@ -1445,6 +1445,9 @@ def run_one(
         def key(pid: str) -> str:
             return f"{pid}#c{k}" if chunked else pid
 
+        def log_entry(**fields: Any) -> Dict[str, Any]:
+            return {**fields, "chunk": k} if chunked else dict(fields)
+
         config = build_config(run_id=run_id, survey=survey_chunk, personas=personas, model=model, notes="research/neo_persona_set phase2 headless run")
         chunk_records, chunk_debug, chunk_flags = _batch(personas, config, survey_chunk)
 
@@ -1465,7 +1468,7 @@ def run_one(
                     subset, build_config(run_id=run_id, survey=survey_chunk, personas=subset, model=model, notes=f"repair round {round_no}"), survey_chunk
                 )
             except ApiError as exc:
-                repair_log.append({"round": round_no, "chunk": k, "personas": len(subset), "improved": 0, "error": f"{type(exc).__name__}: {exc}"})
+                repair_log.append(log_entry(round=round_no, personas=len(subset), improved=0, error=f"{type(exc).__name__}: {exc}"))
                 print(f"  repair round {round_no} stopped by provider: {exc}", file=sys.stderr)
                 break
             finally:
@@ -1484,7 +1487,7 @@ def run_one(
                     improved += 1
                 elif snapshot.get(personas[i].persona_id) is not None:
                     captures[key(personas[i].persona_id)] = snapshot[personas[i].persona_id]
-            repair_log.append({"round": round_no, "chunk": k, "personas": len(subset), "improved": improved, "persona_ids": [p.persona_id for p in subset][:100]})
+            repair_log.append(log_entry(round=round_no, personas=len(subset), improved=improved, persona_ids=[p.persona_id for p in subset][:100]))
             print(f"  repair round {round_no}: {improved}/{len(subset)} improved", flush=True)
         return chunk_records, chunk_flags, chunk_debug
 
