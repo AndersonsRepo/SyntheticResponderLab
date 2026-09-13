@@ -176,3 +176,40 @@ def test_highmed_stimulus_and_concepts_attach_to_their_questions(parser):
     assert with_preamble == {"Q1", "Q9A", "Q10A", "Q11A", "Q12A", "Q13A", "Q15"}
     assert "---" not in payload["description"]
     assert "Target population" in payload["description"]
+
+
+def _raw(questions: list) -> dict:
+    return {"survey_title": "Upload", "source_format": "md", "parse_warnings": [], "questions": questions}
+
+
+def test_normalizer_passes_the_preamble_through(normalizer):
+    schema = normalizer.normalize_survey_payload(_raw([
+        {"id": "Q1", "text": "Interest?", "question_type": "open_text", "preamble": "  The Widget costs $1,000.  "},
+        {"id": "Q2", "text": "Why?", "question_type": "open_text"},
+    ]))
+    assert schema.questions[0].preamble == "The Widget costs $1,000."
+    assert schema.questions[1].preamble is None
+    assert schema.questions[0].model_dump()["preamble"] == "The Widget costs $1,000."
+
+
+def test_a_blank_preamble_normalizes_to_none(normalizer):
+    schema = normalizer.normalize_survey_payload(_raw([{"id": "Q1", "text": "Interest?", "question_type": "open_text", "preamble": "   "}]))
+    assert schema.questions[0].preamble is None
+
+
+def test_a_question_dict_without_the_key_still_validates(schemas):
+    assert schemas.SurveyQuestion(id="Q1", text="Interest?", question_type="open_text").preamble is None
+
+
+def test_highmed_preambles_survive_normalization_and_validation(test_settings):
+    from src.adapters.legacy_backend.domain import parse_normalize_validate_survey
+
+    payload = parse_normalize_validate_survey(_HIGHMED.name, _HIGHMED.read_bytes(), test_settings.legacy_app_root)
+    by_id = {q["id"]: q for q in payload["questions"]}
+    assert len(by_id) == 39
+    assert "117-square-foot" in by_id["Q1"]["preamble"] and "$23,000" in by_id["Q1"]["preamble"]
+    assert "Concept 1: Backyard Home Office" in by_id["Q9A"]["preamble"].split("\n")
+    assert "Guest Suite" in by_id["Q10A"]["preamble"]
+    assert by_id["Q5_1"]["preamble"] == by_id["Q5_2"]["preamble"]
+    assert by_id["Q0A"]["preamble"] is None
+    assert "---" not in (payload["description"] or "")

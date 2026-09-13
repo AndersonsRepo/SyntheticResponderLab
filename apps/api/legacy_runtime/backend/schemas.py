@@ -336,8 +336,10 @@ class SurveyQuestion(BaseModel):
     min_value: Optional[int] = None
     max_value: Optional[int] = None
     help_text: Optional[str] = None
+    # What the respondent read just before this question: stimulus, concept copy, instructions.
+    preamble: Optional[str] = None
 
-    @field_validator("id", "text", "help_text", mode="before")
+    @field_validator("id", "text", "help_text", "preamble", mode="before")
     @classmethod
     def _strip_text_fields(cls, value: Optional[str]) -> Optional[str]:
         """Trim whitespace for text-like fields."""
