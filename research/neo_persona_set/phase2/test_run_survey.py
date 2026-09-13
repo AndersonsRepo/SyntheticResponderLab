@@ -302,6 +302,7 @@ def _args(tmp_path: Path, persona_csv: Path, **overrides) -> argparse.Namespace:
         provider_order=None, provider_ignore=["DigitalOcean"], no_provider_fallbacks=False, json_mode=False, reasoning_effort="off",
         no_likert_label_map=False, fallback_threshold=0.01, price_in=None, price_out=None, progress_every=1000,
         repair_rounds=2, max_failed_respondent_share=0.005, keep_file_buckets=False, survey_description="drop", persona_ids=None,
+        temperature_jitter=0.0,
     )
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -499,3 +500,16 @@ def test_manifest_records_the_panel_file(tmp_path: Path, persona_csv: Path, surv
     assert manifest["personas"]["persona_ids_file"] == str(ids_file)
     assert len(manifest["personas"]["persona_ids_sha256"]) == 64
     assert "_p2" in manifest["run_id"]
+
+
+def test_temperature_jitter_is_per_persona_and_deterministic(survey, persona_csv: Path) -> None:
+    personas = run_survey.load_personas(persona_csv, limit=None, prompt_variant="full")
+    product, market = run_survey.load_contexts()
+    builder = run_survey.TaggingPromptBuilder(run_survey.prompt_builder, max_tokens=4000, temperature=0.2, jitter=0.3, seed=202609091)
+    temps = [builder.build_openrouter_prompt_payload(persona=p, survey_schema=survey, business_product_context=product, market_context=market, audience_filter=None)["temperature"] for p in personas]
+    assert len(set(temps)) > 1 and all(0.0 <= t <= 0.5 for t in temps)
+    again = run_survey.TaggingPromptBuilder(run_survey.prompt_builder, max_tokens=4000, temperature=0.2, jitter=0.3, seed=202609091)
+    assert temps == [again.build_openrouter_prompt_payload(persona=p, survey_schema=survey, business_product_context=product, market_context=market, audience_filter=None)["temperature"] for p in personas]
+    plain = run_survey.TaggingPromptBuilder(run_survey.prompt_builder, max_tokens=4000, temperature=0.2)
+    assert plain.build_openrouter_prompt_payload(persona=personas[0], survey_schema=survey, business_product_context=product, market_context=market, audience_filter=None)["temperature"] == 0.2
+    assert run_survey.persona_temperature(1.4, 0.3, 1, "P001") <= 1.5 and run_survey.persona_temperature(0.1, 0.3, 1, "P001") >= 0.0

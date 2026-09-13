@@ -453,19 +453,30 @@ def make_run_id(model: str, repeat: int, *, limit: Optional[int], tag: Optional[
 # ---------------------------------------------------------------------------
 
 
+def persona_temperature(base: float, jitter: float, seed: Optional[int], persona_id: str) -> float:
+    """Deterministic per-persona temperature in [base - jitter, base + jitter], clipped to [0, 1.5]."""
+    if jitter <= 0:
+        return float(base)
+    rng = random.Random(f"{seed}:{persona_id}")
+    return round(min(1.5, max(0.0, base + rng.uniform(-jitter, jitter))), 3)
+
+
 class TaggingPromptBuilder:
     """Wraps the engine's prompt builder: same prompt, larger answer budget, persona tag."""
 
-    def __init__(self, original: Any, *, max_tokens: int, temperature: float) -> None:
+    def __init__(self, original: Any, *, max_tokens: int, temperature: float, jitter: float = 0.0, seed: Optional[int] = None) -> None:
         self._original = original
         self.max_tokens = int(max_tokens)
         self.temperature = float(temperature)
+        self.jitter = float(jitter)
+        self.seed = seed
 
     def build_openrouter_prompt_payload(self, **kwargs: Any) -> Dict[str, Any]:
         payload = self._original.build_openrouter_prompt_payload(**kwargs)
+        persona_id = getattr(kwargs.get("persona"), "persona_id", None)
         payload["max_tokens"] = self.max_tokens
-        payload["temperature"] = self.temperature
-        payload["_persona_id"] = getattr(kwargs.get("persona"), "persona_id", None)
+        payload["temperature"] = persona_temperature(self.temperature, self.jitter, self.seed, str(persona_id))
+        payload["_persona_id"] = persona_id
         return payload
 
 
@@ -658,6 +669,7 @@ class OpenRouterClient:
             "provider": None,
             "generation_id": None,
             "seed": self.seed,
+            "temperature": prompt_payload.get("temperature"),
             "repair_round": self.current_round,
             "status_code": None,
             "attempts": 0,
@@ -1189,6 +1201,7 @@ def run_one(
         "reasoning_effort": args.reasoning_effort,
         "seed": seed,
         "temperature": args.temperature,
+        "temperature_jitter": float(getattr(args, "temperature_jitter", 0.0) or 0.0),
         "max_tokens": args.max_tokens,
         "timeout_sec": args.timeout,
         "max_retries": args.max_retries,
@@ -1223,7 +1236,10 @@ def run_one(
     }
     write_json(run_dir / "manifest.json", manifest)
 
-    builder = TaggingPromptBuilder(prompt_builder, max_tokens=args.max_tokens, temperature=args.temperature)
+    builder = TaggingPromptBuilder(
+        prompt_builder, max_tokens=args.max_tokens, temperature=args.temperature,
+        jitter=float(getattr(args, "temperature_jitter", 0.0) or 0.0), seed=seed,
+    )
     manager = CoercingRunManager(run_manager, enabled=not args.no_likert_label_map, question_ids=[q.id for q in survey.questions])
     if client is None:
         client = OpenRouterClient(
@@ -1597,6 +1613,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--price-in", type=float, default=None, help="USD per million input tokens (override)")
     parser.add_argument("--price-out", type=float, default=None, help="USD per million output tokens (override)")
     parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--temperature-jitter", type=float, default=0.0, help="vary temperature per persona by ±F around --temperature (deterministic per seed)")
     parser.add_argument("--seed-base", type=int, default=DEFAULT_SEED_BASE, help="seed = seed_base*10 + repeat")
     parser.add_argument("--prompt-variant", choices=PROMPT_VARIANTS, default="full")
     parser.add_argument("--survey-description", choices=("keep", "drop"), default="drop",
