@@ -102,3 +102,20 @@ apps/api/.venv/bin/python -m pytest research/neo_persona_set/phase2 -q
 ```
 
 The tests stub OpenRouter; they never call the network.
+
+## Experiment switches (added 2026-09-12; all default to off, so earlier runs stay reproducible)
+
+| Flag | What it changes | Recorded in the manifest as |
+| --- | --- | --- |
+| `--survey-description keep\|drop` | whether the "Survey Setup" block before the first question (target population, what was cut) is sent; default `drop` | `survey_description_sent` |
+| `--persona-ids FILE` | run exactly the personas listed in FILE (one id per line, from `phase3/select_panel.py`); run id gets `_p<N>` | `personas.persona_ids_file`, `personas.persona_ids_sha256` |
+| `--temperature-jitter F` | a different temperature per persona, uniform in ±F around `--temperature`, deterministic per seed | `temperature_jitter`; each capture carries `temperature` |
+| `--no-sponsor-context` | drops the sponsor's goal, pain points, barriers and objections from the prompt | `context.sponsor_context_removed` |
+| `--trait-mix skeptical:0.3,...` | gives a seeded share of personas a response style (`skeptical`, `enthusiastic`, `indifferent`, `pragmatic`); `answers_wide.csv` gains a `trait` column | `trait_mix`, `trait_counts` |
+| `--reason-per-answer` | asks for a one-sentence reason with every answer (max_tokens raised to 9000); `answers_long.csv` gains a `reason` column | `reason_per_answer`, `counts.answers_with_reason` |
+| `--questions-per-call N` | sends the survey in slices of N questions per call; answers are stitched back per persona, `raw_responses.jsonl` keeps every slice under `chunks` | `questions_per_call`, `calls_per_persona` |
+
+Each question's `preamble` (the product stimulus before Q1, the concept copy before Q9A..Q13A, the
+value-driver text before Q15) travels with its question, so with `--questions-per-call` later slices
+still carry their own stimulus; the product facts otherwise reach them only through the product
+context. `questions.csv` has a `preamble` column; `--dry-run` prints the Q1 and Q9A preambles.

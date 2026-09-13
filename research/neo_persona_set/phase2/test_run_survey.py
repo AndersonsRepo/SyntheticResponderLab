@@ -273,6 +273,7 @@ class StubClient:
         self.survey = survey
         self.reasons = reasons
         self.captures = {}
+        self.current_chunk = None
         self.stats = Counter()
         self.usd_reported = 0.0
 
@@ -292,7 +293,8 @@ class StubClient:
             raw = json.dumps({"answers": [{"question_id": qid, "answer": value, "reason": f"because {qid}"} for qid, value in answers.items()]})
         else:
             raw = json.dumps({"answers": answers})
-        self.captures[pid] = {"persona_id": pid, "model_served": model_name, "provider": "stub", "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": None}, "raw_text": raw, "parsed_ok": True, "finish_reason": "stop"}
+        key = pid if self.current_chunk is None else f"{pid}#c{self.current_chunk}"
+        self.captures[key] = {"persona_id": pid, "model_served": model_name, "provider": "stub", "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": None}, "raw_text": raw, "parsed_ok": True, "finish_reason": "stop"}
         self.stats["calls"] += 1
         self.stats["prompt_tokens"] += 10
         self.stats["completion_tokens"] += 5
@@ -306,7 +308,7 @@ def _args(tmp_path: Path, persona_csv: Path, **overrides) -> argparse.Namespace:
         provider_order=None, provider_ignore=["DigitalOcean"], no_provider_fallbacks=False, json_mode=False, reasoning_effort="off",
         no_likert_label_map=False, fallback_threshold=0.01, price_in=None, price_out=None, progress_every=1000,
         repair_rounds=2, max_failed_respondent_share=0.005, keep_file_buckets=False, survey_description="drop", persona_ids=None,
-        temperature_jitter=0.0, no_sponsor_context=False, trait_mix=None, reason_per_answer=False,
+        temperature_jitter=0.0, no_sponsor_context=False, trait_mix=None, reason_per_answer=False, questions_per_call=0,
     )
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -570,3 +572,22 @@ def test_reason_per_answer_is_requested_and_captured(tmp_path: Path, persona_csv
     with open(Path(manifest["run_dir"]) / "answers_long.csv", newline="", encoding="utf-8-sig") as handle:
         rows = list(csv.DictReader(handle))
     assert rows[0]["reason"] == "because S3"
+
+
+def test_questions_per_call_splits_the_survey_and_stitches_answers(tmp_path: Path, persona_csv: Path, survey) -> None:
+    chunks = run_survey.chunk_questions(survey, 10)
+    assert [len(c.questions) for c in chunks] == [10, 10, 10, 9] and chunks[0].questions[0].id == "S3" and chunks[-1].questions[-1].id == "Q30"
+    assert run_survey.chunk_questions(survey, 0) == [survey]
+    personas = run_survey.load_personas(persona_csv, limit=None, prompt_variant="full")
+    args = _args(tmp_path, persona_csv, questions_per_call=10)
+    args.out_dir.mkdir(parents=True)
+    client = StubClient(survey)
+    manifest = run_survey.run_one(model="stub/model", repeat=1, seed=1, personas=personas, survey=survey, contexts=run_survey.load_contexts(),
+                                  args=args, client=client, census_lookup={})
+    assert manifest["status"] == "completed" and manifest["questions_per_call"] == 10 and manifest["calls_per_persona"] == 4
+    assert client.stats["calls"] == 3 * 4 and manifest["counts"]["answers"] == 117 and manifest["counts"]["fallback_answers"] == 0
+    with open(Path(manifest["run_dir"]) / "answers_wide.csv", newline="", encoding="utf-8-sig") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [r["persona_id"] for r in rows] == ["P001", "P002", "P003"] and rows[0]["Q30"] == "Moderately interested"
+    raw = [json.loads(line) for line in open(Path(manifest["run_dir"]) / "raw_responses.jsonl", encoding="utf-8")]
+    assert len(raw) == 3 and len(raw[0]["chunks"]) == 4 and raw[0]["parsed_ok"] is True

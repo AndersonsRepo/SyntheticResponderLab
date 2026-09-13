@@ -418,6 +418,38 @@ def survey_for_prompt(survey: Any, description_policy: str) -> Any:
     return survey.model_copy(update={"description": None})
 
 
+def chunk_questions(survey: Any, per_call: int) -> List[Any]:
+    """Contiguous slices of the survey in question order; per_call <= 0 keeps the whole survey in one call."""
+    if per_call <= 0:
+        return [survey]
+    questions = list(survey.questions)
+    return [survey.model_copy(update={"questions": questions[i : i + per_call]}) for i in range(0, len(questions), per_call)]
+
+
+def merge_chunk_captures(captures: Dict[str, Dict[str, Any]], persona_ids: List[str], n_chunks: int) -> Dict[str, Dict[str, Any]]:
+    """Fold '<pid>#c<k>' captures into one capture per persona, keeping the per-chunk records under 'chunks'."""
+    merged: Dict[str, Dict[str, Any]] = {}
+    for pid in persona_ids:
+        parts = [captures.get(f"{pid}#c{k}") for k in range(n_chunks)]
+        parts = [p for p in parts if p is not None]
+        if not parts:
+            continue
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0}
+        for part in parts:
+            for key in usage:
+                value = (part.get("usage") or {}).get(key)
+                if isinstance(value, (int, float)):
+                    usage[key] += value
+        merged[pid] = {
+            "persona_id": pid, "chunks": parts, "parsed_ok": all(p.get("parsed_ok") for p in parts),
+            "attempts": sum(int(p.get("attempts") or 0) for p in parts), "provider": parts[0].get("provider"),
+            "model_served": parts[0].get("model_served"), "status_code": parts[-1].get("status_code"),
+            "finish_reason": parts[-1].get("finish_reason"), "usage": usage, "error": next((p.get("error") for p in parts if p.get("error")), None),
+            "raw_text": "\n---\n".join(str(p.get("raw_text") or "") for p in parts), "repair_round": max(int(p.get("repair_round") or 0) for p in parts),
+        }
+    return merged
+
+
 def load_contexts() -> Tuple[Any, Any]:
     return presets.get_neo_business_product_defaults(), presets.get_neo_market_defaults()
 
@@ -693,6 +725,7 @@ class OpenRouterClient:
         self.progress_every = max(1, int(progress_every))
         self.total = total
         self.captures: Dict[str, Dict[str, Any]] = {}
+        self.current_chunk: Optional[int] = None  # set by run_one under --questions-per-call; captures then keyed "<pid>#c<k>"
         self.stats: Counter = Counter()
         self._lock = threading.Lock()
         self._started = time.monotonic()
@@ -854,7 +887,8 @@ class OpenRouterClient:
 
     def _record(self, capture: Dict[str, Any], result: Dict[str, Any]) -> None:
         with self._lock:
-            self.captures[capture["persona_id"]] = capture
+            key = capture["persona_id"] if self.current_chunk is None else f"{capture['persona_id']}#c{self.current_chunk}"
+            self.captures[key] = capture
             self.stats["calls"] += 1
             if result["ok"]:
                 self.stats["ok"] += 1
@@ -1294,6 +1328,8 @@ def run_one(
     for persona in personas:  # reset when no mix, so a persona list shared across runs never leaks a trait
         persona.trait = traits.get(persona.persona_id)
         persona.response_style = TRAITS[persona.trait] if persona.trait else None
+    per_call = int(getattr(args, "questions_per_call", 0) or 0)
+    chunks = chunk_questions(survey, per_call)
 
     manifest: Dict[str, Any] = {
         "run_id": run_id,
@@ -1314,6 +1350,8 @@ def run_one(
         "trait_mix": getattr(args, "trait_mix", None) or None,
         "trait_counts": dict(Counter(traits.values())),
         "reason_per_answer": bool(getattr(args, "reason_per_answer", False)),
+        "questions_per_call": per_call,
+        "calls_per_persona": len(chunks),
         "max_tokens": args.max_tokens,
         "timeout_sec": args.timeout,
         "max_retries": args.max_retries,
@@ -1368,12 +1406,11 @@ def run_one(
             progress_every=args.progress_every,
             total=len(personas),
         )
-    config = build_config(run_id=run_id, survey=survey, personas=personas, model=model, notes="research/neo_persona_set phase2 headless run")
     prompt_sample = builder.build_openrouter_prompt_payload(
-        persona=personas[0], survey_schema=survey, business_product_context=product, market_context=market, audience_filter=None
+        persona=personas[0], survey_schema=chunks[0], business_product_context=product, market_context=market, audience_filter=None
     )
 
-    print(f"\n=== {run_id}: {len(personas)} personas x {len(survey.questions)} questions on {model} (seed={seed}, concurrency={args.concurrency}) ===", flush=True)
+    print(f"\n=== {run_id}: {len(personas)} personas x {len(survey.questions)} questions on {model} (seed={seed}, concurrency={args.concurrency}, calls per persona={len(chunks)}) ===", flush=True)
     status = "failed"
     exit_code = 2
     records: List[Any] = []
@@ -1382,14 +1419,14 @@ def run_one(
     repair_log: List[Dict[str, Any]] = []
     question_count = len(survey.questions)
 
-    def _batch(subset: List[Any], batch_config: Any) -> Tuple[List[Any], Dict[str, Any], List[bool]]:
+    def _batch(subset: List[Any], batch_config: Any, survey_chunk: Any) -> Tuple[List[Any], Dict[str, Any], List[bool]]:
         return domain._generate_live_response_records_with_debug(
             schemas=schemas,
             run_manager=manager,
             llm_client=client,
             prompt_builder=builder,
             config=batch_config,
-            survey_schema=survey,
+            survey_schema=survey_chunk,
             audience_filter=None,
             persona_profiles=subset,
             business_product_context=product,
@@ -1399,45 +1436,75 @@ def run_one(
             max_concurrency=args.concurrency,
         )
 
-    try:
-        records, generation_debug, record_is_fallback = _batch(personas, config)
+    def _run_chunk(k: int, survey_chunk: Any) -> Tuple[List[Any], List[bool], Dict[str, Any]]:
+        """Main batch plus repair rounds for one slice of the survey. Returns (records, flags, debug)."""
+        chunk_count = len(survey_chunk.questions)
+        chunked = len(chunks) > 1
+        setattr(client, "current_chunk", k if chunked else None)
+
+        def key(pid: str) -> str:
+            return f"{pid}#c{k}" if chunked else pid
+
+        config = build_config(run_id=run_id, survey=survey_chunk, personas=personas, model=model, notes="research/neo_persona_set phase2 headless run")
+        chunk_records, chunk_debug, chunk_flags = _batch(personas, config, survey_chunk)
 
         # Repair rounds: re-ask only the personas that ended up with any fabricated answer, and keep
         # the attempt with the fewest. A persona whose repair is not better keeps its first answers
         # and its first capture, so the audit trail matches the data.
         for round_no in range(1, int(getattr(args, "repair_rounds", 0) or 0) + 1):
-            bad = [i for i in range(len(personas)) if any(record_is_fallback[i * question_count : (i + 1) * question_count])]
+            bad = [i for i in range(len(personas)) if any(chunk_flags[i * chunk_count : (i + 1) * chunk_count])]
             if not bad:
                 break
             subset = [personas[i] for i in bad]
             print(f"  repair round {round_no}: re-asking {len(subset)} persona(s) with fabricated answers", flush=True)
             captures = getattr(client, "captures", {})
-            snapshot = {p.persona_id: captures.get(p.persona_id) for p in subset}
+            snapshot = {p.persona_id: captures.get(key(p.persona_id)) for p in subset}
             setattr(client, "current_round", round_no)
             try:
-                sub_records, _sub_debug, sub_flags = _batch(subset, build_config(run_id=run_id, survey=survey, personas=subset, model=model, notes=f"repair round {round_no}"))
+                sub_records, _sub_debug, sub_flags = _batch(
+                    subset, build_config(run_id=run_id, survey=survey_chunk, personas=subset, model=model, notes=f"repair round {round_no}"), survey_chunk
+                )
             except ApiError as exc:
-                repair_log.append({"round": round_no, "personas": len(subset), "improved": 0, "error": f"{type(exc).__name__}: {exc}"})
+                repair_log.append({"round": round_no, "chunk": k, "personas": len(subset), "improved": 0, "error": f"{type(exc).__name__}: {exc}"})
                 print(f"  repair round {round_no} stopped by provider: {exc}", file=sys.stderr)
                 break
             finally:
                 setattr(client, "current_round", 0)
             improved = 0
             for j, i in enumerate(bad):
-                new_flags = sub_flags[j * question_count : (j + 1) * question_count]
-                old_flags = record_is_fallback[i * question_count : (i + 1) * question_count]
+                new_flags = sub_flags[j * chunk_count : (j + 1) * chunk_count]
+                old_flags = chunk_flags[i * chunk_count : (i + 1) * chunk_count]
                 if sum(new_flags) < sum(old_flags):
-                    original_respondent_id = records[i * question_count].respondent_id
-                    records[i * question_count : (i + 1) * question_count] = [
+                    original_respondent_id = chunk_records[i * chunk_count].respondent_id
+                    chunk_records[i * chunk_count : (i + 1) * chunk_count] = [
                         r.model_copy(update={"respondent_id": original_respondent_id, "run_id": run_id})
-                        for r in sub_records[j * question_count : (j + 1) * question_count]
+                        for r in sub_records[j * chunk_count : (j + 1) * chunk_count]
                     ]
-                    record_is_fallback[i * question_count : (i + 1) * question_count] = new_flags
+                    chunk_flags[i * chunk_count : (i + 1) * chunk_count] = new_flags
                     improved += 1
                 elif snapshot.get(personas[i].persona_id) is not None:
-                    captures[personas[i].persona_id] = snapshot[personas[i].persona_id]
-            repair_log.append({"round": round_no, "personas": len(subset), "improved": improved, "persona_ids": [p.persona_id for p in subset][:100]})
+                    captures[key(personas[i].persona_id)] = snapshot[personas[i].persona_id]
+            repair_log.append({"round": round_no, "chunk": k, "personas": len(subset), "improved": improved, "persona_ids": [p.persona_id for p in subset][:100]})
             print(f"  repair round {round_no}: {improved}/{len(subset)} improved", flush=True)
+        return chunk_records, chunk_flags, chunk_debug
+
+    try:
+        chunk_results: List[Tuple[List[Any], List[bool], Dict[str, Any]]] = []
+        for k, survey_chunk in enumerate(chunks):
+            if len(chunks) > 1:
+                print(f"  slice {k + 1}/{len(chunks)}: {survey_chunk.questions[0].id}..{survey_chunk.questions[-1].id} ({len(survey_chunk.questions)} questions)", flush=True)
+            chunk_results.append(_run_chunk(k, survey_chunk))
+        setattr(client, "current_chunk", None)
+        for _chunk_records, _chunk_flags, chunk_debug in chunk_results:
+            generation_debug.update(chunk_debug)
+        # Stitch the slices back into the usual persona-major order: all of persona 1, then persona 2, ...
+        for i in range(len(personas)):
+            for (chunk_records, chunk_flags, _chunk_debug), survey_chunk in zip(chunk_results, chunks):
+                width = len(survey_chunk.questions)
+                records.extend(chunk_records[i * width : (i + 1) * width])
+                record_is_fallback.extend(chunk_flags[i * width : (i + 1) * width])
+        if len(chunks) > 1:
+            setattr(client, "captures", merge_chunk_captures(getattr(client, "captures", {}), [p.persona_id for p in personas], len(chunks)))
 
         # Recompute the counters from the final records and captures so repairs are reflected.
         final_captures = getattr(client, "captures", {})
@@ -1589,9 +1656,20 @@ def dry_run(*, personas: List[Any], survey: Any, contexts: Tuple[Any, Any], args
     product, market = contexts
     if getattr(args, "no_sponsor_context", False):
         product, market = neutral_contexts(product, market)
-    builder = TaggingPromptBuilder(prompt_builder, max_tokens=args.max_tokens, temperature=args.temperature)
+    per_call = int(getattr(args, "questions_per_call", 0) or 0)
+    chunks = chunk_questions(survey, per_call)
+    builder = TaggingPromptBuilder(
+        prompt_builder, max_tokens=args.max_tokens, temperature=args.temperature,
+        jitter=float(getattr(args, "temperature_jitter", 0.0) or 0.0), seed=args.seed_base * 10 + 1,
+        reasons=bool(getattr(args, "reason_per_answer", False)),
+    )
+    trait_mix = parse_trait_mix(getattr(args, "trait_mix", None))
+    traits = assign_traits(personas, trait_mix, args.seed_base * 10 + 1)
+    for persona in personas:
+        persona.trait = traits.get(persona.persona_id)
+        persona.response_style = TRAITS[persona.trait] if persona.trait else None
     payload = builder.build_openrouter_prompt_payload(
-        persona=personas[0], survey_schema=survey, business_product_context=product, market_context=market, audience_filter=None
+        persona=personas[0], survey_schema=chunks[0], business_product_context=product, market_context=market, audience_filter=None
     )
     chars = sum(len(str(m.get("content", ""))) for m in payload["messages"])
     est_in = chars // 4
@@ -1601,6 +1679,9 @@ def dry_run(*, personas: List[Any], survey: Any, contexts: Tuple[Any, Any], args
     with_preamble = [q for q in survey.questions if getattr(q, "preamble", None)]
     print(f"questions with a preamble: {len(with_preamble)} ({', '.join(q.id for q in with_preamble) or 'none'})")
     print(f"survey description sent: {survey.description is not None}")
+    print(f"calls per persona: {len(chunks)}" + ("" if len(chunks) == 1 else f" ({per_call} questions per call; the prompt below is slice 1)"))
+    print(f"sponsor context removed: {bool(getattr(args, 'no_sponsor_context', False))}  temperature jitter: {float(getattr(args, 'temperature_jitter', 0.0) or 0.0)}  "
+          f"reason per answer: {bool(getattr(args, 'reason_per_answer', False))}  trait mix: {getattr(args, 'trait_mix', None) or 'none'} ({dict(Counter(traits.values())) or 'no traits'})")
     for question in with_preamble:
         if question.id in ("Q1", "Q9A"):
             print(f"--- PREAMBLE {question.id} ---\n{question.preamble}\n")
@@ -1729,6 +1810,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--price-in", type=float, default=None, help="USD per million input tokens (override)")
     parser.add_argument("--price-out", type=float, default=None, help="USD per million output tokens (override)")
     parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--questions-per-call", type=int, default=0, help="send the survey in slices of N questions per call instead of all at once (0 = one call)")
     parser.add_argument("--reason-per-answer", action="store_true", help="ask for a one-sentence reason with every answer and keep it in answers_long.csv (raises max_tokens to 9000)")
     parser.add_argument("--trait-mix", default=None, help="e.g. skeptical:0.3,enthusiastic:0.1 — give that share of personas a response style; known: " + ",".join(TRAITS))
     parser.add_argument("--no-sponsor-context", action="store_true", help="drop the sponsor's goal, pain points, barriers and objections from the prompt")
