@@ -269,8 +269,9 @@ def test_client_recovers_fenced_json_and_retries_truncation(monkeypatch) -> None
 class StubClient:
     """Answers every question validly; records nothing over the network."""
 
-    def __init__(self, survey) -> None:
+    def __init__(self, survey, reasons: bool = False) -> None:
         self.survey = survey
+        self.reasons = reasons
         self.captures = {}
         self.stats = Counter()
         self.usd_reported = 0.0
@@ -287,7 +288,10 @@ class StubClient:
                 answers[q.id] = 3
             else:
                 answers[q.id] = "n/a"
-        raw = json.dumps({"answers": answers})
+        if self.reasons:
+            raw = json.dumps({"answers": [{"question_id": qid, "answer": value, "reason": f"because {qid}"} for qid, value in answers.items()]})
+        else:
+            raw = json.dumps({"answers": answers})
         self.captures[pid] = {"persona_id": pid, "model_served": model_name, "provider": "stub", "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": None}, "raw_text": raw, "parsed_ok": True, "finish_reason": "stop"}
         self.stats["calls"] += 1
         self.stats["prompt_tokens"] += 10
@@ -302,7 +306,7 @@ def _args(tmp_path: Path, persona_csv: Path, **overrides) -> argparse.Namespace:
         provider_order=None, provider_ignore=["DigitalOcean"], no_provider_fallbacks=False, json_mode=False, reasoning_effort="off",
         no_likert_label_map=False, fallback_threshold=0.01, price_in=None, price_out=None, progress_every=1000,
         repair_rounds=2, max_failed_respondent_share=0.005, keep_file_buckets=False, survey_description="drop", persona_ids=None,
-        temperature_jitter=0.0, no_sponsor_context=False, trait_mix=None,
+        temperature_jitter=0.0, no_sponsor_context=False, trait_mix=None, reason_per_answer=False,
     )
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -550,3 +554,19 @@ def test_trait_mix_assigns_deterministic_shares_and_reaches_prompt_and_wide(tmp_
     traited = next(p for p in personas if p.trait)
     if traited.persona_id == personas[0].persona_id:
         assert run_survey.TRAITS["skeptical"][:30] in sample
+
+
+def test_reason_per_answer_is_requested_and_captured(tmp_path: Path, persona_csv: Path, survey) -> None:
+    assert run_survey.reasons_from_raw('{"answers": [{"question_id": "Q1", "answer": 2, "reason": "too pricey"}, {"question_id": "Q2", "answer": 2}]}') == {"Q1": "too pricey"}
+    assert run_survey.reasons_from_raw("not json") == {}
+    personas = run_survey.load_personas(persona_csv, limit=None, prompt_variant="full")
+    args = _args(tmp_path, persona_csv, reason_per_answer=True)
+    args.out_dir.mkdir(parents=True)
+    manifest = run_survey.run_one(model="stub/model", repeat=1, seed=1, personas=personas, survey=survey, contexts=run_survey.load_contexts(),
+                                  args=args, client=StubClient(survey, reasons=True), census_lookup={})
+    assert manifest["reason_per_answer"] is True and manifest["counts"]["answers_with_reason"] == 3 * 39
+    sample = (Path(manifest["run_dir"]) / "prompt_sample.txt").read_text(encoding="utf-8")
+    assert '"reason"' in sample and "one-sentence" in sample and "max_tokens=9000" in sample
+    with open(Path(manifest["run_dir"]) / "answers_long.csv", newline="", encoding="utf-8-sig") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["reason"] == "because S3"

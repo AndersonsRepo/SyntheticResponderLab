@@ -512,6 +512,11 @@ def assign_traits(personas: List[Any], mix: List[Tuple[str, float]], seed: Optio
     return assigned
 
 
+# --reason-per-answer: appended to the engine's output requirements; the engine ignores the extra key.
+REASON_RULE = '\n7) For every answer also give a one-sentence "reason" in the persona\'s own voice, in the same object.'
+REASON_MAX_TOKENS = 9000
+
+
 def persona_temperature(base: float, jitter: float, seed: Optional[int], persona_id: str) -> float:
     """Deterministic per-persona temperature in [base - jitter, base + jitter], clipped to [0, 1.5]."""
     if jitter <= 0:
@@ -523,17 +528,25 @@ def persona_temperature(base: float, jitter: float, seed: Optional[int], persona
 class TaggingPromptBuilder:
     """Wraps the engine's prompt builder: same prompt, larger answer budget, persona tag."""
 
-    def __init__(self, original: Any, *, max_tokens: int, temperature: float, jitter: float = 0.0, seed: Optional[int] = None) -> None:
+    def __init__(self, original: Any, *, max_tokens: int, temperature: float, jitter: float = 0.0, seed: Optional[int] = None, reasons: bool = False) -> None:
         self._original = original
         self.max_tokens = int(max_tokens)
         self.temperature = float(temperature)
         self.jitter = float(jitter)
         self.seed = seed
+        self.reasons = bool(reasons)
 
     def build_openrouter_prompt_payload(self, **kwargs: Any) -> Dict[str, Any]:
         payload = self._original.build_openrouter_prompt_payload(**kwargs)
         persona_id = getattr(kwargs.get("persona"), "persona_id", None)
         payload["max_tokens"] = self.max_tokens
+        if self.reasons:
+            user = payload["messages"][-1]
+            user["content"] = user["content"].replace(
+                '"answer": "<answer value matching question type>"}',
+                '"answer": "<answer value matching question type>", "reason": "<one sentence>"}',
+            ) + REASON_RULE
+            payload["max_tokens"] = max(self.max_tokens, REASON_MAX_TOKENS)
         payload["temperature"] = persona_temperature(self.temperature, self.jitter, self.seed, str(persona_id))
         payload["_persona_id"] = persona_id
         return payload
@@ -891,6 +904,29 @@ def _recover_json_object(text: str) -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def reasons_from_raw(raw_text: str) -> Dict[str, str]:
+    """{question_id: reason} from a model's raw JSON; empty when there is no parseable answers list."""
+    try:
+        parsed = json.loads(raw_text)
+    except Exception:
+        parsed = _recover_json_object(raw_text)
+    answers = (parsed or {}).get("answers") if isinstance(parsed, dict) else None
+    if not isinstance(answers, list):
+        return {}
+    return {str(a.get("question_id")).strip(): str(a["reason"]).strip() for a in answers if isinstance(a, dict) and a.get("reason")}
+
+
+def capture_reasons(capture: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Reasons from one capture, or from each slice of a capture merged by --questions-per-call."""
+    if not capture:
+        return {}
+    parts = capture.get("chunks") or [capture]
+    reasons: Dict[str, str] = {}
+    for part in parts:
+        reasons.update(reasons_from_raw(str(part.get("raw_text") or "")))
+    return reasons
+
+
 def price_for(model: str, price_in: Optional[float], price_out: Optional[float]) -> Tuple[Optional[float], Optional[float], str]:
     if price_in is not None and price_out is not None:
         return float(price_in), float(price_out), "override"
@@ -965,6 +1001,8 @@ def write_run_outputs(
     question_ids = [question.id for question in survey.questions]
     persona_ids = [persona.persona_id for persona in personas]
     traits_by_id = {persona.persona_id: getattr(persona, "trait", None) or "" for persona in personas}
+    reasons_by_pid = {pid: capture_reasons(captures.get(pid)) for pid in persona_ids}
+    answers_with_reason = 0
 
     long_path = run_dir / "answers_long.csv"
     wide_rows: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
@@ -972,10 +1010,13 @@ def write_run_outputs(
     with open(long_path, "w", newline="", encoding=CSV_ENCODING) as handle:
         writer = csv.writer(handle)
         writer.writerow(
-            ["run_id", "model", "repeat", "seed", "persona_id", "respondent_id", "question_id", "question_type", "answer", "answer_json", "is_fallback"]
+            ["run_id", "model", "repeat", "seed", "persona_id", "respondent_id", "question_id", "question_type", "answer", "answer_json", "is_fallback", "reason"]
         )
         for record, is_fallback in zip(records, record_is_fallback):
             pid = persona_ids[respondent_index(record.respondent_id) % len(persona_ids)]
+            reason = reasons_by_pid[pid].get(record.question_id, "")
+            if reason:
+                answers_with_reason += 1
             writer.writerow(
                 [
                     run_id,
@@ -989,6 +1030,7 @@ def write_run_outputs(
                     answer_scalar(record.answer),
                     json.dumps(record.answer, ensure_ascii=False),
                     "true" if is_fallback else "false",
+                    reason,
                 ]
             )
             row = wide_rows.setdefault(
@@ -1041,7 +1083,7 @@ def write_run_outputs(
         lines.append(f"temperature={prompt_sample.get('temperature')} max_tokens={prompt_sample.get('max_tokens')}")
         (run_dir / "prompt_sample.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    return {"fallback_per_persona": dict(fallback_per_persona), "wide_rows": list(wide_rows.values())}
+    return {"fallback_per_persona": dict(fallback_per_persona), "wide_rows": list(wide_rows.values()), "answers_with_reason": answers_with_reason}
 
 
 # ---------------------------------------------------------------------------
@@ -1271,6 +1313,7 @@ def run_one(
         "temperature_jitter": float(getattr(args, "temperature_jitter", 0.0) or 0.0),
         "trait_mix": getattr(args, "trait_mix", None) or None,
         "trait_counts": dict(Counter(traits.values())),
+        "reason_per_answer": bool(getattr(args, "reason_per_answer", False)),
         "max_tokens": args.max_tokens,
         "timeout_sec": args.timeout,
         "max_retries": args.max_retries,
@@ -1308,6 +1351,7 @@ def run_one(
     builder = TaggingPromptBuilder(
         prompt_builder, max_tokens=args.max_tokens, temperature=args.temperature,
         jitter=float(getattr(args, "temperature_jitter", 0.0) or 0.0), seed=seed,
+        reasons=bool(getattr(args, "reason_per_answer", False)),
     )
     manager = CoercingRunManager(run_manager, enabled=not args.no_likert_label_map, question_ids=[q.id for q in survey.questions])
     if client is None:
@@ -1472,6 +1516,7 @@ def run_one(
         "dashes_normalized": int(manager.dashes_normalized),
         "question_ids_remapped": int(manager.ids_remapped),
         "finish_reason_length": int(stats.get("finish_length", 0)),
+        "answers_with_reason": int(outputs_info.get("answers_with_reason", 0) or 0),
     }
     manifest["repair"] = {"rounds_run": len(repair_log), "log": repair_log}
     manifest["diagnostics"] = fallback_diagnostics(
@@ -1684,6 +1729,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--price-in", type=float, default=None, help="USD per million input tokens (override)")
     parser.add_argument("--price-out", type=float, default=None, help="USD per million output tokens (override)")
     parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--reason-per-answer", action="store_true", help="ask for a one-sentence reason with every answer and keep it in answers_long.csv (raises max_tokens to 9000)")
     parser.add_argument("--trait-mix", default=None, help="e.g. skeptical:0.3,enthusiastic:0.1 — give that share of personas a response style; known: " + ",".join(TRAITS))
     parser.add_argument("--no-sponsor-context", action="store_true", help="drop the sponsor's goal, pain points, barriers and objections from the prompt")
     parser.add_argument("--temperature-jitter", type=float, default=0.0, help="vary temperature per persona by ±F around --temperature (deterministic per seed)")
