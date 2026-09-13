@@ -320,7 +320,7 @@ def test_end_to_end_with_stub_client(tmp_path: Path, persona_csv: Path, survey) 
     names = {p.name for p in run_dir.iterdir()}
     assert {"answers_long.csv", "answers_wide.csv", "questions.csv", "raw_responses.jsonl", "generation_debug.json", "prompt_sample.txt", "manifest.json", "summary.md"} <= names
 
-    with open(run_dir / "answers_long.csv", newline="", encoding="utf-8") as handle:
+    with open(run_dir / "answers_long.csv", newline="", encoding="utf-8-sig") as handle:
         long_rows = list(csv.DictReader(handle))
     assert len(long_rows) == 3 * 39
     assert {row["persona_id"] for row in long_rows} == {"P001", "P002", "P003"}
@@ -328,7 +328,7 @@ def test_end_to_end_with_stub_client(tmp_path: Path, persona_csv: Path, survey) 
     q20 = next(row for row in long_rows if row["question_id"] == "Q20")
     assert "|" in q20["answer"] and json.loads(q20["answer_json"]) == q20["answer"].split("|")
 
-    with open(run_dir / "answers_wide.csv", newline="", encoding="utf-8") as handle:
+    with open(run_dir / "answers_wide.csv", newline="", encoding="utf-8-sig") as handle:
         wide_rows = list(csv.DictReader(handle))
     assert len(wide_rows) == 3 and wide_rows[0]["Q30"] == "Moderately interested" and wide_rows[0]["all_live"] == "true"
     assert list(wide_rows[0].keys())[6:12] == ["S3", "Q0A", "Q0B", "Q1", "Q2", "Q3"]
@@ -337,7 +337,7 @@ def test_end_to_end_with_stub_client(tmp_path: Path, persona_csv: Path, survey) 
     assert counts["respondents"] == 3 and counts["answers"] == 117 and counts["fallback_answers"] == 0
     assert manifest["summary"]["Q30_attention_check"]["pass_rate"] == 1.0
     assert manifest["tokens"]["prompt"] == 30
-    index = list(csv.DictReader(open(args.out_dir / "index.csv", newline="", encoding="utf-8")))
+    index = list(csv.DictReader(open(args.out_dir / "index.csv", newline="", encoding="utf-8-sig")))
     assert len(index) == 1 and index[0]["status"] == "completed" and index[0]["run_id"] == manifest["run_id"]
 
 
@@ -391,7 +391,7 @@ def test_repair_round_replaces_persona_with_fabricated_answers(tmp_path: Path, p
     assert manifest["repair"]["rounds_run"] == 1
     assert manifest["repair"]["log"][0] == {"round": 1, "personas": 1, "improved": 1, "persona_ids": ["P002"]}
     assert client.captures["P002"]["repair_round"] == 1
-    with open(Path(manifest["run_dir"]) / "answers_long.csv", newline="", encoding="utf-8") as handle:
+    with open(Path(manifest["run_dir"]) / "answers_long.csv", newline="", encoding="utf-8-sig") as handle:
         rows = [row for row in csv.DictReader(handle) if row["persona_id"] == "P002"]
     assert len(rows) == 39 and all(row["is_fallback"] == "false" for row in rows) and rows[0]["respondent_id"] == "RESP_002"
     assert manifest["diagnostics"]["fallback_by_question"] == {}
@@ -431,7 +431,7 @@ def test_questions_csv_carries_preambles_and_the_manifest_records_the_descriptio
     assert manifest["status"] == "completed", manifest["guardrails"]
     assert manifest["survey_description_sent"] is False
     run_dir = Path(manifest["run_dir"])
-    with open(run_dir / "questions.csv", newline="", encoding="utf-8") as handle:
+    with open(run_dir / "questions.csv", newline="", encoding="utf-8-sig") as handle:
         rows = list(csv.DictReader(handle))
     assert list(rows[0].keys()) == ["question_id", "question_type", "min_value", "max_value", "options", "text", "preamble"]
     by_id = {row["question_id"]: row for row in rows}
@@ -449,3 +449,18 @@ def test_questions_csv_carries_preambles_and_the_manifest_records_the_descriptio
     )
     assert manifest_keep["survey_description_sent"] is True
     assert "What was cut" in (Path(manifest_keep["run_dir"]) / "prompt_sample.txt").read_text(encoding="utf-8")
+
+
+def test_csv_outputs_start_with_bom_and_read_cleanly(tmp_path: Path, persona_csv: Path, survey) -> None:
+    personas = run_survey.load_personas(persona_csv, limit=None, prompt_variant="full")
+    args = _args(tmp_path, persona_csv)
+    args.out_dir.mkdir(parents=True)
+    manifest = run_survey.run_one(model="stub/model", repeat=1, seed=1, personas=personas, survey=survey,
+                                  contexts=run_survey.load_contexts(), args=args, client=StubClient(survey), census_lookup={})
+    run_dir = Path(manifest["run_dir"])
+    for name in ("answers_long.csv", "answers_wide.csv", "questions.csv"):
+        assert (run_dir / name).read_bytes()[:3] == b"\xef\xbb\xbf", name
+        with open(run_dir / name, newline="", encoding="utf-8-sig") as handle:
+            header = csv.DictReader(handle).fieldnames
+        assert header[0] in ("run_id", "question_id"), header[0]  # no stray BOM inside the first column name
+    assert (args.out_dir / "index.csv").read_bytes()[:3] == b"\xef\xbb\xbf"

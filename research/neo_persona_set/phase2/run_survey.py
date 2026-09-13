@@ -162,6 +162,7 @@ STORY_LIST_FIELDS = {"priorities"}
 
 PROMPT_VARIANTS = ("full", "census", "buckets")
 RESPONDENT_ID_PATTERN = re.compile(r"RESP_(\d+)")
+CSV_ENCODING = "utf-8-sig"  # BOM so Excel detects UTF-8 on double-click
 
 
 def utcnow() -> datetime:
@@ -872,7 +873,7 @@ def write_run_outputs(
     long_path = run_dir / "answers_long.csv"
     wide_rows: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
     fallback_per_persona: Counter = Counter()
-    with open(long_path, "w", newline="", encoding="utf-8") as handle:
+    with open(long_path, "w", newline="", encoding=CSV_ENCODING) as handle:
         writer = csv.writer(handle)
         writer.writerow(
             ["run_id", "model", "repeat", "seed", "persona_id", "respondent_id", "question_id", "question_type", "answer", "answer_json", "is_fallback"]
@@ -903,7 +904,7 @@ def write_run_outputs(
                 fallback_per_persona[pid] += 1
 
     wide_path = run_dir / "answers_wide.csv"
-    with open(wide_path, "w", newline="", encoding="utf-8") as handle:
+    with open(wide_path, "w", newline="", encoding=CSV_ENCODING) as handle:
         header = ["run_id", "model", "repeat", "seed", "persona_id", "respondent_id", *question_ids, "n_fallback", "all_live"]
         writer = csv.DictWriter(handle, fieldnames=header)
         writer.writeheader()
@@ -912,7 +913,7 @@ def write_run_outputs(
             row["all_live"] = "true" if fallback_per_persona.get(pid, 0) == 0 else "false"
             writer.writerow({key: row.get(key, "") for key in header})
 
-    with open(run_dir / "questions.csv", "w", newline="", encoding="utf-8") as handle:
+    with open(run_dir / "questions.csv", "w", newline="", encoding=CSV_ENCODING) as handle:
         writer = csv.writer(handle)
         writer.writerow(["question_id", "question_type", "min_value", "max_value", "options", "text", "preamble"])
         for question in survey.questions:
@@ -1118,7 +1119,7 @@ def append_index_row(index_path: Path, row: Dict[str, Any]) -> None:
         "git_commit", "run_dir",
     ]
     exists = index_path.exists()
-    with open(index_path, "a", newline="", encoding="utf-8") as handle:
+    with open(index_path, "a", newline="", encoding=CSV_ENCODING) as handle:
         writer = csv.DictWriter(handle, fieldnames=header)
         if not exists:
             writer.writeheader()
@@ -1474,7 +1475,7 @@ def cross_run_summary(run_ids: List[str], *, out_dir: Path, survey: Any, census_
         if not wide_path.exists():
             print(f"skip {run_id}: no answers_wide.csv", file=sys.stderr)
             continue
-        with open(wide_path, newline="", encoding="utf-8") as handle:
+        with open(wide_path, newline="", encoding="utf-8-sig") as handle:
             runs[run_id] = list(csv.DictReader(handle))
         manifest_path = run_dir / "manifest.json"
         manifests[run_id] = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
