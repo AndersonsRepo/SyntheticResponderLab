@@ -231,6 +231,10 @@ class RichPersonaProfile(schemas.PersonaProfile):  # type: ignore[misc,name-defi
     name: Optional[str] = None
     census_record: Optional[Dict[str, Any]] = None
     story: Optional[Dict[str, Any]] = None
+    # Set by --trait-mix: the trait name (kept out of the prompt by the runner's outputs only) and
+    # the response-style instruction, which reaches the model through model_dump().
+    trait: Optional[str] = None
+    response_style: Optional[str] = None
 
     def model_dump(self, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
         kwargs.setdefault("exclude_none", True)
@@ -467,6 +471,45 @@ def make_run_id(model: str, repeat: int, *, limit: Optional[int], tag: Optional[
 # ---------------------------------------------------------------------------
 # Shims handed to the adapter
 # ---------------------------------------------------------------------------
+
+
+TRAITS: Dict[str, str] = {
+    "skeptical": "You are a skeptical, hard-to-please respondent. You do not give polite or middle-of-the-road answers: you use the whole scale, you say 1 when you mean no, and you name the concrete thing that would have to change before you would buy.",
+    "enthusiastic": "You are an enthusiastic early adopter. When something genuinely fits your life you say so strongly and use the top of the scale; you are still honest about what you would not pay for.",
+    "indifferent": "You answer quickly and without much deliberation, the way a tired person finishes an online survey. You pick what first feels right and do not over-explain.",
+    "pragmatic": "You are practical and price-aware. You weigh every claim against what it costs you in money, permits and hassle, and your answers follow that arithmetic.",
+}
+
+
+def parse_trait_mix(spec: Optional[str]) -> List[Tuple[str, float]]:
+    """'skeptical:0.3,enthusiastic:0.1' -> [('skeptical', 0.3), ('enthusiastic', 0.1)]; shares must total <= 1."""
+    if not spec:
+        return []
+    mix: List[Tuple[str, float]] = []
+    for part in spec.split(","):
+        name, _, share = part.strip().partition(":")
+        if name not in TRAITS:
+            raise ValueError(f"unknown trait {name!r}; known: {sorted(TRAITS)}")
+        mix.append((name, float(share)))
+    if sum(share for _, share in mix) > 1.0 + 1e-9:
+        raise ValueError("trait shares must sum to at most 1")
+    return mix
+
+
+def assign_traits(personas: List[Any], mix: List[Tuple[str, float]], seed: Optional[int]) -> Dict[str, str]:
+    """persona_id -> trait for the first round(share * n) personas of a seeded shuffle, trait by trait."""
+    if not mix:
+        return {}
+    order = list(range(len(personas)))
+    random.Random(f"{seed}:traits").shuffle(order)
+    assigned: Dict[str, str] = {}
+    cursor = 0
+    for name, share in mix:
+        count = int(round(share * len(personas)))
+        for index in order[cursor : cursor + count]:
+            assigned[personas[index].persona_id] = name
+        cursor += count
+    return assigned
 
 
 def persona_temperature(base: float, jitter: float, seed: Optional[int], persona_id: str) -> float:
@@ -921,6 +964,7 @@ def write_run_outputs(
     """
     question_ids = [question.id for question in survey.questions]
     persona_ids = [persona.persona_id for persona in personas]
+    traits_by_id = {persona.persona_id: getattr(persona, "trait", None) or "" for persona in personas}
 
     long_path = run_dir / "answers_long.csv"
     wide_rows: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
@@ -949,7 +993,7 @@ def write_run_outputs(
             )
             row = wide_rows.setdefault(
                 pid,
-                {"run_id": run_id, "model": record.model, "repeat": repeat, "seed": "" if seed is None else seed, "persona_id": pid, "respondent_id": record.respondent_id},
+                {"run_id": run_id, "model": record.model, "repeat": repeat, "seed": "" if seed is None else seed, "persona_id": pid, "respondent_id": record.respondent_id, "trait": traits_by_id.get(pid, "")},
             )
             row[record.question_id] = answer_scalar(record.answer)
             if is_fallback:
@@ -957,7 +1001,7 @@ def write_run_outputs(
 
     wide_path = run_dir / "answers_wide.csv"
     with open(wide_path, "w", newline="", encoding=CSV_ENCODING) as handle:
-        header = ["run_id", "model", "repeat", "seed", "persona_id", "respondent_id", *question_ids, "n_fallback", "all_live"]
+        header = ["run_id", "model", "repeat", "seed", "persona_id", "respondent_id", "trait", *question_ids, "n_fallback", "all_live"]
         writer = csv.DictWriter(handle, fieldnames=header)
         writer.writeheader()
         for pid, row in wide_rows.items():
@@ -1203,6 +1247,11 @@ def run_one(
         product, market = neutral_contexts(product, market)
     price_in, price_out, price_source = price_for(model, args.price_in, args.price_out)
     git = git_info()
+    trait_mix = parse_trait_mix(getattr(args, "trait_mix", None))
+    traits = assign_traits(personas, trait_mix, seed)
+    for persona in personas:  # reset when no mix, so a persona list shared across runs never leaks a trait
+        persona.trait = traits.get(persona.persona_id)
+        persona.response_style = TRAITS[persona.trait] if persona.trait else None
 
     manifest: Dict[str, Any] = {
         "run_id": run_id,
@@ -1220,6 +1269,8 @@ def run_one(
         "seed": seed,
         "temperature": args.temperature,
         "temperature_jitter": float(getattr(args, "temperature_jitter", 0.0) or 0.0),
+        "trait_mix": getattr(args, "trait_mix", None) or None,
+        "trait_counts": dict(Counter(traits.values())),
         "max_tokens": args.max_tokens,
         "timeout_sec": args.timeout,
         "max_retries": args.max_retries,
@@ -1633,6 +1684,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--price-in", type=float, default=None, help="USD per million input tokens (override)")
     parser.add_argument("--price-out", type=float, default=None, help="USD per million output tokens (override)")
     parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--trait-mix", default=None, help="e.g. skeptical:0.3,enthusiastic:0.1 — give that share of personas a response style; known: " + ",".join(TRAITS))
     parser.add_argument("--no-sponsor-context", action="store_true", help="drop the sponsor's goal, pain points, barriers and objections from the prompt")
     parser.add_argument("--temperature-jitter", type=float, default=0.0, help="vary temperature per persona by ±F around --temperature (deterministic per seed)")
     parser.add_argument("--seed-base", type=int, default=DEFAULT_SEED_BASE, help="seed = seed_base*10 + repeat")

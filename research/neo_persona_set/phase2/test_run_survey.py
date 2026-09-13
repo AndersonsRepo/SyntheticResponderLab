@@ -302,7 +302,7 @@ def _args(tmp_path: Path, persona_csv: Path, **overrides) -> argparse.Namespace:
         provider_order=None, provider_ignore=["DigitalOcean"], no_provider_fallbacks=False, json_mode=False, reasoning_effort="off",
         no_likert_label_map=False, fallback_threshold=0.01, price_in=None, price_out=None, progress_every=1000,
         repair_rounds=2, max_failed_respondent_share=0.005, keep_file_buckets=False, survey_description="drop", persona_ids=None,
-        temperature_jitter=0.0, no_sponsor_context=False,
+        temperature_jitter=0.0, no_sponsor_context=False, trait_mix=None,
     )
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -332,7 +332,7 @@ def test_end_to_end_with_stub_client(tmp_path: Path, persona_csv: Path, survey) 
     with open(run_dir / "answers_wide.csv", newline="", encoding="utf-8-sig") as handle:
         wide_rows = list(csv.DictReader(handle))
     assert len(wide_rows) == 3 and wide_rows[0]["Q30"] == "Moderately interested" and wide_rows[0]["all_live"] == "true"
-    assert list(wide_rows[0].keys())[6:12] == ["S3", "Q0A", "Q0B", "Q1", "Q2", "Q3"]
+    assert list(wide_rows[0].keys())[7:13] == ["S3", "Q0A", "Q0B", "Q1", "Q2", "Q3"]
 
     counts = manifest["counts"]
     assert counts["respondents"] == 3 and counts["answers"] == 117 and counts["fallback_answers"] == 0
@@ -527,3 +527,26 @@ def test_no_sponsor_context_removes_goal_and_objections(tmp_path: Path, persona_
     sample = (Path(manifest["run_dir"]) / "prompt_sample.txt").read_text(encoding="utf-8")
     assert "Validate demand" not in sample and "Price sensitivity" not in sample and "Tahoe Mini" in sample
     assert manifest["context"]["sponsor_context_removed"] is True
+
+
+def test_trait_mix_assigns_deterministic_shares_and_reaches_prompt_and_wide(tmp_path: Path, persona_csv: Path, survey) -> None:
+    assert run_survey.parse_trait_mix("skeptical:0.5,enthusiastic:0.25") == [("skeptical", 0.5), ("enthusiastic", 0.25)]
+    with pytest.raises(ValueError):
+        run_survey.parse_trait_mix("skeptical:0.8,enthusiastic:0.5")
+    with pytest.raises(ValueError):
+        run_survey.parse_trait_mix("grumpy:0.1")
+    personas = run_survey.load_personas(persona_csv, limit=None, prompt_variant="full")
+    assigned = run_survey.assign_traits(personas, [("skeptical", 0.34)], seed=7)
+    assert len(assigned) == 1 and assigned == run_survey.assign_traits(personas, [("skeptical", 0.34)], seed=7)
+    args = _args(tmp_path, persona_csv, trait_mix="skeptical:0.34")
+    args.out_dir.mkdir(parents=True)
+    manifest = run_survey.run_one(model="stub/model", repeat=1, seed=7, personas=personas, survey=survey, contexts=run_survey.load_contexts(),
+                                  args=args, client=StubClient(survey), census_lookup={})
+    assert manifest["trait_mix"] == "skeptical:0.34" and manifest["trait_counts"] == {"skeptical": 1}
+    with open(Path(manifest["run_dir"]) / "answers_wide.csv", newline="", encoding="utf-8-sig") as handle:
+        rows = list(csv.DictReader(handle))
+    assert "trait" in rows[0] and sum(1 for r in rows if r["trait"] == "skeptical") == 1
+    sample = (Path(manifest["run_dir"]) / "prompt_sample.txt").read_text(encoding="utf-8")
+    traited = next(p for p in personas if p.trait)
+    if traited.persona_id == personas[0].persona_id:
+        assert run_survey.TRAITS["skeptical"][:30] in sample
