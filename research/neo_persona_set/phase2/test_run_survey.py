@@ -308,7 +308,7 @@ def _args(tmp_path: Path, persona_csv: Path, **overrides) -> argparse.Namespace:
         provider_order=None, provider_ignore=["DigitalOcean"], no_provider_fallbacks=False, json_mode=False, reasoning_effort="off",
         no_likert_label_map=False, fallback_threshold=0.01, price_in=None, price_out=None, progress_every=1000,
         repair_rounds=2, max_failed_respondent_share=0.005, keep_file_buckets=False, survey_description="drop", persona_ids=None,
-        temperature_jitter=0.0, no_sponsor_context=False, trait_mix=None, reason_per_answer=False, questions_per_call=0,
+        temperature_jitter=0.0, no_sponsor_context=False, trait_mix=None, reason_per_answer=False, questions_per_call=0, interest_note=False,
     )
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -624,3 +624,24 @@ def test_dry_run_prices_every_slice_under_questions_per_call(tmp_path: Path, per
     # estimate grows but stays under 4x (the test fixture's persona is tiny, so the ratio is small here).
     assert 1.0 < usd(four_calls) / usd(one_call) < 4.0
     assert "input tokens across 4 calls" in four_calls
+
+
+def test_interest_note_is_added_to_the_system_message_and_recorded(tmp_path: Path, persona_csv: Path, survey) -> None:
+    personas = run_survey.load_personas(persona_csv, limit=None, prompt_variant="full")
+    product, market = run_survey.load_contexts()
+    plain = run_survey.TaggingPromptBuilder(run_survey.prompt_builder, max_tokens=4000, temperature=0.2)
+    noted = run_survey.TaggingPromptBuilder(run_survey.prompt_builder, max_tokens=4000, temperature=0.2, respondent_note=run_survey.INTEREST_NOTE)
+    kwargs = dict(persona=personas[0], survey_schema=survey, business_product_context=product, market_context=market, audience_filter=None)
+    a, b = plain.build_openrouter_prompt_payload(**kwargs), noted.build_openrouter_prompt_payload(**kwargs)
+    assert run_survey.INTEREST_NOTE not in a["messages"][0]["content"] and b["messages"][0]["content"].endswith(run_survey.INTEREST_NOTE)
+    assert a["messages"][1]["content"] == b["messages"][1]["content"]  # the context and the survey are untouched
+    assert "whether or not you could pay for it" in run_survey.INTEREST_NOTE and "can have different answers" in run_survey.INTEREST_NOTE
+    args = _args(tmp_path, persona_csv, interest_note=True)
+    args.out_dir.mkdir(parents=True)
+    manifest = run_survey.run_one(model="stub/model", repeat=1, seed=1, personas=personas, survey=survey, contexts=run_survey.load_contexts(),
+                                  args=args, client=StubClient(survey), census_lookup={})
+    assert manifest["respondent_note"] == run_survey.INTEREST_NOTE
+    assert run_survey.INTEREST_NOTE in (Path(manifest["run_dir"]) / "prompt_sample.txt").read_text(encoding="utf-8")
+    plain_manifest = run_survey.run_one(model="stub/model", repeat=1, seed=1, personas=personas, survey=survey, contexts=run_survey.load_contexts(),
+                                        args=_args(tmp_path, persona_csv, run_tag="plain"), client=StubClient(survey), census_lookup={})
+    assert plain_manifest["respondent_note"] is None

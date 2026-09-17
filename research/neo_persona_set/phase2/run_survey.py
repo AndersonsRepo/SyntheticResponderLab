@@ -551,6 +551,15 @@ def assign_traits(personas: List[Any], mix: List[Tuple[str, float]], seed: Optio
 REASON_RULE = '\n7) For every answer also give a one-sentence "reason" in the persona\'s own voice, in the same object.'
 REASON_MAX_TOKENS = 9000
 
+# --interest-note: appended to the system message. It separates the two constructs the survey uses
+# (interest = appeal, likelihood = what you would do) without saying which way either should go.
+INTEREST_NOTE = (
+    "When a question asks how interested you are in something or how appealing it is, answer with how much "
+    "you would want it, whether or not you could pay for it right now. When a question asks how likely you "
+    "are to buy or do something, answer with what you would actually do given your money and your situation. "
+    "These are different questions and can have different answers."
+)
+
 
 def persona_temperature(base: float, jitter: float, seed: Optional[int], persona_id: str) -> float:
     """Deterministic per-persona temperature in [base - jitter, base + jitter], clipped to [0, 1.5]."""
@@ -563,18 +572,23 @@ def persona_temperature(base: float, jitter: float, seed: Optional[int], persona
 class TaggingPromptBuilder:
     """Wraps the engine's prompt builder: same prompt, larger answer budget, persona tag."""
 
-    def __init__(self, original: Any, *, max_tokens: int, temperature: float, jitter: float = 0.0, seed: Optional[int] = None, reasons: bool = False) -> None:
+    def __init__(self, original: Any, *, max_tokens: int, temperature: float, jitter: float = 0.0, seed: Optional[int] = None, reasons: bool = False,
+                 respondent_note: Optional[str] = None) -> None:
         self._original = original
         self.max_tokens = int(max_tokens)
         self.temperature = float(temperature)
         self.jitter = float(jitter)
         self.seed = seed
         self.reasons = bool(reasons)
+        self.respondent_note = respondent_note or None
 
     def build_openrouter_prompt_payload(self, **kwargs: Any) -> Dict[str, Any]:
         payload = self._original.build_openrouter_prompt_payload(**kwargs)
         persona_id = getattr(kwargs.get("persona"), "persona_id", None)
         payload["max_tokens"] = self.max_tokens
+        if self.respondent_note:
+            system = payload["messages"][0]
+            system["content"] = system["content"].rstrip() + "\n\n" + self.respondent_note
         if self.reasons:
             user = payload["messages"][-1]
             user["content"] = user["content"].replace(
@@ -1353,6 +1367,7 @@ def run_one(
         "trait_mix": getattr(args, "trait_mix", None) or None,
         "trait_counts": dict(Counter(traits.values())),
         "reason_per_answer": bool(getattr(args, "reason_per_answer", False)),
+        "respondent_note": INTEREST_NOTE if getattr(args, "interest_note", False) else None,
         "questions_per_call": per_call,
         "calls_per_persona": len(chunks),
         "max_tokens": args.max_tokens,
@@ -1393,6 +1408,7 @@ def run_one(
         prompt_builder, max_tokens=args.max_tokens, temperature=args.temperature,
         jitter=float(getattr(args, "temperature_jitter", 0.0) or 0.0), seed=seed,
         reasons=bool(getattr(args, "reason_per_answer", False)),
+        respondent_note=INTEREST_NOTE if getattr(args, "interest_note", False) else None,
     )
     manager = CoercingRunManager(run_manager, enabled=not args.no_likert_label_map, question_ids=[q.id for q in survey.questions])
     if client is None:
@@ -1668,6 +1684,7 @@ def dry_run(*, personas: List[Any], survey: Any, contexts: Tuple[Any, Any], args
         prompt_builder, max_tokens=args.max_tokens, temperature=args.temperature,
         jitter=float(getattr(args, "temperature_jitter", 0.0) or 0.0), seed=args.seed_base * 10 + 1,
         reasons=bool(getattr(args, "reason_per_answer", False)),
+        respondent_note=INTEREST_NOTE if getattr(args, "interest_note", False) else None,
     )
     trait_mix = parse_trait_mix(getattr(args, "trait_mix", None))
     traits = assign_traits(personas, trait_mix, args.seed_base * 10 + 1)
@@ -1692,6 +1709,7 @@ def dry_run(*, personas: List[Any], survey: Any, contexts: Tuple[Any, Any], args
     with_preamble = [q for q in survey.questions if getattr(q, "preamble", None)]
     print(f"questions with a preamble: {len(with_preamble)} ({', '.join(q.id for q in with_preamble) or 'none'})")
     print(f"survey description sent: {survey.description is not None}")
+    print(f"interest note in the system message: {bool(getattr(args, 'interest_note', False))}")
     print(f"calls per persona: {len(chunks)}" + ("" if len(chunks) == 1 else f" ({per_call} questions per call; the prompt below is slice 1)"))
     print(f"sponsor context removed: {bool(getattr(args, 'no_sponsor_context', False))}  temperature jitter: {float(getattr(args, 'temperature_jitter', 0.0) or 0.0)}  "
           f"reason per answer: {bool(getattr(args, 'reason_per_answer', False))}  trait mix: {getattr(args, 'trait_mix', None) or 'none'} ({dict(Counter(traits.values())) or 'no traits'})")
@@ -1826,6 +1844,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--price-in", type=float, default=None, help="USD per million input tokens (override)")
     parser.add_argument("--price-out", type=float, default=None, help="USD per million output tokens (override)")
     parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--interest-note", action="store_true", help="tell the respondent that interest/appeal questions and likelihood questions are different questions (see INTEREST_NOTE)")
     parser.add_argument("--questions-per-call", type=int, default=0, help="send the survey in slices of N questions per call instead of all at once (0 = one call)")
     parser.add_argument("--reason-per-answer", action="store_true", help="ask for a one-sentence reason with every answer and keep it in answers_long.csv (raises max_tokens to 9000)")
     parser.add_argument("--trait-mix", default=None, help="e.g. skeptical:0.3,enthusiastic:0.1 — give that share of personas a response style; known: " + ",".join(TRAITS))
