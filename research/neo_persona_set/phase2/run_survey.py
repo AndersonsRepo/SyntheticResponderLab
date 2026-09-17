@@ -1678,7 +1678,14 @@ def dry_run(*, personas: List[Any], survey: Any, contexts: Tuple[Any, Any], args
         persona=personas[0], survey_schema=chunks[0], business_product_context=product, market_context=market, audience_filter=None
     )
     chars = sum(len(str(m.get("content", ""))) for m in payload["messages"])
-    est_in = chars // 4
+    # Every slice repeats the persona and the context, so the input cost scales with the number of calls.
+    chars_all_calls = chars
+    for later_chunk in chunks[1:]:
+        later = builder.build_openrouter_prompt_payload(
+            persona=personas[0], survey_schema=later_chunk, business_product_context=product, market_context=market, audience_filter=None
+        )
+        chars_all_calls += sum(len(str(m.get("content", ""))) for m in later["messages"])
+    est_in = chars_all_calls // 4
     est_out = 900
     print(f"personas: {len(personas)} (variant={args.prompt_variant})  questions: {len(survey.questions)}")
     print("question ids:", ", ".join(q.id for q in survey.questions))
@@ -1691,7 +1698,10 @@ def dry_run(*, personas: List[Any], survey: Any, contexts: Tuple[Any, Any], args
     for question in with_preamble:
         if question.id in ("Q1", "Q9A"):
             print(f"--- PREAMBLE {question.id} ---\n{question.preamble}\n")
-    print(f"prompt for {personas[0].persona_id}: {chars} chars ≈ {est_in} input tokens; assuming ≈{est_out} output tokens")
+    if len(chunks) > 1:
+        print(f"prompt for {personas[0].persona_id}: {chars} chars in slice 1; ≈ {est_in} input tokens across {len(chunks)} calls; assuming ≈{est_out} output tokens")
+    else:
+        print(f"prompt for {personas[0].persona_id}: {chars} chars ≈ {est_in} input tokens; assuming ≈{est_out} output tokens")
     print()
     for message in payload["messages"]:
         print(f"--- {message['role'].upper()} ---")

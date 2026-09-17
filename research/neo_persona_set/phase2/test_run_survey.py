@@ -608,3 +608,19 @@ def test_region_state_and_housing_cost_basis_reach_the_census_record(tmp_path: P
     persona = run_survey.load_personas(path, limit=None, prompt_variant="full")[0]
     assert persona.census_record["state"] == "Texas" and persona.census_record["region"] == "South" and persona.census_record["housing_cost_basis"] == "owner costs"
     assert '"state": "Texas"' in json.dumps(persona.model_dump())
+
+
+def test_dry_run_prices_every_slice_under_questions_per_call(tmp_path: Path, persona_csv: Path, survey, capsys) -> None:
+    personas = run_survey.load_personas(persona_csv, limit=1, prompt_variant="full")
+    base = _args(tmp_path, persona_csv, models=["deepseek/deepseek-v4-pro-0813"], repeats=1, seed_base=1, dry_run=True)
+    run_survey.dry_run(personas=personas, survey=survey, contexts=run_survey.load_contexts(), args=base)
+    one_call = capsys.readouterr().out
+    sliced = _args(tmp_path, persona_csv, models=["deepseek/deepseek-v4-pro-0813"], repeats=1, seed_base=1, dry_run=True, questions_per_call=10)
+    run_survey.dry_run(personas=personas, survey=survey, contexts=run_survey.load_contexts(), args=sliced)
+    four_calls = capsys.readouterr().out
+    def usd(text: str) -> float:
+        return float(next(line for line in text.splitlines() if "per run x" in line).split("~$")[1].split()[0])
+    # Four slices each repeat the persona and the context; the questions are not repeated, so the
+    # estimate grows but stays under 4x (the test fixture's persona is tiny, so the ratio is small here).
+    assert 1.0 < usd(four_calls) / usd(one_call) < 4.0
+    assert "input tokens across 4 calls" in four_calls
