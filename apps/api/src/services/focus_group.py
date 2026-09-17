@@ -155,6 +155,7 @@ def list_rooms(session, settings, study):
     return [room_status(session, settings, study, room.public_id, room=room) for room in rooms]
 
 
+@serialized_local
 def delete_room(session, study, room_id):
     room = owned_room(session, study, room_id, lock=True)
     # ponytail: tombstone, not a row delete. The room's InterviewTurn cost rows stay —
@@ -209,6 +210,7 @@ def start_room(session, settings, study, payload):
     return room_status(session, settings, study, room_id)
 
 
+@serialized_local
 def cancel_room(session, settings, study, room_id):
     room = owned_room(session, study, room_id, lock=True)
     if room.status in {"running", "failed", "budget_stopped"}:

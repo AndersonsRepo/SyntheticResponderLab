@@ -392,7 +392,10 @@ function FocusGroupPageContent() {
           {room.status === "budget_stopped" || room.status === "failed" ? (
             <div role="alert" className="rounded-xl border border-app-border p-4 text-sm">
               <p>{room.error?.message}</p>
-              {room.status === "failed" ? (
+              {/* A budget stop leaves the same holes a failure does, and the server's
+                  retry path accepts them — so offer the same repair once the budget is
+                  raised, rather than stranding the room. */}
+              {missing.length > 0 ? (
                 <Button variant="secondary" onClick={() => askRoom({ retry: true })} disabled={busy}>
                   Retry the {missing.length} missing answer(s)
                 </Button>

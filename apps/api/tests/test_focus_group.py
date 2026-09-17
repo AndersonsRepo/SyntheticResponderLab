@@ -666,3 +666,15 @@ def test_cancelled_room_cannot_buy_a_memo(room):
     assert refused.status_code == 409, refused.text
     assert "cancelled" in refused.json()["error"]["message"].lower()
     assert len(calls) == spent
+
+
+def test_every_mutating_entry_point_is_serialized():
+    """Refuter FG-4: cancel_room and delete_room were the only mutating entry points
+    not wrapped, so under SQLite — which the app supports in production — a cancel
+    issued during an in-flight round was overwritten when that round committed its
+    own status, and the room accepted further paid rounds.
+    """
+    mutating = ("start_room", "ask_round", "cancel_room", "delete_room", "focus_group_memo")
+    unguarded = [name for name in mutating
+                 if getattr(getattr(fg, name), "__wrapped__", None) is None]
+    assert not unguarded, f"not serialized: {unguarded}"
