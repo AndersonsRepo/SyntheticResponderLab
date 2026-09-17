@@ -184,6 +184,9 @@ def describe(row: pd.Series, counties: dict[int, str]) -> dict:
         "census_id": str(row["SERIALNO"]),
         "puma": number("PUMA"),
         "county": counties.get(number("PUMA")),
+        # The county lookup only covers California PUMAs. A national draw needs the state as
+        # well, otherwise every persona outside California has no location at all.
+        "state": (labels.decode("STATE", row.get("STATE")) or "").split("/")[0] or None,
         "age": age,
         "sex": labels.decode("SEX", row.get("SEX")),
         "marital_status": labels.decode("MAR", row.get("MAR")),
@@ -198,13 +201,24 @@ def describe(row: pd.Series, counties: dict[int, str]) -> dict:
         "children_in_household": number("NOC"),
         "household_type": labels.decode("HHT", row.get("HHT")),
         "tenure": labels.decode("TEN", row.get("TEN")),
-        "home_type": "One-family house detached",
+        # Decoded from the household's own BLD rather than assumed. This used to be hardcoded,
+        # which was harmless while every draw screened for detached houses but wrong for the
+        # matched draw, where structure type is whatever the real record says.
+        "home_type": labels.decode("BLD", row.get("BLD")),
         "bedrooms": number("BDSP"),
         "rooms": number("RMSP"),
         "year_built": labels.decode("YRBLT", row.get("YRBLT")),
         "moved_in": labels.decode("MV", row.get("MV")),
         "vehicles": labels.decode("VEH", row.get("VEH")),
-        "housing_cost_pct_of_income": number("OCPIP"),
+        # OCPIP is owner cost as a share of income; GRPIP is the renter equivalent. Reading only
+        # OCPIP left every renter blank, which is a gap in the data rather than a real absence.
+        "housing_cost_pct_of_income": (
+            number("OCPIP") if number("OCPIP") is not None else number("GRPIP")
+        ),
+        "housing_cost_basis": (
+            "owner costs" if number("OCPIP") is not None
+            else ("gross rent" if number("GRPIP") is not None else None)
+        ),
         "census_weight": number("WGTP"),
     }
 
