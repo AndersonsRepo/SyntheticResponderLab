@@ -1,0 +1,602 @@
+"""The simulated focus group: the PA3.5 rehearsal, in its own lane."""
+import json
+import logging
+import re
+from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
+from pathlib import Path
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import func, select
+
+from src.persistence.models import InterviewTurn, Job, Persona, Study
+from src.persistence.persona_seed import load_persona_seed_rows
+from src.services import focus_group as fg
+from src.services.exceptions import TransientProviderError
+from src.services.interview_cache import InterviewAnswer
+
+MODEL = "openai/gpt-4o-mini"
+THREE = ["P001", "P002", "P003"]
+FUNNEL = [
+    ("icebreaker", "Tell me who lives with you and what a weekday looks like."),
+    ("space_needs", "Where in your home do you run out of room?"),
+    ("concept", "What is your first reaction to a backyard studio like this?"),
+    ("price_reactions", "What would you expect something like this to cost, and how does $23,000 land?"),
+    ("close", "Anything we should have asked and did not?"),
+]
+
+
+def _answer_text(persona_id, question):
+    return (f"{persona_id} here. On '{question}' I would say I use the garage as an office and "
+            f"it is honestly too cold in winter.")
+
+
+def _memo_from_transcript(transcript):
+    """A well-behaved memo model: every quote copied out of the transcript it was given."""
+    said = re.findall(r"^(P\d+): (.+)$", transcript, re.M)
+    themes = [{"label": f"Theme {i + 1}", "synthesis": "Participants converge here.",
+               "quote": text[:40], "persona_id": pid, "sentiment": "neutral"}
+              for i, (pid, text) in enumerate(said[:3])]
+    return json.dumps({
+        "themes": themes,
+        "surprise": {"summary": "The winter complaint was unprompted.",
+                     "quote": said[0][1][-30:], "persona_id": said[0][0]},
+        "answer_options": [{"text": text[:25], "persona_id": pid} for pid, text in said[:3]],
+    })
+
+
+@pytest.fixture
+def room(client, db_session, monkeypatch):
+    db_session.add_all(Persona(**row) for row in load_persona_seed_rows())
+    db_session.commit()
+    study_id = client.post("/api/v1/studies", json={}).json()["data"]["study"]["study_id"]
+    client.app.state.settings.openrouter_api_key = "stub"
+    calls = []
+    behavior = {"fail": None, "unusable": False, "memo": _memo_from_transcript}
+
+    def provider(**kw):
+        calls.append(kw)
+        system = kw["messages"][0]["content"]
+        if "JSON object" in system:
+            transcript = kw["messages"][-1]["content"]
+            return InterviewAnswer(text=behavior["memo"](transcript), model=kw["model"],
+                                   tokens_in=50, tokens_out=50, cost_usd=Decimal(".002"))
+        persona_id = re.search(r"participant (P\d+)", system).group(1)
+        if behavior["unusable"]:
+            raise TransientProviderError("empty completion", measured_usage=InterviewAnswer(
+                text="", model=kw["model"], tokens_in=7, tokens_out=0, cost_usd=Decimal(".004")))
+        if behavior["fail"] and behavior["fail"](persona_id):
+            raise RuntimeError(f"provider exploded for {persona_id}")
+        question = kw["messages"][-1]["content"].removeprefix("Moderator: ")
+        return InterviewAnswer(text=_answer_text(persona_id, question), model=kw["model"],
+                               tokens_in=10, tokens_out=5, cost_usd=Decimal(".001"))
+
+    monkeypatch.setattr("src.services.interview_service._call_openrouter_messages", provider)
+    return client, study_id, calls, behavior
+
+
+def start(client, study_id, **overrides):
+    payload = {"request_id": str(uuid4()), "persona_ids": list(THREE), "model": MODEL,
+               "max_rounds": 8, **overrides}
+    return client.post(f"/api/v1/studies/{study_id}/interview/focus-group/rooms", json=payload)
+
+
+def ask(client, study_id, room, stage=None, question=None, **extra):
+    body = {"revision": room["revision"], **extra}
+    if stage:
+        body["stage"] = stage
+    if question:
+        body["question"] = question
+    return client.post(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{room['room_id']}/ask", json=body)
+
+
+def walk(client, study_id, room, stages=FUNNEL):
+    for stage, question in stages:
+        response = ask(client, study_id, room, stage=stage, question=question)
+        assert response.status_code == 200, response.text
+        room = response.json()["data"]["room"]
+    return room
+
+
+# --- the room itself --------------------------------------------------------
+
+def test_every_persona_answers_attributed_to_a_named_persona(room):
+    client, study_id, calls, _ = room
+    started = start(client, study_id).json()["data"]["room"]
+    asked = ask(client, study_id, started, stage="icebreaker",
+                question=FUNNEL[0][1]).json()["data"]["room"]
+    answers = asked["rounds"][0]["answers"]
+    assert [a["persona_id"] for a in answers] == THREE
+    assert all(a["status"] == "answered" and a["persona_id"] in a["text"] for a in answers)
+    assert len(calls) == 3
+
+
+def test_fewer_than_three_personas_is_refused_before_any_call(room):
+    client, study_id, calls, _ = room
+    response = start(client, study_id, persona_ids=["P001", "P002"])
+    assert response.status_code == 400
+    assert "at least 3" in response.json()["error"]["message"]
+    assert calls == []
+
+
+def test_duplicate_personas_refused_so_the_memo_can_tell_speakers_apart(room):
+    client, study_id, calls, _ = room
+    response = start(client, study_id, persona_ids=["P001", "P001", "P002"])
+    assert response.status_code == 400
+    assert "one seat" in response.json()["error"]["message"]
+    assert calls == []
+
+
+@pytest.mark.parametrize("change", [
+    {"persona_ids": [f"P{i:03d}" for i in range(1, 10)]},
+    {"max_rounds": 13}, {"max_rounds": 0}, {"max_rounds": True}, {"max_rounds": "8"},
+    {"model": "anthropic/claude-sonnet-4.5"},
+    {"persona_ids": ["P001", "P002", "P999"]},
+])
+def test_upper_bound_and_model_gate_refuse_before_a_paid_call(room, change):
+    client, study_id, calls, _ = room
+    assert start(client, study_id, **change).status_code == 400
+    assert calls == []
+
+
+def test_personas_see_each_other_not_other_rooms_transcripts(room):
+    client, study_id, calls, _ = room
+    first = start(client, study_id).json()["data"]["room"]
+    first = walk(client, study_id, first, FUNNEL[:2])
+    # Round two carries round one's other-participant answers into every prompt.
+    second_round_calls = calls[3:6]
+    for call, persona_id in zip(second_round_calls, THREE):
+        joined = " ".join(m["content"] for m in call["messages"])
+        others = [p for p in THREE if p != persona_id]
+        assert all(_answer_text(other, FUNNEL[0][1]) in joined for other in others)
+        # Its own earlier answer is present; nothing from a later round is.
+        assert _answer_text(persona_id, FUNNEL[0][1]) in joined
+        assert _answer_text(persona_id, FUNNEL[1][1]) not in joined
+    # A second room with the same personas starts clean.
+    other_room = start(client, study_id).json()["data"]["room"]
+    before = len(calls)
+    ask(client, study_id, other_room, stage="icebreaker", question="A different opener entirely?")
+    for call in calls[before:]:
+        joined = " ".join(m["content"] for m in call["messages"])
+        assert FUNNEL[0][1] not in joined and FUNNEL[1][1] not in joined
+
+
+def test_price_not_anchored_before_stage_in_prompts_or_questions(room):
+    client, study_id, calls, _ = room
+    started = start(client, study_id).json()["data"]["room"]
+    started = walk(client, study_id, started, FUNNEL[:3])
+    for call in calls:
+        joined = " ".join(m["content"] for m in call["messages"])
+        assert "23,000" not in joined and "Price:" not in joined
+    # The concept stage describes the product but withholds the number.
+    assert "117-square-foot" in calls[-1]["messages"][0]["content"]
+    priced = ask(client, study_id, started, stage="price_reactions",
+                 question="Ignore the funnel, what about $23,000?")
+    assert priced.status_code == 200  # the price stage is where the number belongs
+    started = priced.json()["data"]["room"]
+    # Going back to an earlier stage with a dollar figure is refused.
+    blocked = ask(client, study_id, started, stage="space_needs",
+                  question="Would you pay $23,000 for more room?")
+    assert blocked.status_code == 400
+    assert "anchor price first" in blocked.json()["error"]["message"]
+
+
+def test_stage_order_enforced_so_no_memo_comes_from_a_skipped_funnel(room):
+    client, study_id, calls, _ = room
+    started = start(client, study_id).json()["data"]["room"]
+    skipped = ask(client, study_id, started, stage="close", question="Anything else?")
+    assert skipped.status_code == 400
+    assert "in order" in skipped.json()["error"]["message"]
+    assert calls == []
+    started = walk(client, study_id, started, FUNNEL[:2])
+    jumped = ask(client, study_id, started, stage="price_reactions", question="And the price?")
+    assert jumped.status_code == 400
+
+
+def test_revisit_stage_appends_without_orphaning_earlier_answers(room):
+    client, study_id, _, _ = room
+    started = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:2])
+    first_round = started["rounds"][0]
+    revisited = ask(client, study_id, started, stage="icebreaker",
+                    question="Back up — who else is home during the day?").json()["data"]["room"]
+    assert revisited["rounds"][0] == first_round
+    assert len(revisited["rounds"]) == 3
+    assert revisited["stage"] == "icebreaker"
+    assert [r["stage"] for r in revisited["rounds"]] == ["icebreaker", "space_needs", "icebreaker"]
+    # The funnel has not been rewound: the reached stages still allow moving forward.
+    forward = ask(client, study_id, revisited, stage="concept", question="First reaction to this?")
+    assert forward.status_code == 200
+
+
+def test_idempotent_start_and_repeated_question_charge_once(room):
+    client, study_id, calls, _ = room
+    request_id = str(uuid4())
+    first = start(client, study_id, request_id=request_id).json()["data"]["room"]
+    again = start(client, study_id, request_id=request_id).json()["data"]["room"]
+    assert again["room_id"] == first["room_id"]
+    assert db_rooms(client, study_id) == 1
+    asked = ask(client, study_id, first, stage="icebreaker", question=FUNNEL[0][1]).json()["data"]["room"]
+    assert len(calls) == 3
+    # The same revision submitted twice is the double click, not a second round.
+    repeat = ask(client, study_id, first, stage="icebreaker", question=FUNNEL[0][1]).json()["data"]["room"]
+    assert len(calls) == 3
+    assert repeat["rounds"] == asked["rounds"]
+    assert repeat["revision"] == asked["revision"]
+
+
+def db_rooms(client, study_id):
+    return len(client.get(f"/api/v1/studies/{study_id}/interview/focus-group/rooms").json()["data"]["rooms"])
+
+
+def test_concurrent_submissions_do_not_interleave_two_rounds(room):
+    client, study_id, calls, _ = room
+    started = start(client, study_id).json()["data"]["room"]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(
+            lambda q: ask(client, study_id, started, stage="icebreaker", question=q),
+            [FUNNEL[0][1], "A completely different second question?"]))
+    assert all(r.status_code == 200 for r in responses)
+    assert len(calls) == 3
+    final = client.get(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{started['room_id']}"
+    ).json()["data"]["room"]
+    assert len(final["rounds"]) == 1
+    assert [a["persona_id"] for a in final["rounds"][0]["answers"]] == THREE
+
+
+def test_resume_after_a_refresh_returns_the_same_room_and_stage(room):
+    client, study_id, calls, _ = room
+    started = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:3])
+    spent = len(calls)
+    reopened = client.get(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{started['room_id']}"
+    ).json()["data"]["room"]
+    assert reopened["rounds"] == started["rounds"]
+    assert reopened["stage"] == "concept"
+    assert reopened["session_usage"]["cost_usd"] == started["session_usage"]["cost_usd"]
+    assert len(calls) == spent
+    assert client.get(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms").json()["data"]["rooms"][0]["room_id"] == started["room_id"]
+
+
+def test_cancel_keeps_charged_answers_and_makes_no_further_paid_call(room):
+    client, study_id, calls, _ = room
+    started = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:2])
+    spent = len(calls)
+    cancelled = client.post(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{started['room_id']}/cancel"
+    ).json()["data"]["room"]
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["rounds"] == started["rounds"]
+    blocked = ask(client, study_id, cancelled, stage="concept", question="One more?")
+    assert blocked.status_code == 409
+    assert "cancelled" in blocked.json()["error"]["message"]
+    assert len(calls) == spent
+
+
+# --- failure, retry, budget -------------------------------------------------
+
+def test_partial_failure_recoverable_and_the_missing_persona_named(room, caplog):
+    client, study_id, calls, behavior = room
+    started = start(client, study_id).json()["data"]["room"]
+    behavior["fail"] = lambda persona_id: persona_id == "P002"
+    with caplog.at_level(logging.WARNING, logger="src.services.focus_group"):
+        failed = ask(client, study_id, started, stage="icebreaker",
+                     question=FUNNEL[0][1]).json()["data"]["room"]
+    assert failed["status"] == "failed"
+    statuses = {a["persona_id"]: a["status"] for a in failed["rounds"][0]["answers"]}
+    assert statuses == {"P001": "answered", "P002": "missing", "P003": "answered"}
+    assert failed["error"]["missing"] == [{"round": 0, "persona_id": "P002"}]
+    assert "Retry" in failed["error"]["message"]
+    assert failed["complete"] is False
+    assert len(calls) == 3
+
+
+def test_failure_log_carries_room_stage_persona_and_provider_error(room, caplog):
+    client, study_id, _, behavior = room
+    started = start(client, study_id).json()["data"]["room"]
+    behavior["fail"] = lambda persona_id: persona_id == "P002"
+    with caplog.at_level(logging.WARNING, logger="src.services.focus_group"):
+        ask(client, study_id, started, stage="icebreaker", question=FUNNEL[0][1])
+    record = next(r for r in caplog.records if r.message.startswith("focus_group_failure"))
+    line = record.getMessage()
+    assert started["room_id"] in line and "stage=icebreaker" in line
+    assert "persona=P002" in line and "exploded" in line
+
+
+def test_retry_only_missing_turns_without_recharging_collected_answers(room):
+    client, study_id, calls, behavior = room
+    started = start(client, study_id).json()["data"]["room"]
+    behavior["fail"] = lambda persona_id: persona_id == "P002"
+    failed = ask(client, study_id, started, stage="icebreaker",
+                 question=FUNNEL[0][1]).json()["data"]["room"]
+    kept = [a["text"] for a in failed["rounds"][0]["answers"] if a["status"] == "answered"]
+    cost_after_failure = Decimal(failed["session_usage"]["cost_usd"])
+    behavior["fail"] = None
+    retried = ask(client, study_id, failed, retry=True).json()["data"]["room"]
+    assert retried["status"] == "running"
+    assert len(calls) == 4  # only P002 was re-run
+    assert Decimal(retried["session_usage"]["cost_usd"]) == cost_after_failure + Decimal(".001")
+    answers = retried["rounds"][0]["answers"]
+    assert [a["status"] for a in answers] == ["answered"] * 3
+    assert [a["text"] for a in answers if a["persona_id"] != "P002"] == kept
+    assert len(retried["rounds"]) == 1
+
+
+def test_timeout_is_bounded_and_surfaces_as_a_retryable_failure(room):
+    client, study_id, calls, behavior = room
+    started = start(client, study_id).json()["data"]["room"]
+    ask(client, study_id, started, stage="icebreaker", question=FUNNEL[0][1])
+    assert all(call["timeout"] == fg.PROVIDER_TIMEOUT_SECONDS for call in calls)
+    assert all(call["max_attempts"] == 1 for call in calls)
+    assert fg.PROVIDER_TIMEOUT_SECONDS <= 120
+
+    behavior["fail"] = lambda persona_id: True
+    room_after = client.get(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{started['room_id']}"
+    ).json()["data"]["room"]
+    timed_out = ask(client, study_id, room_after, stage="space_needs",
+                    question=FUNNEL[1][1]).json()["data"]["room"]
+    assert timed_out["status"] == "failed"
+    assert len(timed_out["error"]["missing"]) == 3
+    assert "Retry" in timed_out["error"]["message"]
+
+
+def test_budget_stop_records_every_charge_and_says_so_in_plain_words(room):
+    client, study_id, calls, _ = room
+    client.app.state.settings.llm_budget_usd = Decimal(".0018")
+    started = start(client, study_id, max_rounds=1).json()["data"]["room"]
+    stopped = ask(client, study_id, started, stage="icebreaker",
+                  question=FUNNEL[0][1]).json()["data"]["room"]
+    assert stopped["status"] == "budget_stopped"
+    assert stopped["error"]["code"] == "quota_exceeded"
+    message = stopped["error"]["message"]
+    assert "budget stopped this room" in message and "remains" in message
+    assert "still" in message
+    # Every call that was actually charged is visible, in order, and accounted for.
+    answered = [a for a in stopped["rounds"][0]["answers"] if a["status"] == "answered"]
+    assert [a["persona_id"] for a in answered] == THREE[:len(answered)]
+    assert Decimal(stopped["session_usage"]["cost_usd"]) == Decimal(".001") * len(calls)
+    assert stopped["error"]["stage"] == "icebreaker"
+
+
+def test_budget_records_a_billed_but_unusable_response(room):
+    client, study_id, calls, behavior = room
+    started = start(client, study_id).json()["data"]["room"]
+    behavior["unusable"] = True
+    failed = ask(client, study_id, started, stage="icebreaker",
+                 question=FUNNEL[0][1]).json()["data"]["room"]
+    assert failed["status"] == "failed"
+    assert len(calls) == 3
+    assert all(a["status"] == "missing" for a in failed["rounds"][0]["answers"])
+    # The provider billed for three unusable responses; all three are on the ledger.
+    assert Decimal(failed["session_usage"]["cost_usd"]) == Decimal(".012")
+
+
+def test_actual_vs_estimated_cost_is_visible_after_the_run(room):
+    client, study_id, _, _ = room
+    started = start(client, study_id).json()["data"]["room"]
+    estimated = Decimal(started["estimated_cost_usd"])
+    assert estimated == fg.estimate_room_cost_usd(persona_count=3, rounds=8, model_id=MODEL)
+    assert estimated > 0
+    finished = walk(client, study_id, started)
+    assert Decimal(finished["session_usage"]["cost_usd"]) == Decimal(".015")
+    assert Decimal(finished["estimated_cost_usd"]) == estimated
+    assert finished["status"] == "completed"
+
+
+def test_estimate_formula_matches_the_web_pre_start_estimate():
+    source = Path(__file__).resolve().parents[3] / "apps/web/src/lib/focus-group.ts"
+    text = source.read_text()
+    assert f"ESTIMATED_PROMPT_TOKENS_PER_TURN = {fg.ESTIMATED_PROMPT_TOKENS_PER_TURN}" in text
+    assert f"ESTIMATED_COMPLETION_TOKENS_PER_TURN = {fg.ESTIMATED_COMPLETION_TOKENS_PER_TURN}" in text
+    assert f"MIN_PERSONAS = {fg.MIN_PERSONAS}" in text
+    assert f"MAX_PERSONAS = {fg.MAX_PERSONAS}" in text
+    assert f"MAX_ROUNDS = {fg.MAX_ROUNDS}" in text
+    assert all(f'"{stage}"' in text for stage in fg.STAGES)
+
+
+def test_cached_replay_of_the_same_room_makes_no_new_paid_call(room):
+    client, study_id, calls, _ = room
+    finished = walk(client, study_id, start(client, study_id).json()["data"]["room"])
+    spent = len(calls)
+    # Re-opening the finished room and its memo view costs nothing.
+    client.get(f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{finished['room_id']}")
+    client.get(f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{finished['room_id']}/memo")
+    assert len(calls) == spent
+    # An identical room replays out of the durable answer cache, free.
+    replay = walk(client, study_id, start(client, study_id).json()["data"]["room"])
+    assert len(calls) == spent
+    assert Decimal(replay["session_usage"]["cost_usd"]) == 0
+    assert [r["answers"] for r in replay["rounds"]] == [r["answers"] for r in finished["rounds"]]
+
+
+# --- memo -------------------------------------------------------------------
+
+def test_memo_fields_are_themes_one_surprise_and_three_answer_options(room):
+    client, study_id, _, _ = room
+    finished = walk(client, study_id, start(client, study_id).json()["data"]["room"])
+    view = memo(client, study_id, finished)
+    assert view["eligible"] is True
+    written = write_memo(client, study_id, finished, view)
+    saved = written["saved"]
+    assert fg.MEMO_MIN_THEMES <= len(saved["themes"]) <= fg.MEMO_MAX_THEMES
+    assert all(t["quote"] and t["persona_id"] and t["sentiment"] for t in saved["themes"])
+    assert saved["surprise"]["summary"] and saved["surprise"]["quote"]
+    assert len(saved["answer_options"]) >= fg.MEMO_MIN_ANSWER_OPTIONS
+    assert written["available"] is True
+
+
+def memo(client, study_id, room_state):
+    return client.get(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{room_state['room_id']}/memo"
+    ).json()["data"]["memo"]
+
+
+def write_memo(client, study_id, room_state, view, **extra):
+    response = client.post(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{room_state['room_id']}/memo",
+        json={"revision": view["revision"], "authorize_charge": True, **extra})
+    assert response.status_code == 200, response.text
+    return response.json()["data"]["memo"]
+
+
+def test_verbatim_traceable_quotes_and_options_are_located_in_the_transcript(room):
+    client, study_id, _, behavior = room
+    finished = walk(client, study_id, start(client, study_id).json()["data"]["room"])
+    saved = write_memo(client, study_id, finished, memo(client, study_id, finished))["saved"]
+    said = {(a["persona_id"], r["index"]): a["text"]
+            for r in finished["rounds"] for a in r["answers"]}
+    for item in [*saved["themes"], *saved["answer_options"], saved["surprise"]]:
+        where = item["located_at"]
+        source = said[(where["persona_id"], where["round"])]
+        assert item["quote" if "quote" in item else "text"] in source
+        assert where["stage"] in fg.STAGES
+    # An invented quote is refused rather than saved.
+    behavior["memo"] = lambda transcript: json.dumps({
+        "themes": [{"label": "Made up", "synthesis": "Nobody said this.",
+                    "quote": "I would pay double on the spot.", "persona_id": "P001",
+                    "sentiment": "positive"}] * 3,
+        "surprise": {"summary": "s", "quote": "I would pay double on the spot.", "persona_id": "P001"},
+        "answer_options": [{"text": "Never said", "persona_id": "P001"}] * 3})
+    other = walk(client, study_id, start(client, study_id).json()["data"]["room"])
+    rejected = write_memo(client, study_id, other, memo(client, study_id, other))
+    assert rejected["available"] is False
+    assert rejected["saved"]["themes"] is None
+    assert "could not be validated" in rejected["saved"]["message"]
+
+
+def test_memo_requires_enough_room_and_says_so_instead_of_padding(room):
+    client, study_id, calls, behavior = room
+    started = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:2])
+    view = memo(client, study_id, started)
+    assert view["eligible"] is False
+    assert "Tahoe Mini concept" in view["message"] and "Price reactions" in view["message"]
+    spent = len(calls)
+    assert write_memo(client, study_id, started, view)["saved"] is None
+    assert len(calls) == spent  # refusing costs nothing
+    # Reaching concept and price but with holes in the room is also refused, in plain words.
+    behavior["fail"] = lambda persona_id: persona_id == "P003"
+    thin = walk(client, study_id, start(client, study_id).json()["data"]["room"],
+                [(stage, f"{q} Second room.") for stage, q in FUNNEL])
+    thin_view = memo(client, study_id, thin)
+    assert thin_view["eligible"] is False
+    assert f"at least {fg.MEMO_MIN_ANSWERS}" in thin_view["message"]
+
+
+def test_memo_is_cached_and_reopening_it_charges_nothing(room):
+    client, study_id, calls, _ = room
+    finished = walk(client, study_id, start(client, study_id).json()["data"]["room"])
+    view = memo(client, study_id, finished)
+    write_memo(client, study_id, finished, view)
+    spent = len(calls)
+    again = write_memo(client, study_id, finished, view)
+    assert len(calls) == spent
+    assert again["available"] is True
+
+
+# --- lists, lanes, export, isolation ---------------------------------------
+
+def test_room_list_lifecycle_reopen_export_and_delete(room):
+    client, study_id, _, _ = room
+    finished = walk(client, study_id, start(client, study_id).json()["data"]["room"])
+    rooms = client.get(f"/api/v1/studies/{study_id}/interview/focus-group/rooms").json()["data"]["rooms"]
+    assert [r["room_id"] for r in rooms] == [finished["room_id"]]
+    assert client.get(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{finished['room_id']}").status_code == 200
+    assert client.post(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{finished['room_id']}/export",
+        json={"format": "markdown"}).status_code == 200
+    assert client.delete(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{finished['room_id']}").status_code == 200
+    assert client.get(f"/api/v1/studies/{study_id}/interview/focus-group/rooms").json()["data"]["rooms"] == []
+    assert client.get(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{finished['room_id']}").status_code == 404
+
+
+def test_deleting_a_room_keeps_its_spend_on_the_class_ledger(room, db_session):
+    client, study_id, _, _ = room
+    finished = walk(client, study_id, start(client, study_id).json()["data"]["room"])
+    client.delete(f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{finished['room_id']}")
+    charged = db_session.scalar(select(func.count()).select_from(InterviewTurn)
+                                .where(InterviewTurn.session_id == finished["room_id"]))
+    assert charged == 15
+
+
+def test_separate_lane_never_leaks_into_the_interview_section(room, db_session):
+    client, study_id, _, _ = room
+    finished = walk(client, study_id, start(client, study_id).json()["data"]["room"])
+    assert client.get(f"/api/v1/studies/{study_id}/interview/batches").json()["data"]["batches"] == []
+    assert client.get(
+        f"/api/v1/studies/{study_id}/interview/batches/{finished['room_id']}").status_code == 404
+    assert client.get(
+        f"/api/v1/studies/{study_id}/interview/batches/{finished['room_id']}/themes").status_code == 404
+    assert client.get(f"/api/v1/studies/{study_id}/interview/runs/latest").json()["data"]["interview_run"] is None
+    assert db_session.scalar(select(Job.job_type).where(Job.public_id == finished["room_id"])) == "focus_group_room"
+    # Focus-group turns carry no transcript text, so no interview corpus can pick them up.
+    texts = db_session.scalars(select(InterviewTurn.text)
+                               .where(InterviewTurn.session_id == finished["room_id"])).all()
+    assert set(texts) == {""}
+
+
+def test_export_attributes_every_turn_to_its_persona(room):
+    client, study_id, _, _ = room
+    finished = walk(client, study_id, start(client, study_id).json()["data"]["room"])
+    write_memo(client, study_id, finished, memo(client, study_id, finished))
+    exported = client.post(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{finished['room_id']}/export",
+        json={"format": "markdown"}).json()["data"]["export"]
+    assert exported["complete"] is True
+    assert "INCOMPLETE" not in exported["content"]
+    for persona_id in THREE:
+        assert f"**{persona_id}:**" in exported["content"]
+    for _, question in FUNNEL:
+        assert question in exported["content"]
+    assert "### One surprise" in exported["content"]
+    assert exported["filename"].endswith(".md")
+    csv_export = client.post(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{finished['room_id']}/export",
+        json={"format": "csv"}).json()["data"]["export"]
+    assert "P001" in csv_export["content"] and csv_export["filename"].endswith(".csv")
+
+
+def test_export_of_an_unfinished_room_is_marked_incomplete(room):
+    client, study_id, _, behavior = room
+    started = start(client, study_id).json()["data"]["room"]
+    behavior["fail"] = lambda persona_id: persona_id == "P003"
+    failed = ask(client, study_id, started, stage="icebreaker",
+                 question=FUNNEL[0][1]).json()["data"]["room"]
+    exported = client.post(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{failed['room_id']}/export",
+        json={"format": "markdown"}).json()["data"]["export"]
+    assert exported["complete"] is False
+    assert "INCOMPLETE — do not submit as final" in exported["content"]
+    assert "0:P003" in exported["content"]
+    assert "**P001:**" in exported["content"]
+    assert "_no answer" in exported["content"]
+
+
+def test_classroom_isolation_keeps_one_students_room_off_another_device(room, db_session):
+    client, _, _, _ = room
+    first = {"x-authenticated-user-id": f"classroom:{uuid4()}",
+             "x-authenticated-auth-mode": "classroom-no-login"}
+    second = {"x-authenticated-user-id": f"classroom:{uuid4()}",
+              "x-authenticated-auth-mode": "classroom-no-login"}
+    study_a = client.post("/api/v1/studies", json={}, headers=first).json()["data"]["study"]["study_id"]
+    study_b = client.post("/api/v1/studies", json={}, headers=second).json()["data"]["study"]["study_id"]
+    room_a = client.post(f"/api/v1/studies/{study_a}/interview/focus-group/rooms",
+        json={"request_id": str(uuid4()), "persona_ids": list(THREE), "model": MODEL, "max_rounds": 5},
+        headers=first).json()["data"]["room"]
+    assert client.get(f"/api/v1/studies/{study_a}/interview/focus-group/rooms",
+                      headers=second).status_code == 403
+    assert client.get(f"/api/v1/studies/{study_a}/interview/focus-group/rooms/{room_a['room_id']}",
+                      headers=second).status_code == 403
+    assert client.get(f"/api/v1/studies/{study_a}/interview/focus-group/rooms/{room_a['room_id']}/memo",
+                      headers=second).status_code == 403
+    assert client.get(f"/api/v1/studies/{study_b}/interview/focus-group/rooms",
+                      headers=second).json()["data"]["rooms"] == []
+    # And student B cannot address student A's room through their own study either.
+    assert client.get(f"/api/v1/studies/{study_b}/interview/focus-group/rooms/{room_a['room_id']}",
+                      headers=second).status_code == 404

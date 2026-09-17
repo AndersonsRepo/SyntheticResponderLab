@@ -482,11 +482,16 @@ def get_interview_insights(
     }
 
 
-def _build_fixed_persona_system_prompt(profile: dict[str, Any]) -> str:
+def build_persona_description(profile: dict[str, Any]) -> str:
+    """The persona's own sentences, with no product or price context attached.
+
+    Kept separate from the prompt around it so a caller that must withhold the
+    product (the focus group's staged funnel) can reuse the same person.
+    """
     lifestyle_tags = profile.get("lifestyle_tags")
     if not isinstance(lifestyle_tags, list):
         lifestyle_tags = []
-    description = " ".join(
+    return " ".join(
         part
         for part in (
             f"You are a {profile.get('age_bucket', 'unknown')} year-old "
@@ -502,6 +507,10 @@ def _build_fixed_persona_system_prompt(profile: dict[str, Any]) -> str:
         )
         if part
     )
+
+
+def _build_fixed_persona_system_prompt(profile: dict[str, Any]) -> str:
+    description = build_persona_description(profile)
     return f"""You are role-playing as a real person participating in a qualitative depth interview.
 
 YOUR PERSONA:
