@@ -65,23 +65,31 @@ def assign_names(sexes: list[str | None], seed: int) -> list[str]:
 
     Uses its own random stream so the assignment cannot line up with the order personas were
     drawn in, which itself carries no meaning but is better kept uncorrelated anyway.
+
+    Uniqueness is enforced on the FULL name rather than on first and last separately. With ~70
+    first names per sex and ~120 surnames the pools alone cannot cover a 600-persona set, but the
+    combinations comfortably can, so first names repeat while no two personas share a full name.
     """
     rng = np.random.default_rng(seed)
-    used_first: set[str] = set()
-    used_last: set[str] = set()
+    used_full: set[str] = set()
     assigned: list[str] = []
 
     for sex in sexes:
         pool = FEMALE_FIRST if str(sex).strip().lower() == "female" else MALE_FIRST
 
-        available_first = [n for n in pool if n not in used_first] or pool
-        first = str(rng.choice(available_first))
-        used_first.add(first)
+        # Draw until the combination is new. The space is ~8,000 pairs per sex, so for any
+        # realistic set size this resolves in a handful of attempts.
+        for _ in range(10_000):
+            candidate = f"{rng.choice(pool)} {rng.choice(SURNAMES)}"
+            if candidate not in used_full:
+                break
+        else:
+            raise RuntimeError(
+                f"Could not find an unused name after 10,000 attempts ({len(used_full)} assigned). "
+                "Extend the name pools in names.py."
+            )
 
-        available_last = [n for n in SURNAMES if n not in used_last] or SURNAMES
-        last = str(rng.choice(available_last))
-        used_last.add(last)
-
-        assigned.append(f"{first} {last}")
+        used_full.add(candidate)
+        assigned.append(candidate)
 
     return assigned

@@ -29,8 +29,9 @@ CENSUS_FIELDS = [
 ]
 
 STORY_FIELDS = [
-    "headline", "biography", "daily_routine", "household_and_home",
-    "priorities", "financial_picture", "free_time",
+    "headline", "biography", "daily_routine", "weekend_routine", "household_and_home",
+    "outdoor_space", "home_projects", "work_setup", "space_pressure", "money_decisions",
+    "priorities", "financial_picture", "free_time", "communication_style",
 ]
 
 
@@ -74,26 +75,55 @@ def main() -> int:
         "",
         "SCREENS APPLIED (in order)",
     ]
-    for key, description in payload["screens"].items():
+    for key, description in payload.get("screens", {}).items():
         lines.append(f"  {key:<12} {description}")
+    if "matched_on" in payload:
+        screen = payload.get("outdoor_space_screen", "not recorded")
+        lines.append(f"  outdoor space   {screen}")
+        lines.append("  (no California / income / age screens; see MATCHING below)")
 
-    lines += [
-        "",
-        "FUNNEL",
-    ]
-    for step in payload["funnel"]:
-        households = f"{step['weighted_households']:,} households" if step["weighted_households"] else ""
-        lines.append(f"  {step['step']:<52} {step['records']:>9,} records   {households}")
+    if payload.get("funnel"):
+        lines += ["", "FUNNEL"]
+        for step in payload["funnel"]:
+            households = f"{step['weighted_households']:,} households" if step["weighted_households"] else ""
+            lines.append(f"  {step['step']:<52} {step['records']:>9,} records   {households}")
 
+    if "matched_on" in payload:
+        lines += [
+            "",
+            "MATCHING",
+            f"  matched on      {', '.join(payload['matched_on'])}",
+            f"  target          {payload['target_respondents']} real respondents",
+            f"  cells targeted  {payload['cells_targeted']}",
+            f"  cells short     {len(payload.get('cells_short', []))}",
+            "",
+            "  INTERPRETATION",
+            f"  {payload['interpretation']}",
+        ]
+
+    lines += [""]
+    if "eligible_pool_records" in payload:
+        lines.append(
+            f"ELIGIBLE POOL   {payload['eligible_pool_records']:,} records "
+            f"({payload['eligible_pool_households']:,} California households)"
+        )
+    lines += [f"DRAWN           {payload['drawn']}, seed {payload['seed']}"]
+    if "outdoor_space_screen" in payload:
+        lines += [
+            "",
+            "REPRODUCING THIS EXACT DRAW",
+            "  The seed alone is NOT enough. The same seed over a different candidate pool selects",
+            "  different households, so the screen setting is part of the draw's identity. An",
+            "  earlier unscreened run with this same seed produced a different 600 with 184",
+            "  non-owners instead of 94.",
+            f"    python phase1/matched_draw.py --tag <tag> --seed {payload['seed']} \\",
+            f"        --outdoor-space {payload['outdoor_space_screen'].split(':')[0]}",
+        ]
     lines += [
-        "",
-        f"ELIGIBLE POOL   {payload['eligible_pool_records']:,} records "
-        f"({payload['eligible_pool_households']:,} California households)",
-        f"DRAWN           {payload['drawn']} at random, seed {payload['seed']}",
         "",
         "BIAS CONTROLS",
-        f"  {payload['excluded_by_design']}",
-        f"  {payload['name_assignment']}",
+        f"  {payload.get('excluded_by_design') or payload.get('not_used_from_real_data', '')}",
+        f"  {payload.get('name_assignment', '')}",
         "  Stories are checked by phase1/audit_bias.py for any mention of ethnicity, immigration,",
         "  religion, language, or nationality, and for judgement-loaded language that tracks income.",
         "",

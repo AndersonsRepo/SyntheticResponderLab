@@ -24,6 +24,8 @@ import requests
 
 BASE_URL = "https://www2.census.gov/programs-surveys/acs/data/pums"
 STATE = "ca"
+# "national" pulls every state (csv_pus/csv_hus). Needed for any draw matched on region, since
+# the state-specific California files obviously cannot represent the South or Midwest.
 CHUNK_SIZE = 200_000
 
 HERE = Path(__file__).resolve().parent
@@ -38,7 +40,7 @@ OUT_DIR = HERE / "out"
 # the pipeline never to hold it. See phase1/write_stories.py for the rest of the bias controls.
 PERSON_COLUMNS = [
     "SERIALNO",
-    "ST",
+    "STATE",
     "PUMA",
     "PWGTP",
     "RELSHIPP",
@@ -54,7 +56,7 @@ PERSON_COLUMNS = [
 ]
 HOUSING_COLUMNS = [
     "SERIALNO",
-    "ST",
+    "STATE",
     "PUMA",
     "WGTP",
     "TEN",
@@ -142,6 +144,12 @@ def read_slim(zip_path: Path, wanted: list[str]) -> pd.DataFrame:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vintage", choices=["1-year", "5-year"], default="5-year")
+    parser.add_argument(
+        "--scope",
+        choices=["ca", "national"],
+        default="ca",
+        help="national is much larger; 1-year is the practical vintage for it.",
+    )
     parser.add_argument("--year", default="2024")
     parser.add_argument("--keep-raw", action="store_true", help="Do not delete the downloaded archives.")
     parser.add_argument(
@@ -155,9 +163,10 @@ def main() -> int:
     base = f"{BASE_URL}/{args.year}/{label}"
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    suffix = "us" if args.scope == "national" else STATE
     targets = [
-        ("person", f"csv_p{STATE}.zip", PERSON_COLUMNS),
-        ("housing", f"csv_h{STATE}.zip", HOUSING_COLUMNS),
+        ("person", f"csv_p{suffix}.zip", PERSON_COLUMNS),
+        ("housing", f"csv_h{suffix}.zip", HOUSING_COLUMNS),
     ]
     if args.only:
         targets = [t for t in targets if t[0] == args.only]
@@ -165,7 +174,7 @@ def main() -> int:
     manifest: dict = {
         "source": "US Census Bureau ACS PUMS",
         "vintage": f"{args.year} {label}",
-        "state": "California (ST=06)",
+        "scope": args.scope,
         "base_url": base,
         "files": [],
     }
@@ -176,7 +185,8 @@ def main() -> int:
         download(f"{base}/{filename}", archive_path)
 
         frame = read_slim(archive_path, columns)
-        out_path = OUT_DIR / f"acs_{kind}_slim.parquet"
+        stem = f"acs_{kind}_slim" if args.scope == "ca" else f"acs_{kind}_slim_national"
+        out_path = OUT_DIR / f"{stem}.parquet"
         frame.to_parquet(out_path, index=False)
         print(f"  wrote {out_path.name}: {len(frame):,} rows x {len(frame.columns)} cols")
 
@@ -192,7 +202,11 @@ def main() -> int:
         )
 
     # Merge with any existing manifest so a --only run does not drop the other file's record.
-    manifest_path = OUT_DIR / "acs_download_manifest.json"
+    manifest_name = (
+        "acs_download_manifest.json" if args.scope == "ca"
+        else "acs_download_manifest_national.json"
+    )
+    manifest_path = OUT_DIR / manifest_name
     if manifest_path.exists():
         previous = json.loads(manifest_path.read_text())
         fetched_kinds = {entry["kind"] for entry in manifest["files"]}

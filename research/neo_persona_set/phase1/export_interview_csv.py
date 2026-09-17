@@ -51,27 +51,38 @@ RETIRED_COLUMNS = [
 
 # Exact values, kept so the bucketing above is never the only record of a number.
 PRECISE_COLUMNS = [
-    "exact_age", "exact_household_income", "sex", "county", "marital_status", "education",
+    # region and state come first among the location fields: the county lookup only resolves
+    # California PUMAs, so for a national draw it is blank for most rows and cannot stand alone.
+    "exact_age", "exact_household_income", "sex", "region", "state", "county",
+    "marital_status", "education",
     "occupation", "employment_status", "hours_worked_per_week", "commute_mode", "commute_minutes",
     "household_size", "children_in_household", "household_type", "tenure_detail", "bedrooms",
-    "rooms", "year_built", "moved_in", "vehicles", "housing_cost_pct_of_income", "name",
+    "rooms", "year_built", "moved_in", "vehicles", "housing_cost_pct_of_income",
+    "housing_cost_basis", "name",
 ]
 
 # The written profile, so one file serves both the interview flow and a human reading the persona.
 STORY_COLUMNS = [
-    "headline", "biography", "daily_routine", "household_and_home",
-    "priorities", "financial_picture", "free_time",
+    "headline", "biography", "daily_routine", "weekend_routine", "household_and_home",
+    "outdoor_space", "home_projects", "work_setup", "space_pressure", "money_decisions",
+    "priorities", "financial_picture", "free_time", "communication_style",
 ]
 
 
 def age_bucket(age: int | None) -> str:
-    """Bucket age within the screened 30-65 range.
+    """Bucket age across the full adult range.
 
-    Boundaries follow the screen rather than a generic ladder: there is no 25-34 bucket because
-    nobody under 30 is eligible, and 65 stands alone because the screen stops there.
+    The ladder used to start at 30-34 and end at a bare "65", because every draw was screened to
+    30-65 so nothing could fall outside. The matched draw is not screened and spans 24 to 95, where
+    that shape silently mislabelled a 24-year-old as "30-34" and a 95-year-old as "65". The bands
+    below cover any age; the screened sets still only ever produce the original labels.
     """
     if age is None:
         return ""
+    if age < 25:
+        return "18-24"
+    if age < 30:
+        return "25-29"
     if age < 35:
         return "30-34"
     if age < 45:
@@ -80,17 +91,29 @@ def age_bucket(age: int | None) -> str:
         return "45-54"
     if age < 65:
         return "55-64"
-    return "65"
+    if age < 75:
+        return "65-74"
+    return "75+"
 
 
 def income_bucket(income: float | None) -> str:
-    """Bucket household income above the $100k screen.
+    """Bucket household income across the full range.
 
-    The screened population runs from $100k to over $1M, so the ladder continues past $150k.
-    A single "$150k+" bucket would put a $160k household and a $1.2M household in one cell.
+    The first branch used to be `income < 150_000 -> "$100k-$150k"`, which was only safe because
+    every draw was screened to $100k and up. In the unscreened matched draw it labelled a $31,980
+    household as "$100k-$150k". The bands below start at zero; the screened sets still only ever
+    produce the original labels.
     """
     if income is None:
         return ""
+    if income < 25_000:
+        return "under $25k"
+    if income < 50_000:
+        return "$25k-$50k"
+    if income < 75_000:
+        return "$50k-$75k"
+    if income < 100_000:
+        return "$75k-$100k"
     if income < 150_000:
         return "$100k-$150k"
     if income < 200_000:
@@ -206,7 +229,7 @@ def resolve_input(tag: str, override: str | None) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tag", default="owners", choices=["owners", "mixed"])
+    parser.add_argument("--tag", default="owners")
     parser.add_argument("--input", default=None, help="Explicit path to the persona JSON.")
     args = parser.parse_args()
 
@@ -235,7 +258,8 @@ def main() -> int:
                 income_bucket(persona.get("household_income")),
                 "owner" if tenure.startswith("Owned") else "renter",
                 work_mode(persona),
-                "detached single-family",
+                # Was hardcoded. Real structure type, so an apartment is not reported as a house.
+                persona.get("home_type") or "",
                 lifestyle_tags(persona),
             ]
             row += [""] * len(RETIRED_COLUMNS)
@@ -243,6 +267,8 @@ def main() -> int:
                 persona.get("age"),
                 persona.get("household_income"),
                 persona.get("sex"),
+                persona.get("match_region") or persona.get("region"),
+                persona.get("state"),
                 persona.get("county"),
                 persona.get("marital_status"),
                 persona.get("education"),
@@ -261,6 +287,7 @@ def main() -> int:
                 persona.get("moved_in"),
                 persona.get("vehicles"),
                 persona.get("housing_cost_pct_of_income"),
+                persona.get("housing_cost_basis"),
                 persona.get("name"),
             ]
 
