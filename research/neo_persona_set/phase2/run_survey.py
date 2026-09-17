@@ -127,6 +127,8 @@ CENSUS_COLUMNS = [
     "exact_age",
     "exact_household_income",
     "sex",
+    "region",
+    "state",
     "county",
     "marital_status",
     "education",
@@ -145,6 +147,7 @@ CENSUS_COLUMNS = [
     "moved_in",
     "vehicles",
     "housing_cost_pct_of_income",
+    "housing_cost_basis",
 ]
 CENSUS_INT_COLUMNS = {
     "exact_age",

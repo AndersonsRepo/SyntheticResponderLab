@@ -591,3 +591,20 @@ def test_questions_per_call_splits_the_survey_and_stitches_answers(tmp_path: Pat
     assert [r["persona_id"] for r in rows] == ["P001", "P002", "P003"] and rows[0]["Q30"] == "Moderately interested"
     raw = [json.loads(line) for line in open(Path(manifest["run_dir"]) / "raw_responses.jsonl", encoding="utf-8")]
     assert len(raw) == 3 and len(raw[0]["chunks"]) == 4 and raw[0]["parsed_ok"] is True
+
+
+def test_region_state_and_housing_cost_basis_reach_the_census_record(tmp_path: Path, persona_csv: Path) -> None:
+    # The Sept 16 matched export added these three Census-grounded columns; county is blank on 450 rows there.
+    assert [c for c in ("region", "state", "housing_cost_basis") if c in run_survey.CENSUS_COLUMNS] == ["region", "state", "housing_cost_basis"]
+    without = run_survey.load_personas(persona_csv, limit=None, prompt_variant="full")[0]
+    assert "state" not in (without.census_record or {})  # older files: absent, not null
+    path = tmp_path / "with_state.csv"
+    with open(persona_csv, newline="", encoding="utf-8") as src, open(path, "w", newline="", encoding="utf-8") as dst:
+        reader = csv.DictReader(src)
+        writer = csv.DictWriter(dst, fieldnames=list(reader.fieldnames) + ["region", "state", "housing_cost_basis"])
+        writer.writeheader()
+        for row in reader:
+            writer.writerow({**row, "region": "South", "state": "Texas", "housing_cost_basis": "owner costs"})
+    persona = run_survey.load_personas(path, limit=None, prompt_variant="full")[0]
+    assert persona.census_record["state"] == "Texas" and persona.census_record["region"] == "South" and persona.census_record["housing_cost_basis"] == "owner costs"
+    assert '"state": "Texas"' in json.dumps(persona.model_dump())

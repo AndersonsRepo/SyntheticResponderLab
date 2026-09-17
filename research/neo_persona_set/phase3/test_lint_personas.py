@@ -45,7 +45,7 @@ def test_matched_defects_are_counted(tmp_path: Path) -> None:
     rows = [
         _row("P001", 60, 31980, age_bucket="55-64", income_bucket="$100k-$150k", county="", housing_cost=""),
         _row("P002", 64, 30458, age_bucket="55-64", income_bucket="$100k-$150k", ownership="renter", county="", housing_cost="", home_text="a Maryland apartment"),
-        _row("P003", 67, 34518, age_bucket="65", income_bucket="$100k-$150k", county="", housing_cost=""),
+        _row("P003", 67, 34518, age_bucket="55-64", income_bucket="$100k-$150k", county="", housing_cost=""),
         _row("P004", 24, 120000, age_bucket="30-34", income_bucket="$100k-$150k", ownership="renter", county="", housing_cost="", home_text="a mobile home"),
     ]
     path = _write(tmp_path / "matched.csv", rows)
@@ -67,3 +67,30 @@ def test_header_and_id_problems_are_errors(tmp_path: Path) -> None:
     assert any("survey" in e.lower() for e in report["errors"]) and any("missing" in e.lower() for e in report["errors"])
     dup = _write(tmp_path / "dup.csv", [_row("P001", 32, 104999, age_bucket="30-34", income_bucket="$100k-$150k")] * 2)
     assert any("duplicate" in e for e in lint_personas.lint(dup)["errors"])
+
+
+def test_bucket_labels_are_checked_by_bounds_not_spelling(tmp_path: Path) -> None:
+    # Yaza's Sept 16 export uses "under $25k" and the finer "65-74" / "75+"; those are correct labels, not errors.
+    assert lint_personas.label_bounds("under $25k") == (float("-inf"), 24999.0)
+    assert lint_personas.label_bounds("<$25k") == (float("-inf"), 24999.0)
+    assert lint_personas.label_bounds("$25k-$50k") == (25000.0, 49999.0) and lint_personas.label_bounds("$500k+") == (500000.0, float("inf"))
+    assert lint_personas.label_bounds("65-74") == (65.0, 74.0) and lint_personas.label_bounds("75+") == (75.0, float("inf")) and lint_personas.label_bounds("18-24") == (18.0, 24.0)
+    assert lint_personas.label_bounds("") is None
+    rows = [
+        _row("P001", 68, 20000, age_bucket="65-74", income_bucket="under $25k"),
+        _row("P002", 80, 31980, age_bucket="75+", income_bucket="$25k-$50k"),
+        _row("P003", 60, 31980, age_bucket="55-64", income_bucket="$100k-$150k"),  # the real defect
+        _row("P004", 24, 120000, age_bucket="30-34", income_bucket="$100k-$150k"),  # the real defect
+    ]
+    report = lint_personas.lint(_write(tmp_path / "labels.csv", rows))
+    assert report["counts"]["income_bucket_mismatch"] == 1 and report["counts"]["age_bucket_mismatch"] == 1
+
+
+def test_county_blank_is_fine_when_state_is_present(tmp_path: Path) -> None:
+    header = list(lint_personas.EXPECTED_HEADER)
+    rows = [{**_row(f"P00{i}", 40, 80000, age_bucket="35-44", income_bucket="$75k-$100k", county=""), "state": "Texas", "region": "South"} for i in range(1, 5)]
+    report = lint_personas.lint(_write(tmp_path / "state.csv", rows, header=header))
+    assert report["counts"]["county_blank"] == 4 and not any("county" in w for w in report["warnings"])
+    rows[0]["state"] = rows[0]["region"] = ""
+    report = lint_personas.lint(_write(tmp_path / "nostate.csv", rows, header=header))
+    assert report["counts"]["location_blank"] == 1 and any("location" in w for w in report["warnings"])

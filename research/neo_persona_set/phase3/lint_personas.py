@@ -18,7 +18,7 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 HERE = Path(__file__).resolve().parent
 PHASE2 = HERE.parent / "phase2"
@@ -37,6 +37,33 @@ EXPECTED_HEADER: List[str] = (
 _SURVEY_COLUMN = re.compile(r"^(S\d|Q\d|PQ\d)")
 _NOT_DETACHED = re.compile(r"\b(apartment|condo|condominium|townhouse|townhome|duplex|mobile home|trailer|manufactured home)\b", re.IGNORECASE)
 _ID = re.compile(r"^P\d{3,}$")
+_NUMBER = re.compile(r"(\d+(?:\.\d+)?)\s*(k)?", re.IGNORECASE)
+
+
+def label_bounds(label: str) -> Optional[Tuple[float, float]]:
+    """(low, high) covered by a bucket label, so "under $25k", "<$25k", "65-74", "75+" all read as intended.
+
+    Money labels use k = 1,000 and treat the upper bound as exclusive ("$25k-$50k" is 25,000..49,999),
+    which is how the exporter bands incomes; age labels are inclusive ("65-74" is 65..74).
+    """
+    text = (label or "").strip().lower()
+    if not text:
+        return None
+    money = "$" in text or "k" in text
+    numbers = [float(n) * (1000.0 if k else 1.0) for n, k in _NUMBER.findall(text)]
+    if not numbers:
+        return None
+    if len(numbers) >= 2:
+        low, high = min(numbers[:2]), max(numbers[:2])
+        return (low, high - 1.0) if money else (low, high)
+    if text.startswith(("under", "<", "below", "less")):
+        return (float("-inf"), numbers[0] - 1.0)
+    return (numbers[0], float("inf"))
+
+
+def _label_holds(label: str, value: int) -> bool:
+    bounds = label_bounds(label)
+    return bounds is not None and bounds[0] <= value <= bounds[1]
 
 
 def _int(value: str) -> Optional[int]:
@@ -86,15 +113,13 @@ def lint(path: Path) -> Dict[str, Any]:
         if income is None:
             counts["exact_household_income_not_numeric"] += 1
         if age is not None:
-            expected = run_survey.band_label(age, run_survey.AGE_BANDS)
-            if expected != (row.get("age_bucket") or "").strip():
+            if not _label_holds(row.get("age_bucket") or "", age):
                 counts["age_bucket_mismatch"] += 1
                 examples["age_bucket_mismatch"].append(pid)
             if age < 30:
                 counts["age_under_30"] += 1
         if income is not None:
-            expected = run_survey.band_label(income, run_survey.INCOME_BANDS)
-            if expected != (row.get("income_bucket") or "").strip():
+            if not _label_holds(row.get("income_bucket") or "", income):
                 counts["income_bucket_mismatch"] += 1
                 examples["income_bucket_mismatch"].append(pid)
         if (row.get("ownership") or "").strip() == "renter":
@@ -103,6 +128,8 @@ def lint(path: Path) -> Dict[str, Any]:
                 counts["renters_missing_housing_cost"] += 1
         if not (row.get("county") or "").strip():
             counts["county_blank"] += 1
+            if not (row.get("state") or "").strip() and not (row.get("region") or "").strip():
+                counts["location_blank"] += 1
         story_text = " ".join(row.get(f"story_{c}", "") or "" for c in STORY_COLUMNS)
         if "detached" in (row.get("home_type") or "").lower() and _NOT_DETACHED.search(story_text):
             counts["home_type_story_conflict"] += 1
@@ -111,17 +138,17 @@ def lint(path: Path) -> Dict[str, Any]:
 
     for key, label in (("income_bucket_mismatch", "income_bucket"), ("age_bucket_mismatch", "age_bucket")):
         if counts[key]:
-            errors.append(f"{label} contradicts the exact value on {counts[key]} rows (e.g. {examples[key][:5]}); derive labels from exact values")
+            errors.append(f"{label} does not contain the exact value on {counts[key]} rows (e.g. {examples[key][:5]}); derive labels from exact values")
     for key in ("exact_age_not_numeric", "exact_household_income_not_numeric", "story_headline_blank"):
         if counts[key]:
             errors.append(f"{key}: {counts[key]} rows")
     home_types = {(row.get("home_type") or "").strip() for row in rows}
     if counts["renters"] and len(home_types) == 1:
-        warnings.append(f"home_type is the constant {home_types.pop()!r} although {counts['renters']} rows are renters; derive it from the Census building field")
+        warnings.append(f"home_type is the constant {home_types.pop()!r} for all rows ({counts['renters']} renters); fine if the draw screened on it (matched_draw.py --outdoor-space detached), a bug otherwise")
     if counts["home_type_story_conflict"]:
         warnings.append(f"home_type says detached single-family but the story describes an apartment/condo/mobile home on {counts['home_type_story_conflict']} rows")
-    if rows and counts["county_blank"] / len(rows) > 0.05:
-        warnings.append(f"county blank on {counts['county_blank']} of {len(rows)} rows; add state/region for a national draw")
+    if counts["location_blank"]:
+        warnings.append(f"no location at all (county, state and region blank) on {counts['location_blank']} rows")
     if counts["renters_missing_housing_cost"]:
         warnings.append(f"housing_cost_pct_of_income blank for {counts['renters_missing_housing_cost']} renters; use the renter cost-burden field")
     return {"path": str(path), "errors": errors, "warnings": warnings, "counts": dict(counts)}
