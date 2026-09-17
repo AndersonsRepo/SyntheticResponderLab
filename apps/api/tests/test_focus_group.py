@@ -600,3 +600,69 @@ def test_classroom_isolation_keeps_one_students_room_off_another_device(room, db
     # And student B cannot address student A's room through their own study either.
     assert client.get(f"/api/v1/studies/{study_b}/interview/focus-group/rooms/{room_a['room_id']}",
                       headers=second).status_code == 404
+
+
+# --- refuter FG-1 / FG-2 ----------------------------------------------------
+
+def test_memo_option_without_persona_id_still_exports(room):
+    """The validator accepts an answer option carrying no persona_id, so export must too.
+
+    Refuter FG-1: attribution was read from the model-supplied option['persona_id'], which
+    _validate_memo requires on themes and the surprise but not on options — so a memo it
+    accepted permanently 500'd that room's markdown export, and re-POSTing never repaired it.
+    """
+    client, study_id, _, behavior = room
+    well_behaved = behavior["memo"]
+
+    def no_persona_on_options(transcript):
+        parsed = json.loads(well_behaved(transcript))
+        parsed["answer_options"] = [{"text": o["text"]} for o in parsed["answer_options"]]
+        return json.dumps(parsed)
+
+    behavior["memo"] = no_persona_on_options
+    finished = walk(client, study_id, start(client, study_id).json()["data"]["room"])
+    saved = write_memo(client, study_id, finished, memo(client, study_id, finished))["saved"]
+    assert saved["themes"], "the validator accepted this memo, so export has to survive it"
+    assert all("persona_id" not in option for option in saved["answer_options"])
+    for fmt in ("markdown", "csv"):
+        exported = client.post(
+            f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{finished['room_id']}/export",
+            json={"format": fmt})
+        assert exported.status_code == 200, exported.text
+    content = client.post(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{finished['room_id']}/export",
+        json={"format": "markdown"}).json()["data"]["export"]["content"]
+    # Attribution comes from the transcript location the validator derived, not the model.
+    for option in saved["answer_options"]:
+        assert f"\"{option['text']}\" — {option['located_at']['persona_id']}" in content
+
+
+def test_cancelled_room_cannot_buy_a_memo(room):
+    """Refuter FG-2: cancel_room promises no further paid call; the memo is a paid call.
+
+    A room that walked the whole funnel is `completed` and cannot be cancelled, so the
+    reachable shape is the one the refuter named: finish the funnel, take a failed round,
+    cancel the now-cancellable room, then try to buy the memo it is still eligible for.
+    """
+    client, study_id, calls, behavior = room
+    walked = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:-1])
+    # One persona fails on the last stage: the stage is still reached (the other two
+    # answered, so the memo is eligible) but the room is left cancellable.
+    behavior["fail"] = lambda persona_id: persona_id == list(THREE)[0]
+    stage, question = FUNNEL[-1]
+    walked = ask(client, study_id, walked, stage=stage,
+                 question=question).json()["data"]["room"]
+    behavior["fail"] = None
+    view = memo(client, study_id, walked)
+    assert view["eligible"], "every stage the memo needs was still reached"
+    cancelled = client.post(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{walked['room_id']}/cancel"
+    ).json()["data"]["room"]
+    assert cancelled["status"] == "cancelled", cancelled["status"]
+    spent = len(calls)
+    refused = client.post(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{walked['room_id']}/memo",
+        json={"revision": view["revision"], "authorize_charge": True})
+    assert refused.status_code == 409, refused.text
+    assert "cancelled" in refused.json()["error"]["message"].lower()
+    assert len(calls) == spent

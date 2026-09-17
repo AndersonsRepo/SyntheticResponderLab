@@ -509,6 +509,11 @@ def focus_group_memo(session, settings, study, room_id, payload=None):
             return view  # Already written. Re-opening it is free.
         if payload.get("retry_attempt") != saved.get("attempt"):
             return view
+    if room.status == "cancelled":
+        # cancel_room promises no further paid call against a cancelled room; the memo is
+        # a paid call, so it has to honour that too. Reading an already-written memo stays
+        # free — those paths returned above.
+        raise ConflictApiError("This room was cancelled. Writing its memo would be a new charge.")
     if payload.get("authorize_charge") is not True:
         raise ValidationApiError("Confirm the additional memo charge first.")
     if settings.cache_mode == "replay_only":
@@ -648,7 +653,12 @@ def build_room_export(status, export_format):
         lines += ["", "### One surprise", "", f"{surprise['summary']}",
                   f"- \"{surprise['quote']}\" — {surprise['persona_id']}", "",
                   "### Closed-ended answer options (participant language)", ""]
-        lines += [f"- \"{option['text']}\" — {option['persona_id']}" for option in memo["answer_options"]]
+        # ponytail: attribute from located_at, which _validate_memo derived from the
+        # transcript. The model-supplied option['persona_id'] is optional — the validator
+        # requires it on themes and the surprise but not here — so reading it 500s the
+        # export for any memo whose options omitted it.
+        lines += [f"- \"{option['text']}\" — {option['located_at']['persona_id']}"
+                  for option in memo["answer_options"]]
         lines.append("")
     elif not unfinished:
         lines += ["## Memo", "", "_Not written yet._", ""]

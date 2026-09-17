@@ -479,7 +479,7 @@ function FocusGroupPageContent() {
                   <ul>
                     {memo.saved.answer_options?.map((option) => (
                       <li key={option.text}>
-                        “{option.text}” — {option.persona_id}
+                        “{option.text}” — {option.located_at.persona_id}
                       </li>
                     ))}
                   </ul>
