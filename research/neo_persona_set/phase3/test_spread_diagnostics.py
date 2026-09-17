@@ -28,3 +28,15 @@ def test_diagnostics_on_the_fake_runs(tmp_path: Path) -> None:
     assert spread_diagnostics.main(["--arm", f"fake={r1},{r2}", "--out", str(out)]) == 0
     rows = list(csv.DictReader(open(out, newline="", encoding="utf-8-sig")))
     assert rows[0]["arm"] == "fake" and float(rows[0]["repeat_agreement"]) == 1.0
+
+
+def test_income_gradient_uses_the_persona_file(tmp_path: Path) -> None:
+    r1 = conftest.build_fake_run(tmp_path / "a_r1", run_id="a_r1", model="stub/a", repeat="1")
+    personas = tmp_path / "personas.csv"
+    incomes = {"P001": 30000, "P002": 40000, "P003": 20000, "P004": 90000, "P005": 150000, "P006": 45000}  # Q1 = 3,3,1,4,5,2
+    personas.write_text("persona_id,exact_household_income\n" + "\n".join(f"{k},{v}" for k, v in incomes.items()) + "\n", encoding="utf-8")
+    arm = spread_diagnostics.diagnose_arm("fake", [r1], personas_csv=personas)
+    assert arm["rho_income_q1"] > 0.8
+    assert spread_diagnostics.diagnose_arm("fake", [r1])["rho_income_q1"] != arm["rho_income_q1"]  # NaN without the file
+    assert "rho(income, Q1)" in spread_diagnostics.render([arm])
+    assert spread_diagnostics.main(["--arm", f"fake={r1}", "--personas", str(personas)]) == 0

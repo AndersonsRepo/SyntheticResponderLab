@@ -7,9 +7,11 @@ For each arm (a set of run folders, ideally two repeats on the same personas) it
   repeat_agreement  share of answers identical between repeat 1 and repeat 2 (same persona)
   q1_concept_corr   Pearson r between Q1 and the mean of Q9B..Q13B (concept purchase likelihood):
                     high when one early stance drives every later answer
+  rho_income_q1     Spearman rank correlation between the persona's exact household income and Q1
+                    (needs --personas; the real 600 sit at about 0.10)
 
     apps/api/.venv/bin/python research/neo_persona_set/phase3/spread_diagnostics.py \\
-        --arm baseline=<run_r1>,<run_r2> --arm qpc10=<run_r1>,<run_r2> [--out diagnostics.csv]
+        --arm baseline=<run_r1>,<run_r2> --arm qpc10=<run_r1>,<run_r2> [--personas <persona csv>] [--out diagnostics.csv]
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ LIKERT_ITEMS = ["Q0B", "Q1", "Q2", "Q5_1", "Q5_2", "Q5_3", "Q5_4", "Q5_5", "Q5_6
                 "Q11A", "Q11B", "Q12A", "Q12B", "Q13A", "Q13B", "Q15", "Q16", "Q17", "Q19"]
 CONCEPT_PURCHASE = ["Q9B", "Q10B", "Q11B", "Q12B", "Q13B"]
 AGREEMENT_ITEMS = LIKERT_ITEMS + ["Q6", "Q14", "Q24"]
-COLUMNS = ["arm", "runs", "n_personas", "n_likert_items", "q1_ne_q2_share", "mean_sd", "top2_share", "repeat_agreement", "q1_concept_corr"]
+COLUMNS = ["arm", "runs", "n_personas", "n_likert_items", "q1_ne_q2_share", "mean_sd", "top2_share", "repeat_agreement", "q1_concept_corr", "rho_income_q1"]
 NAN = float("nan")
 
 
@@ -40,6 +42,31 @@ def _int(value: Optional[str]) -> Optional[int]:
         return None
 
 
+def _ranks(values: List[float]) -> List[float]:
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    ranks = [0.0] * len(values)
+    start = 0
+    while start < len(order):
+        end = start
+        while end + 1 < len(order) and values[order[end + 1]] == values[order[start]]:
+            end += 1
+        for position in range(start, end + 1):
+            ranks[order[position]] = (start + end) / 2.0 + 1.0
+        start = end + 1
+    return ranks
+
+
+def _spearman(x: List[float], y: List[float]) -> float:
+    return _pearson(_ranks(x), _ranks(y))
+
+
+def read_incomes(personas_csv: Optional[Path]) -> Dict[str, int]:
+    if personas_csv is None:
+        return {}
+    with open(personas_csv, newline="", encoding="utf-8-sig") as handle:
+        return {row["persona_id"]: int(float(row["exact_household_income"])) for row in csv.DictReader(handle) if (row.get("exact_household_income") or "").strip()}
+
+
 def _pearson(x: List[float], y: List[float]) -> float:
     n = len(x)
     if n < 3:
@@ -52,8 +79,11 @@ def _pearson(x: List[float], y: List[float]) -> float:
     return sum((a - mx) * (b - my) for a, b in zip(x, y)) / math.sqrt(sxx * syy)
 
 
-def diagnose_arm(name: str, run_dirs: List[Path]) -> Dict[str, Any]:
+def diagnose_arm(name: str, run_dirs: List[Path], personas_csv: Optional[Path] = None) -> Dict[str, Any]:
     runs = [read_wide(p) for p in run_dirs]
+    incomes = read_incomes(personas_csv)
+    inc_x: List[float] = []
+    inc_y: List[float] = []
     items = [q for q in LIKERT_ITEMS if runs and q in runs[0][0]]
     values: Dict[str, List[int]] = {q: [] for q in items}
     ne, pairs, top, total = 0, 0, 0, 0
@@ -65,6 +95,9 @@ def diagnose_arm(name: str, run_dirs: List[Path]) -> Dict[str, Any]:
             if a is not None and b is not None:
                 pairs += 1
                 ne += a != b
+            if a is not None and row.get("persona_id") in incomes:
+                inc_x.append(float(incomes[row["persona_id"]]))
+                inc_y.append(float(a))
             for q in items:
                 v = _int(row.get(q))
                 if v is not None:
@@ -98,6 +131,7 @@ def diagnose_arm(name: str, run_dirs: List[Path]) -> Dict[str, Any]:
         "arm": name, "runs": ";".join(Path(p).name for p in run_dirs), "n_personas": len(runs[0]) if runs else 0, "n_likert_items": len(items),
         "q1_ne_q2_share": ne / pairs if pairs else NAN, "mean_sd": sum(sds) / len(sds) if sds else NAN,
         "top2_share": top / total if total else NAN, "repeat_agreement": agreement, "q1_concept_corr": _pearson(q1s, concept),
+        "rho_income_q1": _spearman(inc_x, inc_y) if inc_x else NAN,
     }
 
 
@@ -110,23 +144,24 @@ def _fmt(value: Any, pct: bool = False) -> str:
 
 
 def render(arms: List[Dict[str, Any]]) -> str:
-    header = "| arm | n | Q1 != Q2 | likert SD (real ~1.3) | answers 4-5 | repeat agreement | r(Q1, concept likelihood) |"
-    lines = [header, "| --- | --- | --- | --- | --- | --- | --- |"]
+    header = "| arm | n | Q1 != Q2 | likert SD (real ~1.3) | answers 4-5 | repeat agreement | r(Q1, concept likelihood) | rho(income, Q1) (real ~0.10) |"
+    lines = [header, "| --- | --- | --- | --- | --- | --- | --- | --- |"]
     for a in arms:
         lines.append(f"| {a['arm']} | {a['n_personas']} | {_fmt(a['q1_ne_q2_share'], True)} | {_fmt(a['mean_sd'])} | {_fmt(a['top2_share'], True)} | "
-                     f"{_fmt(a['repeat_agreement'], True)} | {_fmt(a['q1_concept_corr'])} |")
+                     f"{_fmt(a['repeat_agreement'], True)} | {_fmt(a['q1_concept_corr'])} | {_fmt(a['rho_income_q1'])} |")
     return "\n".join(lines)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--arm", action="append", required=True, metavar="NAME=RUN_DIR[,RUN_DIR...]")
+    parser.add_argument("--personas", type=Path, default=None, help="persona CSV with exact_household_income, for the income gradient")
     parser.add_argument("--out", type=Path, default=None, help="also write the table as CSV")
     args = parser.parse_args(argv)
     arms = []
     for spec in args.arm:
         name, _, paths = spec.partition("=")
-        arms.append(diagnose_arm(name.strip(), [Path(p.strip()) for p in paths.split(",") if p.strip()]))
+        arms.append(diagnose_arm(name.strip(), [Path(p.strip()) for p in paths.split(",") if p.strip()], personas_csv=args.personas))
     print(render(arms))
     if args.out:
         with open(args.out, "w", newline="", encoding="utf-8-sig") as handle:
