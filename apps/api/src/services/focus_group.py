@@ -464,6 +464,12 @@ def _locate(state, text, persona_id=None):
     return None
 
 
+def _revision(state):
+    """Which transcript a memo is about. The export compares against this too, so a memo
+    written before the last round cannot be handed in unmarked (refuter FG-A)."""
+    return hashlib.sha256(json.dumps(state.get("rounds", []), sort_keys=True).encode()).hexdigest()
+
+
 def memo_view(session, settings, study, room_id, room=None):
     room = room or owned_room(session, study, room_id)
     state = room.result_json or {}
@@ -481,16 +487,21 @@ def memo_view(session, settings, study, room_id, room=None):
             "off the transcript rather than padded.")
     else:
         eligible, message = True, "Write the memo from this transcript."
-    revision = hashlib.sha256(json.dumps(state.get("rounds", []), sort_keys=True).encode()).hexdigest()
+    revision = _revision(state)
     saved = state.get("memo")
+    stale = bool(saved and saved["revision"] != revision)
     prompt = _memo_prompt(room) + _memo_transcript(state)
     model = next(m for m in list_interview_model_catalog()["models"] if m["id"] == MEMO_MODEL)
     estimate = (Decimal(len(prompt.encode()) + 100) * Decimal(str(model["prompt_price_per_million"]))
                 + Decimal(2000) * Decimal(str(model["completion_price_per_million"]))) / _TOKENS_PER_MILLION
     return {"room_id": room.public_id, "revision": revision, "eligible": eligible, "message": message,
             "answered_turns": len(answers), "stages_reached": sorted(reached, key=STAGES.index),
-            "available": bool(saved and saved.get("themes")),
-            "stale": bool(saved and saved["revision"] != revision),
+            # "available" means a memo the student can hand in as-is. A memo written
+            # before the last round describes a transcript that no longer exists, so it
+            # is NOT available — that is what re-opens the rewrite control instead of
+            # leaving the room with a stale memo and no way to refresh it (refuter FG-A).
+            "available": bool(saved and saved.get("themes")) and not stale,
+            "stale": stale,
             "estimated_cost_usd": str(estimate), "model": MEMO_MODEL, "saved": saved,
             "session_usage": usage(session, settings, room.public_id)}
 
@@ -623,6 +634,7 @@ def build_room_export(status, export_format):
                   for a in r["answers"] if a["status"] != "answered"]
     unfinished = status["status"] != "completed" or bool(incomplete)
     memo = (status.get("memo") or {}) if isinstance(status.get("memo"), dict) else {}
+    memo_stale = bool(memo.get("themes") and memo.get("revision") != _revision(status))
     stem = re.sub(r"[^A-Za-z0-9._-]+", "-", room_id).strip(".-")[:64] or "room"
 
     if export_format == "csv":
@@ -636,6 +648,26 @@ def build_room_export(status, export_format):
                 writer.writerow([round_["index"] + 1, round_["stage"], _as_csv_text(answer["persona_id"]),
                                  "participant", _as_csv_text(answer["text"]), answer["status"],
                                  str(not unfinished)])
+        # The docstring and the UI button both promise the memo; the CSV used to stop at
+        # the transcript and say nothing about it (refuter FG-B).
+        if memo.get("themes"):
+            fresh = str(not unfinished and not memo_stale)
+            memo_status = "out_of_date" if memo_stale else "current"
+            writer.writerow([])
+            writer.writerow(["memo", "field", "speaker", "role", "text", "status", "complete"])
+            for theme in memo["themes"]:
+                writer.writerow(["memo", "theme", _as_csv_text(theme["located_at"]["persona_id"]),
+                                 theme["sentiment"],
+                                 _as_csv_text(f"{theme['label']}: {theme['synthesis']} - \"{theme['quote']}\""),
+                                 memo_status, fresh])
+            surprise = memo["surprise"]
+            writer.writerow(["memo", "surprise", _as_csv_text(surprise["located_at"]["persona_id"]),
+                             "surprise",
+                             _as_csv_text(f"{surprise['summary']} - \"{surprise['quote']}\""),
+                             memo_status, fresh])
+            for option in memo["answer_options"]:
+                writer.writerow(["memo", "answer_option", _as_csv_text(option["located_at"]["persona_id"]),
+                                 "answer_option", _as_csv_text(option["text"]), memo_status, fresh])
         return InterviewTranscriptExport(content="﻿" + output.getvalue(),
             filename=f"focus-group-{stem}.csv", media_type="text/csv")
 
@@ -653,7 +685,11 @@ def build_room_export(status, export_format):
             lines += ([f"**{answer['persona_id']}:** {answer['text']}", ""] if answer["status"] == "answered"
                       else [f"**{answer['persona_id']}:** _no answer — {answer['status']}_", ""])
     if memo.get("themes"):
-        lines += ["## Memo", "", "### Themes", ""]
+        lines += ["## Memo", ""]
+        if memo_stale:
+            lines += ["> **OUT OF DATE — do not submit as final.** This memo was written before "
+                      "the last round below and does not describe it. Rewrite the memo.", ""]
+        lines += ["### Themes", ""]
         for theme in memo["themes"]:
             lines += [f"- **{theme['label']}** ({theme['sentiment']}) — {theme['synthesis']}",
                       f"  - \"{theme['quote']}\" — {theme['persona_id']}, "
@@ -662,10 +698,9 @@ def build_room_export(status, export_format):
         lines += ["", "### One surprise", "", f"{surprise['summary']}",
                   f"- \"{surprise['quote']}\" — {surprise['persona_id']}", "",
                   "### Closed-ended answer options (participant language)", ""]
-        # ponytail: attribute from located_at, which _validate_memo derived from the
-        # transcript. The model-supplied option['persona_id'] is optional — the validator
-        # requires it on themes and the surprise but not here — so reading it 500s the
-        # export for any memo whose options omitted it.
+        # Attribute from located_at, the transcript position _validate_memo verified the
+        # option against. The validator requires persona_id on options (FG-6), so the two
+        # agree by construction; located_at is the one the transcript itself vouches for.
         lines += [f"- \"{option['text']}\" — {option['located_at']['persona_id']}"
                   for option in memo["answer_options"]]
         lines.append("")

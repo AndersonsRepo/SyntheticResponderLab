@@ -714,3 +714,55 @@ def test_every_mutating_entry_point_is_serialized():
     unguarded = [name for name in mutating
                  if getattr(getattr(fg, name), "__wrapped__", None) is None]
     assert not unguarded, f"not serialized: {unguarded}"
+
+
+def test_stale_memo_is_not_available_and_is_marked_in_every_export(room):
+    """Refuter FG-A: a memo written at minimum eligibility, then outrun by a later round.
+
+    `available` used to mean only "a memo exists", so the UI hid the rewrite control while
+    the export shipped the older memo with no warning — a student handed in a memo that
+    never saw the last stage, with no way to refresh it.
+    """
+    client, study_id, _, _ = room
+    started = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:4])
+    view = memo(client, study_id, started)
+    assert view["eligible"]
+    write_memo(client, study_id, started, view)
+    fresh = memo(client, study_id, started)
+    assert fresh["available"] and not fresh["stale"]
+
+    stage, question = FUNNEL[4]
+    finished = ask(client, study_id, started, stage=stage, question=question).json()["data"]["room"]
+    after = memo(client, study_id, finished)
+    assert after["stale"], "the memo predates the last round"
+    assert not after["available"], "so it is not something to hand in, and the UI must offer a rewrite"
+    assert after["saved"]["themes"], "the old memo is still readable"
+
+    markdown = client.post(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{finished['room_id']}/export",
+        json={"format": "markdown"}).json()["data"]["export"]["content"]
+    assert "OUT OF DATE" in markdown
+    csv_text = client.post(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{finished['room_id']}/export",
+        json={"format": "csv"}).json()["data"]["export"]["content"]
+    assert "out_of_date" in csv_text
+
+    # And it can actually be refreshed: writing again is accepted and clears the staleness.
+    write_memo(client, study_id, finished, after)
+    assert memo(client, study_id, finished)["available"]
+
+
+def test_csv_export_carries_the_memo_it_promises(room):
+    """Refuter FG-B: the CSV branch returned after the transcript rows, so a student who
+    exported CSV for submission silently got no themes, surprise, or answer options."""
+    client, study_id, _, _ = room
+    finished = walk(client, study_id, start(client, study_id).json()["data"]["room"])
+    saved = write_memo(client, study_id, finished, memo(client, study_id, finished))["saved"]
+    csv_text = client.post(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{finished['room_id']}/export",
+        json={"format": "csv"}).json()["data"]["export"]["content"]
+    assert "answer_option" in csv_text and "surprise" in csv_text
+    for theme in saved["themes"]:
+        assert theme["label"] in csv_text
+    for option in saved["answer_options"]:
+        assert option["text"] in csv_text
