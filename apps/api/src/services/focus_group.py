@@ -285,6 +285,17 @@ def ask_round(session, settings, study, room_id, payload):
         reached = {r["stage"] for r in state["rounds"] if any(a["status"] == "answered" for a in r["answers"])}
         furthest = max((STAGES.index(s) for s in reached), default=-1)
         if STAGES.index(stage) > furthest + 1:
+            # "Work the funnel in order" is the wrong sentence when the funnel WAS worked in
+            # order and the provider simply never answered: a round whose every answer failed
+            # leaves furthest where it was, and the student got told about ordering when the
+            # real state is an unanswered round to retry. Say which it is.
+            unanswered = [r for r in state["rounds"]
+                          if not any(a["status"] == "answered" for a in r["answers"])]
+            if unanswered:
+                last = unanswered[-1]
+                raise ValidationApiError(
+                    f"No one answered your {STAGE_LABELS[last['stage']]} question yet, so the room "
+                    f"cannot move on. Retry that round first.")
             raise ValidationApiError(
                 f"Work the funnel in order: {STAGE_LABELS[STAGES[furthest + 1]]} comes before "
                 f"{STAGE_LABELS[stage]}.")

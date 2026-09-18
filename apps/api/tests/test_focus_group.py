@@ -810,3 +810,29 @@ def test_a_year_in_a_pre_price_question_is_not_mistaken_for_a_price(room):
     spelled = ask(client, study_id, allowed.json()["data"]["room"], stage="space_needs",
                   question="Would 23000 dollars feel reasonable to you?")
     assert spelled.status_code == 400, spelled.text
+
+
+def test_a_round_nobody_answered_says_so_instead_of_blaming_funnel_order(room):
+    """Found by the first live run, not by any stub: when every persona in the opening
+    round fails, `ask` returns 200 with a failed room, and the NEXT stage was refused with
+    "Work the funnel in order" — an ordering complaint about a funnel worked in order."""
+    client, study_id, _, behavior = room
+    started = start(client, study_id).json()["data"]["room"]
+    behavior["fail"] = lambda persona_id: True
+    started = ask(client, study_id, started, stage="icebreaker",
+                  question="Where do you work from at home?").json()["data"]["room"]
+    behavior["fail"] = None
+    assert all(a["status"] != "answered" for a in started["rounds"][0]["answers"])
+
+    refused = ask(client, study_id, started, stage="space_needs",
+                  question="What do you wish you had more room for?")
+    assert refused.status_code == 400, refused.text
+    message = refused.json()["error"]["message"]
+    assert "No one answered" in message and "Icebreaker" in message
+    assert "Work the funnel in order" not in message
+
+    # And the named repair actually works.
+    retried = ask(client, study_id, started, retry=True)
+    assert retried.status_code == 200, retried.text
+    assert ask(client, study_id, retried.json()["data"]["room"], stage="space_needs",
+               question="What do you wish you had more room for?").status_code == 200
