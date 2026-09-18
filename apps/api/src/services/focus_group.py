@@ -82,7 +82,12 @@ _STAGE_CONTEXT = {
 
 # A moderator question that names a dollar figure before the price stage anchors the
 # room just as surely as the app doing it. Refuse it and say why.
-_MONEY = re.compile(r"\$\s*\d|\b\d{1,3},\d{3}\b|\b\d{4,}\b")
+# A dollar sign, a thousands-grouped figure, or a bare number carrying a money word.
+# A bare four-digit integer alone is a year far more often than a price ("in 2026",
+# "since 1990"), and refusing those blocked legitimate pre-price questions (refuter FG-G).
+_MONEY = re.compile(r"\$\s*\d|\b\d{1,3},\d{3}\b"
+                    r"|\b\d{3,}\s*(?:dollars|usd|bucks|k\b)|\b(?:dollars|usd|price|cost)\b[^.?!]{0,20}\b\d{3,}\b",
+                    re.I)
 
 
 def persona_description(profile: dict) -> str:
@@ -291,7 +296,15 @@ def ask_round(session, settings, study, room_id, payload):
         if STAGES.index(stage) < STAGES.index("price_reactions") and _MONEY.search(question):
             raise ValidationApiError(
                 "Don't anchor price first — hold dollar figures until the price-reactions stage.")
+        # The stage map blacks out the concept and the price for early stages, but
+        # _prior_messages replays every earlier round, so a round asked at an early stage
+        # AFTER the concept has run still carries both into the prompt. The round is not
+        # refused — going back is something the funnel allows — but it is recorded as what
+        # it is, so the export cannot present it as pre-exposure data (refuter FG-C).
+        post_exposure = (STAGES.index(stage) < STAGES.index("concept")
+                         and furthest >= STAGES.index("concept"))
         round_ = {"index": len(state["rounds"]), "stage": stage, "question": question,
+                  "post_exposure": post_exposure,
                   "answers": [{"persona_id": pid, "text": "", "status": "missing", "error": None}
                               for pid in room.payload_json["persona_ids"]]}
         state["rounds"].append(round_)
@@ -679,7 +692,9 @@ def build_room_export(status, export_format):
               f"- Participants: {', '.join(status['persona_ids'])}",
               f"- Stages reached: {', '.join(STAGE_LABELS[s] for s in status['stages_reached']) or 'none'}", ""]
     for round_ in status["rounds"]:
-        lines += [f"## {round_['index'] + 1}. {STAGE_LABELS[round_['stage']]}", "",
+        lines += [f"## {round_['index'] + 1}. {STAGE_LABELS[round_['stage']]}"
+                  + (" — asked after the concept and price were shown" if round_.get("post_exposure") else ""),
+                  "",
                   f"**Moderator:** {round_['question']}", ""]
         for answer in round_["answers"]:
             lines += ([f"**{answer['persona_id']}:** {answer['text']}", ""] if answer["status"] == "answered"

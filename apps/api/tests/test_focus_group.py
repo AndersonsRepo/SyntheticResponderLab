@@ -766,3 +766,47 @@ def test_csv_export_carries_the_memo_it_promises(room):
         assert theme["label"] in csv_text
     for option in saved["answer_options"]:
         assert option["text"] in csv_text
+
+
+def test_a_pre_concept_round_asked_after_the_price_is_marked_as_such(room):
+    """Refuter FG-C: the stage map blacks the price out of the system prompt, but
+    _prior_messages replays every earlier round — so a space-needs question asked after
+    the price stage is not pre-exposure data, and must not be exported as if it were."""
+    client, study_id, calls, _ = room
+    started = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:4])
+    before = len(calls)
+    revisited = ask(client, study_id, started, stage="space_needs",
+                    question="Back to your home — where else do you run out of room?")
+    assert revisited.status_code == 200, revisited.text
+    room_state = revisited.json()["data"]["room"]
+
+    # The system prompt still honours the blackout, but the replayed transcript does not.
+    for call in calls[before:]:
+        assert "Price:" not in call["messages"][0]["content"]
+    assert any("23,000" in " ".join(m["content"] for m in call["messages"])
+               for call in calls[before:]), "the replay is what makes this round post-exposure"
+
+    last = room_state["rounds"][-1]
+    assert last["stage"] == "space_needs" and last["post_exposure"] is True
+    assert room_state["rounds"][1]["post_exposure"] is False, "the original space-needs round is clean"
+    content = client.post(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{room_state['room_id']}/export",
+        json={"format": "markdown"}).json()["data"]["export"]["content"]
+    assert "asked after the concept and price were shown" in content
+
+
+def test_a_year_in_a_pre_price_question_is_not_mistaken_for_a_price(room):
+    """Refuter FG-G: the anchor guard matched any four-digit integer, so an ordinary
+    question mentioning a year was refused as price anchoring."""
+    client, study_id, _, _ = room
+    started = start(client, study_id).json()["data"]["room"]
+    allowed = ask(client, study_id, started, stage="icebreaker",
+                  question="How has your use of the space changed since 2020?")
+    assert allowed.status_code == 200, allowed.text
+    refused = ask(client, study_id, allowed.json()["data"]["room"], stage="space_needs",
+                  question="Would you pay $23,000 for that?")
+    assert refused.status_code == 400, refused.text
+    assert "anchor price" in refused.json()["error"]["message"]
+    spelled = ask(client, study_id, allowed.json()["data"]["room"], stage="space_needs",
+                  question="Would 23000 dollars feel reasonable to you?")
+    assert spelled.status_code == 400, spelled.text
