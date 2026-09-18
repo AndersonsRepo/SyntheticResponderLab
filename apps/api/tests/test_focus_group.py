@@ -604,12 +604,15 @@ def test_classroom_isolation_keeps_one_students_room_off_another_device(room, db
 
 # --- refuter FG-1 / FG-2 ----------------------------------------------------
 
-def test_memo_option_without_persona_id_still_exports(room):
-    """The validator accepts an answer option carrying no persona_id, so export must too.
+def test_memo_option_without_persona_id_is_refused(room):
+    """An answer option with no speaker is refused, not attributed to a guess.
 
-    Refuter FG-1: attribution was read from the model-supplied option['persona_id'], which
-    _validate_memo requires on themes and the surprise but not on options — so a memo it
-    accepted permanently 500'd that room's markdown export, and re-POSTing never repaired it.
+    Refuter FG-1: export read the model-supplied option['persona_id'], which the validator
+    did not require — a memo it accepted then 500'd that room's export forever.
+    Refuter FG-6: deriving the speaker from the first transcript match instead would credit
+    group-distilled wording to whichever persona happened to be scanned first. So the
+    validator now requires persona_id on options exactly as it does on themes, and export
+    attributes from the located_at that requirement makes unambiguous.
     """
     client, study_id, _, behavior = room
     well_behaved = behavior["memo"]
@@ -621,9 +624,18 @@ def test_memo_option_without_persona_id_still_exports(room):
 
     behavior["memo"] = no_persona_on_options
     finished = walk(client, study_id, start(client, study_id).json()["data"]["room"])
+    view = memo(client, study_id, finished)
+    refused = client.post(
+        f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{finished['room_id']}/memo",
+        json={"revision": view["revision"], "authorize_charge": True})
+    assert refused.status_code == 200, refused.text
+    assert refused.json()["data"]["memo"]["saved"]["themes"] is None, "an unattributed memo is not saved"
+
+    # A well-formed memo still exports, and the option's speaker comes from the transcript
+    # location the validator derived rather than from the model's own claim.
+    behavior["memo"] = well_behaved
+    finished = walk(client, study_id, start(client, study_id).json()["data"]["room"])
     saved = write_memo(client, study_id, finished, memo(client, study_id, finished))["saved"]
-    assert saved["themes"], "the validator accepted this memo, so export has to survive it"
-    assert all("persona_id" not in option for option in saved["answer_options"])
     for fmt in ("markdown", "csv"):
         exported = client.post(
             f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{finished['room_id']}/export",
@@ -632,9 +644,33 @@ def test_memo_option_without_persona_id_still_exports(room):
     content = client.post(
         f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{finished['room_id']}/export",
         json={"format": "markdown"}).json()["data"]["export"]["content"]
-    # Attribution comes from the transcript location the validator derived, not the model.
     for option in saved["answer_options"]:
+        assert option["located_at"]["persona_id"] == option["persona_id"]
         assert f"\"{option['text']}\" — {option['located_at']['persona_id']}" in content
+
+
+def test_memo_option_is_attributed_to_its_own_speaker_not_the_first_match(room):
+    """Refuter FG-6: wording two personas both used must not be credited to whichever
+    one the transcript scan reached first."""
+    client, study_id, _, behavior = room
+    well_behaved = behavior["memo"]
+    second = list(THREE)[1]
+
+    def claim_the_second_persona(transcript):
+        parsed = json.loads(well_behaved(transcript))
+        # Every persona says this same sentence, so a first-match scan picks persona one.
+        shared = "I use the garage as an office"
+        assert transcript.count(shared) > 1, "the fixture must give two personas the same wording"
+        parsed["answer_options"] = [{"text": shared, "persona_id": second}
+                                    for _ in parsed["answer_options"]]
+        return json.dumps(parsed)
+
+    behavior["memo"] = claim_the_second_persona
+    finished = walk(client, study_id, start(client, study_id).json()["data"]["room"])
+    saved = write_memo(client, study_id, finished, memo(client, study_id, finished))["saved"]
+    assert saved["answer_options"], saved
+    for option in saved["answer_options"]:
+        assert option["located_at"]["persona_id"] == second
 
 
 def test_cancelled_room_cannot_buy_a_memo(room):

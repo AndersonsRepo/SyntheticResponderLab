@@ -77,11 +77,11 @@ export type FocusGroupMemo = {
         }[]
       | null;
     surprise?: { summary: string; quote: string; persona_id: string };
-    // persona_id is optional on an answer option: the server validates it on themes and
-    // the surprise but not here, so attribute from located_at, which it derives itself.
+    // The server requires persona_id on an option and refuses the memo without it; display
+    // still reads located_at, which is the transcript position it was verified against.
     answer_options?: {
       text: string;
-      persona_id?: string;
+      persona_id: string;
       located_at: { persona_id: string; round: number; stage: FocusGroupStage; question: string };
     }[];
   } | null;

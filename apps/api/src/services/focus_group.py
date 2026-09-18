@@ -592,9 +592,16 @@ def _validate_memo(parsed, state):
         raise ValueError(f"Expected at least {MEMO_MIN_ANSWER_OPTIONS} answer options")
     located_options = []
     for option in options:
-        if not isinstance(option, dict) or not isinstance(option.get("text"), str) or not option["text"].strip():
+        # persona_id is required here for the same reason it is on themes and the surprise:
+        # without it _locate falls back to the first containment hit, and option wording
+        # distilled from a group routinely appears in more than one persona's answer — so a
+        # student would hand in participant language credited to a participant who may not
+        # have said it. Refusing is better than guessing at attribution (refuter FG-6).
+        if (not isinstance(option, dict)
+                or any(not isinstance(option.get(k), str) or not option[k].strip()
+                       for k in ("text", "persona_id"))):
             raise ValueError("Invalid answer option")
-        found = _locate(state, option["text"], option.get("persona_id"))
+        found = _locate(state, option["text"], option["persona_id"])
         if not found:
             raise ValueError("Answer option is not verbatim participant language")
         located_options.append({**option, "located_at": found})
