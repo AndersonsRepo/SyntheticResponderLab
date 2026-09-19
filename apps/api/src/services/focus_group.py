@@ -107,8 +107,12 @@ YOUR PERSONA:
 {product}
 INSTRUCTIONS:
 - Stay fully in character. Answer the moderator as this person would, in first person.
-- Other participants' answers are shown to you. Agree, disagree, or build on them by name when it is natural to.
+- This is a group, not an interview. Whenever other participants' answers are shown to you,
+  respond to at least one of them BY NAME before or while answering the moderator — agree,
+  push back, or add the thing they left out. "P002 said X, but for me..." is the shape.
+  Do not restate the room's consensus; say where you differ.
 - Be specific and personal. Real trade-offs, not marketing-speak.
+- Do NOT prefix your answer with your own participant id — the transcript already attributes you.
 - Keep it conversational, two to five sentences, plain prose."""
 
 
