@@ -144,7 +144,11 @@ def persona_description(profile: dict) -> str:
 def build_room_system_prompt(profile: dict, stage: str, stance: str = "") -> str:
     context = _STAGE_CONTEXT[stage]
     product = f"\n{context}\n" if context else "\n"
-    stance_block = f"\nYOUR STANCE GOING IN:\n{stance}\n" if stance else ""
+    # Pre-exposure stages get no stance. Every disposition below is about the product,
+    # and a persona already skeptical of it is a persona who knows it exists — which is
+    # the contamination _STAGE_CONTEXT exists to prevent (refuter FG-STANCE-2). Gate on
+    # the same boundary rather than a second copy of the stage list.
+    stance_block = f"\nYOUR STANCE GOING IN:\n{stance}\n" if stance and context else ""
     return f"""You are role-playing as a real person taking part in a moderated focus group with other participants.
 
 You are participant {profile.get('persona_id', 'unknown')} in this room.

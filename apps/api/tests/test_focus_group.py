@@ -879,3 +879,21 @@ def test_stance_reaches_the_prompt_and_changes_the_cache_key():
         hash_prior_turns([{"role": "system", "content": second}])
     assert hash_prior_turns([{"role": "system", "content": first}]) != \
         hash_prior_turns([{"role": "system", "content": bare}])
+
+
+def test_no_stance_reaches_a_pre_exposure_stage():
+    """A skeptic at the icebreaker is a persona who already knows the product.
+
+    icebreaker and space_needs are collected before the concept is introduced, so a
+    product-directed disposition there contaminates exactly the answers _STAGE_CONTEXT
+    keeps clean (refuter FG-STANCE-2).
+    """
+    profile = {"persona_id": "P001"}
+    stance = fg.room_stance(THREE, "P001")
+    for stage, context in fg._STAGE_CONTEXT.items():
+        prompt = fg.build_room_system_prompt(profile, stage, stance)
+        if context:
+            assert "YOUR STANCE GOING IN:" in prompt, f"{stage} lost its stance"
+        else:
+            assert "YOUR STANCE GOING IN:" not in prompt, f"{stage} leaked a stance"
+            assert stance not in prompt
