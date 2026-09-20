@@ -836,3 +836,40 @@ def test_a_round_nobody_answered_says_so_instead_of_blaming_funnel_order(room):
     assert retried.status_code == 200, retried.text
     assert ask(client, study_id, retried.json()["data"]["room"], stage="space_needs",
                question="What do you wish you had more room for?").status_code == 200
+
+
+def test_every_seat_in_a_room_gets_a_different_stance():
+    """The room disagrees only if its members start from different places.
+
+    Personas all see each other's answers, which is the focus group and is also what
+    drives them to agree. The counter-pressure is per-seat dispositions, so a roster
+    drawing the same stance twice would be the bug this exists to catch.
+    """
+    stances = [fg.room_stance(THREE, pid) for pid in THREE]
+    assert len(set(stances)) == len(THREE)
+    assert all(s.strip() for s in stances)
+    # Stable: the same seat gets the same stance on a retry, so a re-run of a missing
+    # turn rebuilds the prompt the first attempt used.
+    assert stances == [fg.room_stance(THREE, pid) for pid in THREE]
+
+
+def test_stance_reaches_the_prompt_and_changes_the_cache_key():
+    """A stance nobody sees is a stance that does nothing.
+
+    The cache keys on a hash of the prior turns, and the system prompt is the first of
+    them — so two stances must not collide onto one cached answer.
+    """
+    from src.services.interview_cache import hash_prior_turns
+
+    profile = {"persona_id": "P001"}
+    first = fg.build_room_system_prompt(profile, "concept", fg.room_stance(THREE, "P001"))
+    second = fg.build_room_system_prompt(profile, "concept", fg.room_stance(THREE, "P002"))
+    bare = fg.build_room_system_prompt(profile, "concept")
+
+    assert fg.room_stance(THREE, "P001") in first
+    assert "YOUR STANCE GOING IN:" in first
+    assert "YOUR STANCE GOING IN:" not in bare
+    assert hash_prior_turns([{"role": "system", "content": first}]) != \
+        hash_prior_turns([{"role": "system", "content": second}])
+    assert hash_prior_turns([{"role": "system", "content": first}]) != \
+        hash_prior_turns([{"role": "system", "content": bare}])
