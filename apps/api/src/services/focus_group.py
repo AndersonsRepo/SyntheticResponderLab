@@ -109,16 +109,25 @@ _STANCES = (
     " what you would actually get.",
     "You do not trust connected devices or the companies behind them with what happens in your"
     " home. Raise that even when nobody else in the room has.",
-    "You have bought gadgets that ended up in a drawer. You are wary of doing it again, and you"
-    " say which past purchase this reminds you of.",
+    "You expect things like this to end up unused after a month. Say what would have to be true"
+    " for that not to happen, without claiming purchases your life has not actually included.",
+    "You answer for your household before yourself. Keep asking how this would land for the other"
+    " people you live with, not only for you.",
+    "You believe it when you see it fail well. Ask what happens when it breaks, and say what would"
+    " have to go wrong for you to walk away.",
 )
+
+# A room may seat up to MAX_PERSONAS, and the whole point is that no two seats share a
+# disposition, so the list has to cover the largest legal room.
+assert len(_STANCES) >= MAX_PERSONAS, "every seat in a full room needs its own stance"
 
 
 def room_stance(persona_ids, persona_id: str) -> str:
     """One disposition per seat, so a room of N draws N different stances.
 
-    ponytail: stances cycle once a room seats more than len(_STANCES); rooms are far
-    smaller than that today. Add stances if rooms ever get big enough to repeat.
+    The modulo never actually wraps — the assert above keeps _STANCES at least
+    MAX_PERSONAS long — it is there so a larger room degrades to a repeat rather
+    than an IndexError mid-answer.
     """
     seats = list(persona_ids)
     # The roster is what builds the answer rows, so a persona is always on it. Falling

@@ -845,8 +845,14 @@ def test_every_seat_in_a_room_gets_a_different_stance():
     drives them to agree. The counter-pressure is per-seat dispositions, so a roster
     drawing the same stance twice would be the bug this exists to catch.
     """
+    # Every legal room size, not just three — MAX_PERSONAS seats is the case that
+    # actually runs out of stances (refuter FG-STANCE-1).
+    for size in range(fg.MIN_PERSONAS, fg.MAX_PERSONAS + 1):
+        roster = [f"P{n:03d}" for n in range(1, size + 1)]
+        seated = [fg.room_stance(roster, pid) for pid in roster]
+        assert len(set(seated)) == size, f"a room of {size} doubled up on a stance"
+
     stances = [fg.room_stance(THREE, pid) for pid in THREE]
-    assert len(set(stances)) == len(THREE)
     assert all(s.strip() for s in stances)
     # Stable: the same seat gets the same stance on a retry, so a re-run of a missing
     # turn rebuilds the prompt the first attempt used.
