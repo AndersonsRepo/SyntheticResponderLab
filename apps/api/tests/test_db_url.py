@@ -58,26 +58,37 @@ def test_settings_normalizes_what_the_platform_injects(test_settings):
     assert hosted.database_url == "postgresql://u:pw@host:5432/db"  # copy is unvalidated
 
 
-def test_migrations_load_psycopg3_not_psycopg2(tmp_path):
-    """The crash was in `alembic upgrade head`, so prove THAT path picks the driver.
+@pytest.mark.parametrize("password, shape", [
+    ("pw", "ordinary"),
+    # Normalizing re-renders a literal ':' as %3A, and set_main_option feeds a
+    # ConfigParser that reads % as interpolation syntax (refuter F1).
+    ("pass:word", "colon, which normalization percent-encodes"),
+    ("p%40ss", "already percent-encoded, as a generated password often is"),
+])
+def test_migrations_reach_the_network_with_psycopg3(password, shape):
+    """The crash was in `alembic upgrade head`, so prove THAT path start to finish.
 
     env.py reads DATABASE_URL straight from the environment rather than through
-    Settings, so it needs its own proof. Pointed at a host that does not exist:
-    with the fix the run gets far enough to fail CONNECTING (psycopg v3 loaded);
-    without it, it dies importing psycopg2 and never reaches the network.
+    Settings, so it needs its own proof. Pointed at a closed port: the run has to
+    get all the way to a psycopg CONNECTION failure. Anything earlier — a missing
+    psycopg2, a missing psycopg, an interpolation error from the config boundary —
+    means the container would not have started.
     """
     import subprocess
     import sys
 
     env = {**os.environ,
-           "DATABASE_URL": "postgresql://u:pw@127.0.0.1:1/db?connect_timeout=1"}
+           "DATABASE_URL": f"postgresql://u:{password}@127.0.0.1:1/db?connect_timeout=1"}
     proc = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=API_ROOT, env=env, capture_output=True, text=True, timeout=120)
-
-    assert proc.returncode != 0, "a bogus host should not migrate successfully"
     combined = proc.stdout + proc.stderr
-    assert "No module named 'psycopg2'" not in combined, (
-        "env.py handed SQLAlchemy a bare postgresql:// URL — this is the "
-        "container-start crash the normalizer exists to prevent")
-    assert "psycopg" in combined.lower() or "connect" in combined.lower()
+
+    assert proc.returncode != 0, "a closed port should not migrate successfully"
+    # Positive: psycopg v3 loaded and actually tried to connect. A driver that
+    # failed to import cannot raise this (refuter F2).
+    assert "psycopg.OperationalError" in combined, combined[-800:]
+    # Negative: no import died on the way — psycopg2 (the original bug), psycopg
+    # itself, or anything else.
+    assert "No module named" not in combined, combined[-800:]
+    assert "interpolation" not in combined, combined[-800:]
