@@ -6,6 +6,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from src.config.db_url import normalize_database_url
 from src.persistence.base import Base
 from src.persistence import models  # noqa: F401
 
@@ -21,7 +22,10 @@ if config.config_file_name is not None:
 
 database_url = os.getenv("DATABASE_URL")
 if database_url:
-    config.set_main_option("sqlalchemy.url", database_url)
+    # Migrations run before the app builds its own engine, so this path needs the
+    # same driver fix independently — it reads the environment directly rather
+    # than going through Settings.
+    config.set_main_option("sqlalchemy.url", normalize_database_url(database_url))
 
 target_metadata = Base.metadata
 
