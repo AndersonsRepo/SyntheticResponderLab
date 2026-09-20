@@ -9,6 +9,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine.url import make_url
 
+from src.config.db_url import normalize_database_url
 from src.services.interview_cache import CACHE_MODE, normalize_cache_mode
 from src.services.llm_budget import RUN_BUDGET_USD, parse_budget_usd
 
@@ -100,7 +101,10 @@ class AppSettings(BaseSettings):
             make_url(trimmed)
         except Exception as exc:
             raise ValueError(f"DATABASE_URL is invalid: {exc}") from exc
-        return trimmed
+        # A hosted Postgres URL names no driver, and a bare scheme means psycopg2,
+        # which this project does not install. Fill it in here so every engine
+        # built from settings gets psycopg v3.
+        return normalize_database_url(trimmed)
 
     @field_validator(
         "max_survey_upload_bytes",

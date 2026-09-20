@@ -6,6 +6,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from src.config.db_url import normalize_database_url
 from src.persistence.base import Base
 from src.persistence import models  # noqa: F401
 
@@ -21,7 +22,19 @@ if config.config_file_name is not None:
 
 database_url = os.getenv("DATABASE_URL")
 if database_url:
-    config.set_main_option("sqlalchemy.url", database_url)
+    # Migrations run before the app builds its own engine, so this path needs the
+    # same driver fix independently — it reads the environment directly rather
+    # than going through Settings.
+    #
+    # The doubled %% is not cosmetic. set_main_option writes into a ConfigParser
+    # that performs %-interpolation, so a single % anywhere in the URL aborts the
+    # migration with "invalid interpolation syntax" before any engine is built.
+    # Percent-encoding is ordinary in a generated password, and normalizing the
+    # URL can introduce it where there was none (a literal ':' in a password
+    # re-renders as %3A), so escape at this boundary and nowhere else — the value
+    # ConfigParser hands back is the unescaped original (refuter F1).
+    normalized = normalize_database_url(database_url)
+    config.set_main_option("sqlalchemy.url", normalized.replace("%", "%%"))
 
 target_metadata = Base.metadata
 
