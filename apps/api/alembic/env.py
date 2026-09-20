@@ -13,7 +13,11 @@ from src.persistence import models  # noqa: F401
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers defaults to True, which silences every application
+    # logger that already exists in this process. Running a migration in-process
+    # (tests, a management command) would otherwise leave the service loggers dead
+    # for the rest of the run, so an incident later logs nothing.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 database_url = os.getenv("DATABASE_URL")
 if database_url:

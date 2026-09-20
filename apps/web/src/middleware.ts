@@ -10,8 +10,8 @@ import {
 import {
   CLASSROOM_SESSION_COOKIE_NAME,
   isClassroomInterviewApiRequest,
-  isClassroomInterviewPage,
   isClassroomNoLoginEnabled,
+  isClassroomStudentPage,
   isValidClassroomSessionId,
 } from "./lib/classroom-access";
 
@@ -24,7 +24,9 @@ const isAlwaysPublicPath = (pathname: string) =>
   pathname === "/favicon.ico" ||
   pathname === "/api/readiness" ||
   pathname.startsWith("/access") ||
-  pathname.startsWith("/api/access/");
+  pathname.startsWith("/api/access/") ||
+  // Ending a shared-device session only clears a cookie; it must never need one.
+  pathname.startsWith("/api/classroom/");
 
 function unauthorizedApiResponse() {
   return NextResponse.json(
@@ -46,7 +48,7 @@ function classroomAccessResponse(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const sessionId = request.cookies.get(CLASSROOM_SESSION_COOKIE_NAME)?.value;
 
-  if (isClassroomInterviewPage(pathname)) {
+  if (isClassroomStudentPage(pathname)) {
     const response = NextResponse.next();
     if (!isValidClassroomSessionId(sessionId)) {
       response.cookies.set(CLASSROOM_SESSION_COOKIE_NAME, crypto.randomUUID(), {

@@ -763,3 +763,85 @@ def generate_standalone_themes(study_id: str, job_id: str, request: Request, pay
     from src.services.standalone_themes import standalone_themes
     study = get_owned_study_or_404(db, study_id, current_user)
     return response_envelope(request, {"insights": standalone_themes(db, settings, study, job_id, payload)})
+
+
+# --- Focus group: its own lane, never mixed into the interview batch endpoints ---
+
+@router.post("/api/v1/studies/{study_id}/interview/focus-group/rooms")
+def create_focus_group_room(study_id: str, request: Request, payload: dict = Body(...),
+    db: Session = Depends(get_db_session), settings: AppSettings = Depends(get_settings),
+    current_user: AuthUser = Depends(get_current_user)):
+    from src.services.focus_group import start_room
+    study = get_owned_study_or_404(db, study_id, current_user)
+    return response_envelope(request, {"room": start_room(db, settings, study, payload)})
+
+
+@router.get("/api/v1/studies/{study_id}/interview/focus-group/rooms")
+def list_focus_group_rooms(study_id: str, request: Request,
+    db: Session = Depends(get_db_session), settings: AppSettings = Depends(get_settings),
+    current_user: AuthUser = Depends(get_current_user)):
+    from src.services.focus_group import list_rooms
+    study = get_owned_study_or_404(db, study_id, current_user)
+    return response_envelope(request, {"rooms": list_rooms(db, settings, study)})
+
+
+@router.get("/api/v1/studies/{study_id}/interview/focus-group/rooms/{room_id}")
+def get_focus_group_room(study_id: str, room_id: str, request: Request,
+    db: Session = Depends(get_db_session), settings: AppSettings = Depends(get_settings),
+    current_user: AuthUser = Depends(get_current_user)):
+    from src.services.focus_group import room_status
+    study = get_owned_study_or_404(db, study_id, current_user)
+    return response_envelope(request, {"room": room_status(db, settings, study, room_id)})
+
+
+@router.delete("/api/v1/studies/{study_id}/interview/focus-group/rooms/{room_id}")
+def delete_focus_group_room(study_id: str, room_id: str, request: Request,
+    db: Session = Depends(get_db_session), current_user: AuthUser = Depends(get_current_user)):
+    from src.services.focus_group import delete_room
+    study = get_owned_study_or_404(db, study_id, current_user)
+    return response_envelope(request, {"room": delete_room(db, study, room_id)})
+
+
+@router.post("/api/v1/studies/{study_id}/interview/focus-group/rooms/{room_id}/ask")
+def ask_focus_group_room(study_id: str, room_id: str, request: Request, payload: dict = Body(...),
+    db: Session = Depends(get_db_session), settings: AppSettings = Depends(get_settings),
+    current_user: AuthUser = Depends(get_current_user)):
+    from src.services.focus_group import ask_round
+    study = get_owned_study_or_404(db, study_id, current_user)
+    return response_envelope(request, {"room": ask_round(db, settings, study, room_id, payload)})
+
+
+@router.post("/api/v1/studies/{study_id}/interview/focus-group/rooms/{room_id}/cancel")
+def cancel_focus_group_room(study_id: str, room_id: str, request: Request,
+    db: Session = Depends(get_db_session), settings: AppSettings = Depends(get_settings),
+    current_user: AuthUser = Depends(get_current_user)):
+    from src.services.focus_group import cancel_room
+    study = get_owned_study_or_404(db, study_id, current_user)
+    return response_envelope(request, {"room": cancel_room(db, settings, study, room_id)})
+
+
+@router.get("/api/v1/studies/{study_id}/interview/focus-group/rooms/{room_id}/memo")
+def get_focus_group_memo(study_id: str, room_id: str, request: Request,
+    db: Session = Depends(get_db_session), settings: AppSettings = Depends(get_settings),
+    current_user: AuthUser = Depends(get_current_user)):
+    from src.services.focus_group import focus_group_memo
+    study = get_owned_study_or_404(db, study_id, current_user)
+    return response_envelope(request, {"memo": focus_group_memo(db, settings, study, room_id)})
+
+
+@router.post("/api/v1/studies/{study_id}/interview/focus-group/rooms/{room_id}/memo")
+def write_focus_group_memo(study_id: str, room_id: str, request: Request, payload: dict = Body(...),
+    db: Session = Depends(get_db_session), settings: AppSettings = Depends(get_settings),
+    current_user: AuthUser = Depends(get_current_user)):
+    from src.services.focus_group import focus_group_memo
+    study = get_owned_study_or_404(db, study_id, current_user)
+    return response_envelope(request, {"memo": focus_group_memo(db, settings, study, room_id, payload)})
+
+
+@router.post("/api/v1/studies/{study_id}/interview/focus-group/rooms/{room_id}/export")
+def export_focus_group_room(study_id: str, room_id: str, request: Request, payload: dict = Body(default=None),
+    db: Session = Depends(get_db_session), settings: AppSettings = Depends(get_settings),
+    current_user: AuthUser = Depends(get_current_user)):
+    from src.services.focus_group import export_room
+    study = get_owned_study_or_404(db, study_id, current_user)
+    return response_envelope(request, {"export": export_room(db, settings, study, room_id, payload)})

@@ -7,14 +7,17 @@ import {
 } from "../src/lib/app-navigation";
 import { workflowSections } from "../src/lib/workflow-sections";
 
-test("student interview is a standalone app destination outside the study workflow", () => {
+test("student interview and focus group are standalone app destinations outside the study workflow", () => {
   assert.deepEqual(standaloneAppLinks, [
     { href: "/interview", label: "Student Interview" },
+    { href: "/focus-group", label: "Focus Group" },
   ]);
-  assert.equal(
-    workflowSections.some((section) => section.id === ("interview" as string)),
-    false
-  );
+  for (const id of ["interview", "focus-group"]) {
+    assert.equal(
+      workflowSections.some((section) => section.id === (id as string)),
+      false
+    );
+  }
 });
 
 test("compact app menu remains openable for standalone destinations during a workflow lock", () => {
