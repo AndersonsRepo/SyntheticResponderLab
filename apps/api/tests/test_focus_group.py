@@ -836,3 +836,64 @@ def test_a_round_nobody_answered_says_so_instead_of_blaming_funnel_order(room):
     assert retried.status_code == 200, retried.text
     assert ask(client, study_id, retried.json()["data"]["room"], stage="space_needs",
                question="What do you wish you had more room for?").status_code == 200
+
+
+def test_every_seat_in_a_room_gets_a_different_stance():
+    """The room disagrees only if its members start from different places.
+
+    Personas all see each other's answers, which is the focus group and is also what
+    drives them to agree. The counter-pressure is per-seat dispositions, so a roster
+    drawing the same stance twice would be the bug this exists to catch.
+    """
+    # Every legal room size, not just three — MAX_PERSONAS seats is the case that
+    # actually runs out of stances (refuter FG-STANCE-1).
+    for size in range(fg.MIN_PERSONAS, fg.MAX_PERSONAS + 1):
+        roster = [f"P{n:03d}" for n in range(1, size + 1)]
+        seated = [fg.room_stance(roster, pid) for pid in roster]
+        assert len(set(seated)) == size, f"a room of {size} doubled up on a stance"
+
+    stances = [fg.room_stance(THREE, pid) for pid in THREE]
+    assert all(s.strip() for s in stances)
+    # Stable: the same seat gets the same stance on a retry, so a re-run of a missing
+    # turn rebuilds the prompt the first attempt used.
+    assert stances == [fg.room_stance(THREE, pid) for pid in THREE]
+
+
+def test_stance_reaches_the_prompt_and_changes_the_cache_key():
+    """A stance nobody sees is a stance that does nothing.
+
+    The cache keys on a hash of the prior turns, and the system prompt is the first of
+    them — so two stances must not collide onto one cached answer.
+    """
+    from src.services.interview_cache import hash_prior_turns
+
+    profile = {"persona_id": "P001"}
+    first = fg.build_room_system_prompt(profile, "concept", fg.room_stance(THREE, "P001"))
+    second = fg.build_room_system_prompt(profile, "concept", fg.room_stance(THREE, "P002"))
+    bare = fg.build_room_system_prompt(profile, "concept")
+
+    assert fg.room_stance(THREE, "P001") in first
+    assert "YOUR STANCE GOING IN:" in first
+    assert "YOUR STANCE GOING IN:" not in bare
+    assert hash_prior_turns([{"role": "system", "content": first}]) != \
+        hash_prior_turns([{"role": "system", "content": second}])
+    assert hash_prior_turns([{"role": "system", "content": first}]) != \
+        hash_prior_turns([{"role": "system", "content": bare}])
+
+
+def test_no_stance_reaches_a_pre_exposure_stage():
+    """A skeptic at the icebreaker is a persona who already knows the product.
+
+    icebreaker and space_needs are collected before the concept is introduced, so a
+    product-directed disposition there contaminates exactly the answers _STAGE_CONTEXT
+    keeps clean (refuter FG-STANCE-2).
+    """
+    profile = {"persona_id": "P001"}
+    stance = fg.room_stance(THREE, "P001")
+    for stage, context in fg._STAGE_CONTEXT.items():
+        prompt = fg.build_room_system_prompt(profile, stage, stance)
+        if context:
+            assert "YOUR STANCE GOING IN:" in prompt, f"{stage} lost its stance"
+        else:
+            assert "YOUR STANCE GOING IN:" not in prompt, f"{stage} leaked a stance"
+            assert stance not in prompt

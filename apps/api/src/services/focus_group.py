@@ -90,21 +90,72 @@ _MONEY = re.compile(r"\$\s*\d|\b\d{1,3},\d{3}\b"
                     re.I)
 
 
+# Personas that all see each other's answers converge on agreement. That is documented
+# group conformity in multi-agent LLM systems, attributed to RLHF optimizing for
+# agreeableness, and the literature reports it is tunable through PERSONA rather than
+# through information framing (Findings of ACL 2025; arXiv 2405.03862). So the room is
+# seeded with differing dispositions instead of hiding what each participant sees:
+# mutual visibility IS the focus group, and withholding it would leave parallel
+# interviews. A stance is a disposition, never a rewrite of who the persona is — the
+# Census-drawn profile still decides the facts of their life.
+_STANCES = (
+    "You are the room's skeptic. Assume the product is overpromised until someone gives you a"
+    " concrete reason otherwise, and say plainly when an answer has not convinced you.",
+    "You are the most willing person in the room. When others hesitate, say so and make the case"
+    " for trying it anyway.",
+    "You judge everything by whether it fits the routine you already have. Abstract benefits do"
+    " not move you; describe the specific moment in your day it would or would not fit.",
+    "Value for money is your lens before anything else. Keep returning to what it costs against"
+    " what you would actually get.",
+    "You do not trust connected devices or the companies behind them with what happens in your"
+    " home. Raise that even when nobody else in the room has.",
+    "You expect things like this to end up unused after a month. Say what would have to be true"
+    " for that not to happen, without claiming purchases your life has not actually included.",
+    "You answer for your household before yourself. Keep asking how this would land for the other"
+    " people you live with, not only for you.",
+    "You believe it when you see it fail well. Ask what happens when it breaks, and say what would"
+    " have to go wrong for you to walk away.",
+)
+
+# A room may seat up to MAX_PERSONAS, and the whole point is that no two seats share a
+# disposition, so the list has to cover the largest legal room.
+assert len(_STANCES) >= MAX_PERSONAS, "every seat in a full room needs its own stance"
+
+
+def room_stance(persona_ids, persona_id: str) -> str:
+    """One disposition per seat, so a room of N draws N different stances.
+
+    The modulo never actually wraps — the assert above keeps _STANCES at least
+    MAX_PERSONAS long — it is there so a larger room degrades to a repeat rather
+    than an IndexError mid-answer.
+    """
+    seats = list(persona_ids)
+    # The roster is what builds the answer rows, so a persona is always on it. Falling
+    # back to the first seat keeps a malformed room answering rather than raising mid-turn.
+    seat = seats.index(persona_id) if persona_id in seats else 0
+    return _STANCES[seat % len(_STANCES)]
+
+
 def persona_description(profile: dict) -> str:
     from src.services.interview_service import build_persona_description
     return build_persona_description(profile)
 
 
-def build_room_system_prompt(profile: dict, stage: str) -> str:
+def build_room_system_prompt(profile: dict, stage: str, stance: str = "") -> str:
     context = _STAGE_CONTEXT[stage]
     product = f"\n{context}\n" if context else "\n"
+    # Pre-exposure stages get no stance. Every disposition below is about the product,
+    # and a persona already skeptical of it is a persona who knows it exists — which is
+    # the contamination _STAGE_CONTEXT exists to prevent (refuter FG-STANCE-2). Gate on
+    # the same boundary rather than a second copy of the stage list.
+    stance_block = f"\nYOUR STANCE GOING IN:\n{stance}\n" if stance and context else ""
     return f"""You are role-playing as a real person taking part in a moderated focus group with other participants.
 
 You are participant {profile.get('persona_id', 'unknown')} in this room.
 
 YOUR PERSONA:
 {persona_description(profile)}
-{product}
+{product}{stance_block}
 INSTRUCTIONS:
 - Stay fully in character. Answer the moderator as this person would, in first person.
 - This is a group, not an interview. Whenever other participants' answers are shown to you,
@@ -333,7 +384,9 @@ def ask_round(session, settings, study, room_id, payload):
         nonlocal charged_any
         persona = session.get(Persona, answer["persona_id"])
         stage_ = round_["stage"]
-        prior = [{"role": "system", "content": build_room_system_prompt(persona.profile_json, stage_)},
+        stance = room_stance(room.payload_json["persona_ids"], answer["persona_id"])
+        prior = [{"role": "system",
+                  "content": build_room_system_prompt(persona.profile_json, stage_, stance)},
                  *_prior_messages(history, answer["persona_id"])]
         question_text = round_["question"]
         budget_error = None
