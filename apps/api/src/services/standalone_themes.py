@@ -2,6 +2,8 @@
 import hashlib
 import json
 import logging
+import re
+import unicodedata
 from decimal import Decimal
 
 from src.persistence.models import InterviewTurn
@@ -16,6 +18,52 @@ MODEL = "openai/gpt-4o-mini"
 logger = logging.getLogger(__name__)
 
 
+def _comparable(text: str) -> str:
+    """Fold the ways a model legitimately re-renders a quote it did copy.
+
+    Typographic quotes, the transcript's own "<n>: " answer prefix, wrapping quotation
+    marks and run-together whitespace are all rendering, not content. Everything else
+    still has to appear in that persona's own answer, so a fabricated or paraphrased
+    quote is still rejected.
+    """
+    folded = unicodedata.normalize("NFKC", text)
+    for fancy, plain in (("\u2018", "'"), ("\u2019", "'"), ("\u201c", '"'), ("\u201d", '"'),
+                         ("\u2013", "-"), ("\u2014", "-"), ("\u2026", "...")):
+        folded = folded.replace(fancy, plain)
+    folded = " ".join(folded.split()).strip().strip('"\'')
+    # Either order: a prefix inside the wrapping marks, or marks inside the prefix.
+    folded = re.sub(r"^\s*\d+\s*:\s*", "", folded).strip().strip('"\'').strip()
+    return folded.casefold()
+
+
+def validate(themes, pairs):
+    """Return why this response is unusable, or None when it is usable."""
+    if not isinstance(themes, list):
+        return "Response held no theme list"
+    if not 3 <= len(themes) <= 6:
+        return f"Expected 3-6 themes, got {len(themes)}"
+    answers = {}
+    for pair in pairs:
+        answers.setdefault(pair["persona_id"], []).extend(pair["model_a"]["answers"].values())
+    for index, theme in enumerate(themes, 1):
+        if not isinstance(theme, dict):
+            return f"Theme {index} is not an object"
+        for key in ("label", "synthesis", "representative_quote", "quote_persona_id"):
+            if not isinstance(theme.get(key), str) or not theme[key].strip():
+                return f"Theme {index} is missing {key}"
+        if theme.get("sentiment") not in ("positive", "neutral", "negative"):
+            return f"Theme {index} has sentiment {theme.get('sentiment')!r}"
+        if type(theme.get("count")) is not int or not 1 <= theme["count"] <= len(pairs):
+            return f"Theme {index} count {theme.get('count')!r} is not 1-{len(pairs)}"
+        persona_answers = answers.get(theme["quote_persona_id"])
+        if persona_answers is None:
+            return f"Theme {index} quotes unknown persona {theme['quote_persona_id']!r}"
+        quote = _comparable(theme["representative_quote"])
+        if not quote or not any(quote in _comparable(answer) for answer in persona_answers):
+            return (f"Theme {index} quote is not in {theme['quote_persona_id']}'s answers")
+    return None
+
+
 def corpus(job):
     transcripts = (job.result_json or {}).get("transcripts", [])
     revision = hashlib.sha256(json.dumps(transcripts, sort_keys=True).encode()).hexdigest()
@@ -27,6 +75,9 @@ def corpus(job):
 
 def status(job):
     revision, pairs = corpus(job)
+    # The corpus the model would be shown — so "eligible", the cost estimate and the
+    # extraction itself all agree instead of inviting a charge the rules must reject.
+    pairs = insights.rendered_pairs(pairs)
     saved = (job.result_json or {}).get("insights")
     complete = (job.status == "completed" and bool(pairs) and
         len(pairs) == job.payload_json.get("persona_count") and
@@ -75,6 +126,7 @@ def standalone_themes(session, settings, study, job_id, payload=None):
     attempt = (saved.get("attempt", 0) if saved else 0) + 1
     record = {"revision": view["revision"], "attempt": attempt, "outcome": "unknown", "themes": None}
     _, pairs = corpus(job)
+    pairs = insights.rendered_pairs(pairs)
     result = None
     def record_charge(measured):
         # Empty text keeps the accounting row out of the student transcript corpus.
@@ -104,28 +156,31 @@ def standalone_themes(session, settings, study, job_id, payload=None):
             record["budget_stop"] = exc.message
         return result.text
 
+    reason, validated = None, False
     try:
         themes = insights._extract_insight_themes(pairs, "", call)
-        if not isinstance(themes, list) or not 3 <= len(themes) <= 6:
-            raise ValueError("Expected 3–6 themes")
-        answers = {p["persona_id"]: list(p["model_a"]["answers"].values()) for p in pairs}
-        for theme in themes:
-            if (not isinstance(theme, dict) or
-                any(not isinstance(theme.get(k), str) or not theme[k].strip() for k in
-                    ("label", "synthesis", "representative_quote", "quote_persona_id")) or
-                theme.get("sentiment") not in ("positive", "neutral", "negative") or
-                type(theme.get("count")) is not int or not 1 <= theme["count"] <= len(pairs) or
-                not any(theme["representative_quote"] in answer for answer in answers.get(theme["quote_persona_id"], []))):
-                raise ValueError("Invalid or ungrounded theme")
-        record["themes"] = themes
-    except Exception:
+        validated = True
+        reason = validate(themes, pairs)
+        if not reason:
+            record["themes"] = themes
+    except Exception as exc:
+        # A provider exception can carry transcript or credential text, so only its class
+        # is shown. Validation reasons are ours, and quote only the response's own field.
+        reason = exc.__class__.__name__
+    if reason:
+        # The student pays for every retry, so say which rule the response broke.
+        record["reason"] = reason[:200]
         # Key off whether a charge was actually recorded, not whether a usable result
         # came back: a rejected-but-billed response has a known charge and would
         # otherwise be reported to the student as an unknown billing outcome.
+        # Two different failures reach here: a response that broke a rule, and a call
+        # that never produced one. Saying which is the point of showing a reason at all.
         record["message"] = ("Theme extraction failed. Your transcripts are preserved. " +
-            ("The response could not be validated; its measured charge is recorded. Retrying adds another charge."
+            ("The response broke a rule; " if validated else "The call produced no usable response; ") +
+            ("its measured charge is recorded. Retrying adds another charge."
              if record["outcome"] == "charged" else
-             "The provider's billing outcome is unknown. Retrying may incur another charge."))
+             "the provider's billing outcome is unknown. Retrying may incur another charge.") +
+            f" ({record['reason']})")
     logger.log(logging.INFO if record["themes"] else logging.WARNING, "interview_themes study=%s run=%s revision=%s attempt=%s outcome=%s valid=%s",
         study.public_id, job_id, view["revision"], attempt, record["outcome"], bool(record["themes"]))
     job.result_json = {**job.result_json, "insights": record}

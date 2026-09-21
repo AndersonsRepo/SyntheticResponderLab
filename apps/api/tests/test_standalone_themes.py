@@ -8,6 +8,7 @@ from sqlalchemy import select
 from test_standalone_batch import classroom, start, finish
 from src.persistence.models import Job
 from src.services.interview_cache import InterviewAnswer
+import src.services.interview_service as insights_module
 # Bound at import, before any fixture replaces the module attribute, so a test can
 # put the real helper back and exercise the parser at the HTTP boundary.
 from src.services.interview_service import _call_openrouter_messages as _real_openrouter_call
@@ -89,6 +90,9 @@ def test_standalone_themes_timeout_retry_and_safe_diagnostics(completed, monkeyp
     assert 'unknown' in response['saved']['message']
     assert batch['job_id'] in caplog.text and payload['revision'] in caplog.text
     assert 'secret transcript credential' not in caplog.text
+    assert 'secret transcript credential' not in response['saved']['message']
+    assert response['saved']['reason'] == 'RuntimeError'
+    assert 'produced no usable response' in response['saved']['message']
     client.post(url, json=payload)
     assert len(calls) == 1
     retry = {**payload, 'retry_attempt': response['saved']['attempt']}
@@ -169,3 +173,92 @@ def test_standalone_themes_unusable_content_records_measured_cost(completed, mon
     assert 'billing outcome is unknown' not in result['saved']['message'], \
         'the charge is known and recorded — do not tell the student otherwise'
     assert client.get(url.removesuffix('/themes')).json()['data']['batch']['transcripts'] == batch['transcripts']
+
+
+@pytest.mark.parametrize('rendering', [
+    '0: {quote}',                      # the transcript's own answer prefix
+    '“{quote}”',             # typographic quotation marks
+    '  {quote}  ',                     # stray whitespace
+    '“0: {quote}”',          # both at once: the prefix inside the quotation marks
+])
+def test_standalone_themes_accepts_a_rerendered_quote(completed, rendering):
+    """A quote the model really did copy must survive being re-rendered.
+
+    Every one of these is the same sentence from the same persona; rejecting them costs
+    the student another charge for a response that was never wrong.
+    """
+    client, url, batch, calls, themes, payload = completed
+    themes[0]['representative_quote'] = rendering.format(quote=themes[0]['representative_quote'])
+    result = client.post(url, json=payload).json()['data']['insights']
+    assert result['available'], result.get('saved', {}).get('message')
+
+
+def test_standalone_themes_failure_names_the_rule_it_broke(completed):
+    """The student pays per retry, so a rejection has to say what was wrong."""
+    client, url, batch, calls, themes, payload = completed
+    themes[0]['representative_quote'] = 'a quote nobody said'
+    saved = client.post(url, json=payload).json()['data']['insights']['saved']
+    assert saved['reason'] == "Theme 1 quote is not in %s's answers" % themes[0]['quote_persona_id']
+    assert saved['reason'] in saved['message']
+    assert 'broke a rule' in saved['message']
+
+
+def test_standalone_themes_reads_a_fenced_json_answer(completed, monkeypatch):
+    """A fenced block is still a JSON answer; only an unparseable one is a failure."""
+    client, url, batch, calls, themes, payload = completed
+    real = insights_module._call_openrouter_messages
+    def fenced(**kw):
+        answer = real(**kw)
+        return InterviewAnswer(text='Here is the JSON:\n\n```json\n' + answer.text + '\n```', model=answer.model,
+            tokens_in=answer.tokens_in, tokens_out=answer.tokens_out, cost_usd=answer.cost_usd)
+    monkeypatch.setattr('src.services.interview_service._call_openrouter_messages', fenced)
+    result = client.post(url, json=payload).json()['data']['insights']
+    assert result['available'], result.get('saved', {}).get('message')
+
+
+def test_extract_themes_counts_only_the_interviews_it_renders():
+    """The prompt's interview count has to match the corpus, or validate accepts a count the model never saw."""
+    pairs = [{'persona_id': 'p1', 'model_a': {'answers': {'0': 'said something'}}},
+             {'persona_id': 'p2', 'model_a': {'answers': {}}},
+             # Every answer here is one the corpus builder skips, so the model sees no text.
+             {'persona_id': 'p3', 'model_a': {'answers': {'0': '[no answer]',
+                                                          'additional_thoughts': 'aside'}}}]
+    seen = {}
+    def call(**prompts):
+        seen.update(prompts)
+        return '{"themes": []}'
+    insights_module._extract_insight_themes(pairs, '', call)
+    assert 'There are 1 interviews' in seen['user_prompt']
+    assert 'p2' not in seen['user_prompt'] and 'p3' not in seen['user_prompt']
+    # The quote check must not reach text the prompt never carried.
+    assert [p['persona_id'] for p in insights_module.rendered_pairs(pairs)] == ['p1']
+
+
+def test_standalone_themes_refuses_an_unreadable_corpus(completed, db_session):
+    """Every answer is one the corpus skips, so the call could only come back rejected."""
+    client, url, batch, calls, _, payload = completed
+    job = db_session.scalar(select(Job).where(Job.public_id == batch['job_id']))
+    result = dict(job.result_json)
+    result['transcripts'] = [{**t, 'messages': [
+        {**m, 'content': '[no answer]'} if m['role'] == 'assistant' else m for m in t['messages']]}
+        for t in result['transcripts']]
+    job.result_json = result
+    db_session.commit()
+    view = client.get(url).json()['data']['insights']
+    assert not view['eligible']
+    assert client.post(url, json={**payload, 'revision': view['revision']}).json()['data']['insights'] == view
+    assert calls == []
+
+
+def test_standalone_themes_accepts_a_quote_from_a_repeated_persona(completed, db_session):
+    """Two transcripts can share a persona_id; the prompt carries both, so the check must too."""
+    client, url, batch, calls, themes, payload = completed
+    job = db_session.scalar(select(Job).where(Job.public_id == batch['job_id']))
+    result = dict(job.result_json)
+    first = result['transcripts'][0]['persona_id']
+    result['transcripts'] = [{**t, 'persona_id': first} for t in result['transcripts']]
+    job.result_json = result
+    db_session.commit()
+    revision = client.get(url).json()['data']['insights']['revision']
+    saved = client.post(url, json={**payload, 'revision': revision}).json()['data']['insights']
+    assert saved['available'], saved.get('saved', {}).get('message')

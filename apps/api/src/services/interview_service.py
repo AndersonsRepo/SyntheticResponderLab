@@ -382,6 +382,10 @@ Identify 3–6 distinct themes that appear across multiple interviews. For each 
 - Pick the most representative verbatim quote from a specific persona (include persona_id)
 - Label the overall sentiment for this theme: "positive", "neutral", or "negative"
 
+The quote is checked against the transcript, and the whole response is rejected if it does not match. Copy it character for character from a single answer by that persona. Do not include the "<number>:" prefix the transcript puts in front of each answer, do not wrap it in quotation marks, do not join two sentences that are not adjacent, and do not shorten it with an ellipsis. A short exact quote is always better than a long approximate one.
+
+"count" is how many of the interviews below mention the theme. It is a whole number and cannot exceed the number of interviews.
+
 Return ONLY a JSON object:
 {{
   "themes": [
@@ -398,11 +402,39 @@ Return ONLY a JSON object:
 }}"""
 
 
+def _strip_json_fence(raw: str) -> str:
+    """A fenced block, wherever it sits, is still a JSON answer; only an unparseable one is a failure."""
+    fenced = re.search(r"```[a-zA-Z]*[ \t]*\n(.*?)```", raw, re.S)
+    if fenced:
+        return fenced.group(1).strip()
+    start, end = raw.find("{"), raw.rfind("}")
+    return raw[start:end + 1] if 0 <= start < end else raw.strip()
+
+
+def _rendered_answers(pair):
+    """The answers _build_transcript_corpus emits; the rest never reach the model."""
+    return {qid: a for qid, a in ((pair.get("model_a") or {}).get("answers") or {}).items()
+            if qid != "additional_thoughts" and a and not a.startswith("[")}
+
+
+def rendered_pairs(pairs, max_pairs: int = 30):
+    """The corpus the model is actually shown, so one number means one thing.
+
+    Narrowing the answers here — not just dropping empty pairs — keeps the caller's
+    validation from accepting a quote out of text the prompt never carried.
+    """
+    shown = [(p, _rendered_answers(p)) for p in pairs]
+    return [{**p, "model_a": {**p.get("model_a", {}), "answers": answers}}
+            for p, answers in shown if answers][:max_pairs]
+
+
 def _extract_insight_themes(pairs, brief_context, call):
     """Shared extraction protocol; callers own authorization, usage and caching."""
+    pairs = rendered_pairs(pairs)
     raw = call(system_prompt=_insights_system_prompt(brief_context),
-               user_prompt=f"INTERVIEW TRANSCRIPTS:\n{_build_transcript_corpus(pairs)}")
-    return json.loads(raw).get("themes") or []
+               user_prompt=f"There are {len(pairs)} interviews.\n\nINTERVIEW TRANSCRIPTS:\n"
+                           f"{_build_transcript_corpus(pairs)}")
+    return json.loads(_strip_json_fence(raw)).get("themes") or []
 
 
 def get_interview_insights(
@@ -423,7 +455,7 @@ def get_interview_insights(
         }
 
     result = latest_run.result_json
-    pairs = result.get("pairs") or []
+    pairs = rendered_pairs(result.get("pairs") or [])
     grounding_report = result.get("grounding_report") or {}
 
     if not pairs:
