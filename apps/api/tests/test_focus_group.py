@@ -949,8 +949,24 @@ def test_no_manner_mentions_the_product():
     the concept is introduced, so any of them naming it would contaminate exactly the
     answers _STAGE_CONTEXT keeps clean.
     """
-    banned = ("product", "buy", "purchase", "price", "cost", "device", "smart",
-              "brand", "company", "subscription", "app")
+    # The hand list catches the generic commercial register. The product's own vocabulary
+    # is derived from the context the app actually shows, so a rename cannot leave this
+    # test pinning words the product no longer uses (refuter FG-MANNER-4).
+    generic = ("product", "buy", "purchase", "price", "cost", "device", "smart",
+               "brand", "company", "subscription", "app")
+    stopwords = {
+        "a", "about", "and", "are", "backyard-scale", "being", "delivered", "discussed",
+        "for", "has", "in", "is", "it", "no", "not", "or", "that", "the", "to", "with",
+        "name", "description", "intended", "usable", "outdoor", "space", "compact",
+        "square", "foot", "an",
+    }
+    from_product = {
+        word
+        for word in re.findall(r"[a-z]{3,}", (fg._CONCEPT_CONTEXT + fg._PRICE_CONTEXT).lower())
+        if word not in stopwords
+    }
+    banned = tuple(sorted(set(generic) | from_product))
+    assert "tahoe" in banned and "studio" in banned, "product vocabulary did not survive"
     # Whole words only: a substring check flags "app" inside "happened", which is how the
     # first version of this test failed on prose that named nothing at all.
     for manner in fg._MANNERS:
