@@ -162,18 +162,20 @@ function InterviewPageContent() {
     // The transcript and the comparison answers are what the student hands in, and both are
     // paid for. Selecting a persona discards them with no undo — including re-selecting the
     // current one, which is how you start over — so it asks first.
-    const discards =
+    const discards = [
       turns.length > 0
-        ? `${turns.length} message${turns.length === 1 ? "" : "s"}`
-        : comparisonResults.length > 0
-          ? `${comparisonResults.length} compared model answer${comparisonResults.length === 1 ? "" : "s"}`
-          : "";
+        ? `${turns.length} interview message${turns.length === 1 ? "" : "s"}`
+        : "",
+      comparisonResults.length > 0
+        ? `${comparisonResults.length} compared model answer${comparisonResults.length === 1 ? "" : "s"}`
+        : "",
+    ].filter(Boolean);
+    // Only the transcript has an export, so only offer that when there is one.
+    const advice = turns.length > 0 ? " Export the transcript first if you need it." : "";
     if (
-      discards &&
+      discards.length > 0 &&
       !window.confirm(
-        id === selectedId
-          ? `Start over with ${id}? The ${discards} already here cannot be recovered. Export first if you need them.`
-          : `Switch to ${id}? The ${discards} with ${selectedId} cannot be recovered. Export first if you need them.`
+        `${id === selectedId ? `Start over with ${id}?` : `Switch to ${id}?`} This discards ${discards.join(" and ")}${id === selectedId ? "" : ` from ${selectedId}`}, and they cannot be recovered.${advice}`
       )
     ) {
       return;
@@ -759,24 +761,32 @@ function InterviewPageContent() {
             </GlassPanel>
 
             <GlassPanel hidden={step !== 1} style={{ display: step !== 1 ? "none" : undefined }} className="p-5">
-              <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-app-muted">
-                Interviewing
-                <select
-                  aria-label="Persona to interview"
-                  value={selectedId}
-                  disabled={busy || personas.length === 0}
-                  onChange={(event) => selectPersona(event.target.value)}
-                  className="mt-2 block w-full rounded-xl border border-app-border bg-transparent px-3 py-2 text-sm font-normal normal-case tracking-normal text-app-text disabled:cursor-not-allowed disabled:opacity-60"
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-app-muted">
+                Interviewing ({selectedId || "nobody yet"})
+              </p>
+            <div className="fine-scrollbar mt-4 flex max-h-[26rem] flex-col gap-2 overflow-y-auto pr-1">
+              {personas.map((entry) => (
+                <button
+                  key={entry.persona_id}
+                  type="button"
+                  onClick={() => selectPersona(entry.persona_id)}
+                  disabled={busy}
+                  className={cn(
+                    "rounded-xl border px-3.5 py-2.5 text-left transition duration-200 disabled:cursor-not-allowed disabled:opacity-60",
+                    entry.persona_id === selectedId
+                      ? "border-app-borderStrong text-app-text [background:var(--button-secondary-bg-hover)]"
+                      : "border-app-border text-app-muted hover:border-app-borderStrong hover:text-app-text"
+                  )}
                 >
-                  {personas.map((entry) => (
-                    <option key={entry.persona_id} value={entry.persona_id}>
-                      {entry.persona_id} · {entry.age_bucket} · {entry.home_type}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                  <span className="block text-sm font-semibold">{entry.persona_id}</span>
+                  <span className="mt-0.5 block text-xs leading-5">
+                    {entry.census_profile.split(".").slice(0, 2).join(".") || "—"}
+                  </span>
+                </button>
+              ))}
+            </div>
               <p className="mt-2 text-xs leading-5 text-app-muted">
-                Switching starts a fresh conversation with that household.
+                Choosing someone starts a fresh conversation with that household.
               </p>
             </GlassPanel>
 

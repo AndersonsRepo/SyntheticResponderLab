@@ -537,12 +537,10 @@ test("the interview step picks which persona is being interviewed, and keeps the
     .find((node) => node.props["aria-label"] === "Interviewee model")!
     .props.onChange({ target: { value: "cheap-b" } });
   ui.render();
-  const picker = () =>
-    ui.nodes().find((node) => node.props["aria-label"] === "Persona to interview")!;
-  assert.equal(picker().props.value, "neo-001");
-  picker().props.onChange({ target: { value: "neo-003" } });
+  assert.match(ui.text(), /Interviewing \(neo-001\)/);
+  ui.button("neo-003").props.onClick();
   ui.render();
-  assert.equal(picker().props.value, "neo-003");
+  assert.match(ui.text(), /Interviewing \(neo-003\)/);
   await ui.button("Ask").props.onClick();
   await ui.settle();
   assert.equal(ui.chatCalls.at(-1).persona_id, "neo-003");
@@ -560,13 +558,11 @@ test("switching persona mid-interview asks first, and a declined switch keeps th
   await ui.button("Ask").props.onClick();
   await ui.settle();
   assert.match(ui.text(), /Original 1/);
-  const picker = () =>
-    ui.nodes().find((node) => node.props["aria-label"] === "Persona to interview")!;
   ui.dismissConfirmation();
-  picker().props.onChange({ target: { value: "neo-002" } });
+  ui.button("neo-002").props.onClick();
   ui.render();
   assert.match(ui.confirmations.at(-1)!, /neo-002/);
-  assert.equal(picker().props.value, "neo-001", "a declined switch must not change persona");
+  assert.match(ui.text(), /Interviewing \(neo-001\)/, "a declined switch must not change persona");
   assert.match(ui.text(), /Original 1/, "the transcript survives a declined switch");
 });
 
@@ -580,13 +576,11 @@ test("an accepted switch clears the interview and keeps the run's models", async
   await ui.button("Ask").props.onClick();
   await ui.settle();
   assert.match(ui.text(), /Original 1/);
-  const picker = () =>
-    ui.nodes().find((node) => node.props["aria-label"] === "Persona to interview")!;
   // The destructive branch, confirmed: the transcript really does go.
-  picker().props.onChange({ target: { value: "neo-002" } });
+  ui.button("neo-002").props.onClick();
   ui.render();
   assert.match(ui.confirmations.at(-1)!, /Switch to neo-002/);
-  assert.equal(picker().props.value, "neo-002");
+  assert.match(ui.text(), /Interviewing \(neo-002\)/);
   assert.doesNotMatch(ui.text(), /Original 1/);
   assert.equal(
     ui.nodes().find((node) => node.props["aria-label"] === "Interviewee model")!.props.value,
@@ -633,12 +627,26 @@ test("switching persona drops an expensive comparison model instead of substitut
   checkboxIn("Expensive A").props.onChange({ target: { checked: true } });
   ui.render();
   assert.match(ui.text(), /Models to compare \(3 selected\)/);
-  ui.nodes()
-    .find((node) => node.props["aria-label"] === "Persona to interview")!
-    .props.onChange({ target: { value: "neo-002" } });
+  ui.button("neo-002").props.onClick();
   ui.render();
   // Two cheap models remain selected: the expensive one is dropped, not swapped for a
   // default the student never checked, and the set can still run.
   assert.match(ui.text(), /Models to compare \(2 selected\)/);
   assert.equal(checkboxIn("Expensive A").props.checked, false);
+});
+
+test("the discard warning names every artifact the click destroys", async () => {
+  const ui = harness();
+  await ui.settle();
+  await ui.button("Ask").props.onClick();
+  await ui.settle();
+  ui.setTransport(async () => ({}));
+  await ui.button("Compare 2 models").props.onClick();
+  await ui.settle();
+  ui.dismissConfirmation();
+  ui.button("neo-002").props.onClick();
+  ui.render();
+  const warning = ui.confirmations.at(-1)!;
+  assert.match(warning, /interview message/);
+  assert.match(warning, /compared model answer/, "the paid comparison answers go too");
 });
