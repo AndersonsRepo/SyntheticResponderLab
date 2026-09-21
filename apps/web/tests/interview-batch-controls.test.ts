@@ -553,3 +553,19 @@ test("the interview step picks which persona is being interviewed, and keeps the
     "cheap-b"
   );
 });
+
+test("switching persona mid-interview asks first, and a declined switch keeps the transcript", async () => {
+  const ui = harness();
+  await ui.settle();
+  await ui.button("Ask").props.onClick();
+  await ui.settle();
+  assert.match(ui.text(), /Original 1/);
+  const picker = () =>
+    ui.nodes().find((node) => node.props["aria-label"] === "Persona to interview")!;
+  ui.dismissConfirmation();
+  picker().props.onChange({ target: { value: "neo-002" } });
+  ui.render();
+  assert.match(ui.confirmations.at(-1)!, /neo-002/);
+  assert.equal(picker().props.value, "neo-001", "a declined switch must not change persona");
+  assert.match(ui.text(), /Original 1/, "the transcript survives a declined switch");
+});

@@ -159,6 +159,17 @@ function InterviewPageContent() {
 
   function selectPersona(id: string) {
     if (activity.current) return;
+    if (id === selectedId) return;
+    // The transcript is the artifact the student hands in, and switching discards it with
+    // no undo. The model selects beside this one lock once there are turns; this one asks.
+    if (
+      turns.length > 0 &&
+      !window.confirm(
+        `Switch to ${id}? This interview with ${selectedId} has ${turns.length} message${turns.length === 1 ? "" : "s"} and cannot be recovered. Export it first if you need it.`
+      )
+    ) {
+      return;
+    }
     generation.current += 1;
     setSelectedId(id);
     setTurns([]);
@@ -173,7 +184,17 @@ function InterviewPageContent() {
       resetExpensiveModelSelection(models, current, defaultModelId)
     );
     setComparisonExpensiveOptIn(false);
-    setComparisonModelIds(defaultInterviewComparisonModelIds(models));
+    setComparisonModelIds((current) =>
+      current.length > 0
+        ? Array.from(
+            new Set(
+              current.map((modelId) =>
+                resetExpensiveModelSelection(models, modelId, defaultModelId)
+              )
+            )
+          )
+        : defaultInterviewComparisonModelIds(models)
+    );
     setComparedQuestion("");
     setComparisonResults([]);
     setRegenerationCost(null);
