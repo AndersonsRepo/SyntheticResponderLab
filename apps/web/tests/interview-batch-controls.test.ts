@@ -527,3 +527,166 @@ test("classroom dismissing theme charge preserves transcripts without a POST", a
   assert.equal(ui.calls[0].payload, undefined);
   assert.match(ui.text(), /Download batch/);
 });
+
+test("the interview step picks which persona is being interviewed, and keeps the run's models", async () => {
+  const ui = harness();
+  await ui.settle();
+  // The persona list lives in step 0; the student interviews someone in step 1, so the
+  // choice has to be reachable from there or every interview is with the first persona.
+  ui.nodes()
+    .find((node) => node.props["aria-label"] === "Interviewee model")!
+    .props.onChange({ target: { value: "cheap-b" } });
+  ui.render();
+  assert.match(ui.text(), /Interviewing \(neo-001\)/);
+  ui.button("neo-003").props.onClick();
+  ui.render();
+  assert.match(ui.text(), /Interviewing \(neo-003\)/);
+  await ui.button("Ask").props.onClick();
+  await ui.settle();
+  assert.equal(ui.chatCalls.at(-1).persona_id, "neo-003");
+  // Switching person starts a new conversation; it must not quietly reset the models the
+  // student chose for this run.
+  assert.equal(
+    ui.nodes().find((node) => node.props["aria-label"] === "Interviewee model")!.props.value,
+    "cheap-b"
+  );
+});
+
+test("switching persona mid-interview asks first, and a declined switch keeps the transcript", async () => {
+  const ui = harness();
+  await ui.settle();
+  await ui.button("Ask").props.onClick();
+  await ui.settle();
+  assert.match(ui.text(), /Original 1/);
+  ui.dismissConfirmation();
+  ui.button("neo-002").props.onClick();
+  ui.render();
+  assert.match(ui.confirmations.at(-1)!, /neo-002/);
+  assert.match(ui.text(), /Interviewing \(neo-001\)/, "a declined switch must not change persona");
+  assert.match(ui.text(), /Original 1/, "the transcript survives a declined switch");
+});
+
+test("an accepted switch clears the interview and keeps the run's models", async () => {
+  const ui = harness();
+  await ui.settle();
+  ui.nodes()
+    .find((node) => node.props["aria-label"] === "Interviewee model")!
+    .props.onChange({ target: { value: "cheap-b" } });
+  ui.render();
+  await ui.button("Ask").props.onClick();
+  await ui.settle();
+  assert.match(ui.text(), /Original 1/);
+  // The destructive branch, confirmed: the transcript really does go.
+  ui.button("neo-002").props.onClick();
+  ui.render();
+  assert.match(ui.confirmations.at(-1)!, /Switch to neo-002/);
+  assert.match(ui.text(), /Interviewing \(neo-002\)/);
+  assert.doesNotMatch(ui.text(), /Original 1/);
+  assert.equal(
+    ui.nodes().find((node) => node.props["aria-label"] === "Interviewee model")!.props.value,
+    "cheap-b",
+    "the models chosen for this run survive the switch"
+  );
+});
+
+test("re-selecting the persona already in the chair is the start-over control, and it asks", async () => {
+  const ui = harness();
+  await ui.settle();
+  await ui.button("Ask").props.onClick();
+  await ui.settle();
+  assert.match(ui.text(), /Original 1/);
+  ui.button("neo-001").props.onClick();
+  ui.render();
+  assert.match(ui.confirmations.at(-1)!, /Start over with neo-001/);
+  assert.doesNotMatch(ui.text(), /Original 1/);
+});
+
+test("switching persona drops an expensive comparison model instead of substituting one", async () => {
+  const ui = harness();
+  await ui.settle();
+  // The checkboxes carry no label of their own; flatten() is depth-first, so the first
+  // input after a label element is that label's own control.
+  const checkboxIn = (labelText: string) => {
+    const nodes = ui.nodes();
+    const label = nodes.findIndex((node) => {
+      if (node.type !== "label") return false;
+      // The model <select>s list every model as an <option>, so a name match alone finds
+      // the wrong label. Only the checkbox labels are meant here.
+      const children = JSON.stringify(node.props.children ?? "");
+      return children.includes(labelText) && children.includes('"checkbox"');
+    });
+    assert.ok(label >= 0, `no label matching ${labelText}`);
+    const input = nodes.slice(label).find((node) => node.props.type === "checkbox");
+    assert.ok(input, `no checkbox under ${labelText}`);
+    return input!;
+  };
+  checkboxIn("Enable expensive models for this comparison").props.onChange({
+    target: { checked: true },
+  });
+  ui.render();
+  checkboxIn("Expensive A").props.onChange({ target: { checked: true } });
+  ui.render();
+  assert.match(ui.text(), /Models to compare \(3 selected\)/);
+  ui.button("neo-002").props.onClick();
+  ui.render();
+  // Two cheap models remain selected: the expensive one is dropped, not swapped for a
+  // default the student never checked, and the set can still run.
+  assert.match(ui.text(), /Models to compare \(2 selected\)/);
+  assert.equal(checkboxIn("Expensive A").props.checked, false);
+});
+
+test("the discard warning names every artifact the click destroys", async () => {
+  const ui = harness();
+  await ui.settle();
+  await ui.button("Ask").props.onClick();
+  await ui.settle();
+  ui.setTransport(async () => ({}));
+  await ui.button("Compare 2 models").props.onClick();
+  await ui.settle();
+  ui.dismissConfirmation();
+  ui.button("neo-002").props.onClick();
+  ui.render();
+  const warning = ui.confirmations.at(-1)!;
+  assert.match(warning, /interview message/);
+  assert.match(warning, /compared model answer/, "the paid comparison answers go too");
+});
+
+test("the interview step carries its own copy of the persona list, and it switches", async () => {
+  const ui = harness();
+  await ui.settle();
+  const named = (id: string) =>
+    ui.nodes().filter(
+      (node) => node.type === "button" && JSON.stringify(node.props.children ?? "").includes(id)
+    );
+  assert.equal(
+    named("neo-002").length,
+    2,
+    "one list in the choose step, one in the interview step"
+  );
+  // Click the interview step's copy specifically, not the one this page always had.
+  named("neo-002")[1].props.onClick();
+  ui.render();
+  assert.match(ui.text(), /Interviewing \(neo-002\)/);
+});
+
+test("a persona switch cannot land while the transcript export it advises is still running", async () => {
+  const ui = harness();
+  await ui.settle();
+  await ui.button("Ask").props.onClick();
+  await ui.settle();
+  let finishExport!: (value: any) => void;
+  ui.api.getInterviewTranscriptExport = () => new Promise((resolve) => { finishExport = resolve; });
+  const exportButton = ui
+    .nodes()
+    .find((node) => node.type === "Button" && JSON.stringify(node.props.children).includes("Markdown"))!;
+  const exporting = exportButton.props.onClick();
+  await ui.settle();
+  const personaButton = ui
+    .nodes()
+    .find((node) => node.type === "button" && JSON.stringify(node.props.children ?? "").includes("neo-002"))!;
+  assert.equal(personaButton.props.disabled, true, "switching is closed while the export is in flight");
+  finishExport({ blob: new Blob(["t"]), filename: "t.md" });
+  await exporting;
+  await ui.settle();
+  assert.match(ui.text(), /Original 1/);
+});
