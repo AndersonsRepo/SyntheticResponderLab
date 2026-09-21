@@ -15,6 +15,11 @@
     "src/lib/setup-flow-utils.ts",
     "src/lib/interview-comparison.ts",
     "src/lib/interview-models.ts",
-    "src/lib/focus-group.ts"
+    "src/lib/focus-group.ts",
+    "src/lib/answer-sourcing.ts",
+    "src/lib/run-evidence.ts",
+    "src/lib/interview-provenance.ts",
+    "src/lib/run-counts.ts",
+    "src/lib/product-reset.ts"
   ]
 }

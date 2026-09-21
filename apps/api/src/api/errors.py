@@ -7,6 +7,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from src.schemas.common import ErrorResponse, ErrorPayload
 from src.services.exceptions import ApiError
@@ -14,6 +15,36 @@ from src.services.exceptions import ApiError
 
 def new_request_id() -> str:
     return f"req_{uuid4().hex[:12]}"
+
+
+def serializable_validation_errors(exc: ValidationError | RequestValidationError) -> list[dict]:
+    """Return JSON-safe pydantic validation errors.
+
+    ``ValidationError.errors()`` embeds the originating exception object under
+    ``ctx`` (for example the ``ValueError`` raised by a model validator), and the
+    ``url`` key adds noise. Neither is JSON-serializable/useful over the wire, so
+    a raw ``errors()`` payload turns a clean 400 into an opaque 500.
+
+    FastAPI's ``RequestValidationError.errors()`` takes no keyword arguments, so
+    the suppressing kwargs are attempted first and the entries are stripped by
+    hand either way.
+    """
+    try:
+        raw_errors = exc.errors(include_url=False, include_context=False)
+    except TypeError:
+        raw_errors = exc.errors()
+
+    cleaned: list[dict] = []
+    for error in raw_errors:
+        if not isinstance(error, dict):
+            cleaned.append({"msg": str(error)})
+            continue
+        entry = {key: value for key, value in error.items() if key not in {"ctx", "url"}}
+        loc = entry.get("loc")
+        if isinstance(loc, tuple):
+            entry["loc"] = list(loc)
+        cleaned.append(entry)
+    return cleaned
 
 
 def build_meta_error(request_id: str, code: str, message: str, details: Optional[dict] = None) -> dict:
@@ -53,7 +84,7 @@ def install_exception_handlers(app: FastAPI) -> None:
                 request_id,
                 "validation_error",
                 "Request validation failed.",
-                {"errors": exc.errors()},
+                {"errors": serializable_validation_errors(exc)},
             ),
         )
 

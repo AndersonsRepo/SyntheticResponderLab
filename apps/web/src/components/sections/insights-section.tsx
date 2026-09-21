@@ -7,6 +7,7 @@ import { HeatmapGrid } from "@/components/charts/heatmap-grid";
 import { HorizontalBarChart } from "@/components/charts/horizontal-bar-chart";
 import { LadderChart } from "@/components/charts/ladder-chart";
 import { ModelDifferenceChart as InsightsModelDifferenceChart } from "@/components/charts/model-difference-chart";
+import { formatAnswerSourcing } from "@/lib/answer-sourcing";
 import { BadgeChip } from "@/components/ui/badge-chip";
 import { Button } from "@/components/ui/button";
 import { GlassPanel } from "@/components/ui/glass-panel";
@@ -153,6 +154,17 @@ export function InsightsSection() {
                     insights?.message ??
                     "No saved run is available yet. Complete Run Simulation first, then come here for executive summary and recommendations."}
                 </p>
+                {(() => {
+                  // When the refusal is caused by the answers themselves, the numbers behind it belong
+                  // next to it -- otherwise the reader is told the run is unusable and given nothing
+                  // to check that against.
+                  const sourcing = formatAnswerSourcing(insights?.answer_sourcing ?? null);
+                  return sourcing.shown ? (
+                    <p className="mt-3 max-w-2xl text-sm leading-7 text-app-muted">
+                      {sourcing.summary}
+                    </p>
+                  ) : null;
+                })()}
                 <div className="mt-5">
                   <Button variant="secondary" onClick={() => scrollToSection("run-simulation")}>
                     Return to Run Simulation
@@ -175,6 +187,14 @@ export function InsightsSection() {
                       {evidenceCount > 0 ? <BadgeChip>{`${evidenceCount} evidence points`}</BadgeChip> : null}
                       {llmSummary?.model ? <BadgeChip>{llmSummary.model}</BadgeChip> : null}
                     </div>
+
+                    {/* The backend returns this caveat on every insights response; it was previously
+                        computed, shipped and never displayed, leaving the default view uncaveated. */}
+                    {insights?.transparency_note ? (
+                      <p className="mt-4 rounded-[1.2rem] border border-app-gold/25 bg-[rgba(216,186,103,0.07)] px-4 py-3 text-xs leading-5 text-app-gold">
+                        {insights.transparency_note}
+                      </p>
+                    ) : null}
 
                     {llmSummary?.available ? (
                       <>
