@@ -527,3 +527,29 @@ test("classroom dismissing theme charge preserves transcripts without a POST", a
   assert.equal(ui.calls[0].payload, undefined);
   assert.match(ui.text(), /Download batch/);
 });
+
+test("the interview step picks which persona is being interviewed, and keeps the run's models", async () => {
+  const ui = harness();
+  await ui.settle();
+  // The persona list lives in step 0; the student interviews someone in step 1, so the
+  // choice has to be reachable from there or every interview is with the first persona.
+  ui.nodes()
+    .find((node) => node.props["aria-label"] === "Interviewee model")!
+    .props.onChange({ target: { value: "cheap-b" } });
+  ui.render();
+  const picker = () =>
+    ui.nodes().find((node) => node.props["aria-label"] === "Persona to interview")!;
+  assert.equal(picker().props.value, "neo-001");
+  picker().props.onChange({ target: { value: "neo-003" } });
+  ui.render();
+  assert.equal(picker().props.value, "neo-003");
+  await ui.button("Ask").props.onClick();
+  await ui.settle();
+  assert.equal(ui.chatCalls.at(-1).persona_id, "neo-003");
+  // Switching person starts a new conversation; it must not quietly reset the models the
+  // student chose for this run.
+  assert.equal(
+    ui.nodes().find((node) => node.props["aria-label"] === "Interviewee model")!.props.value,
+    "cheap-b"
+  );
+});

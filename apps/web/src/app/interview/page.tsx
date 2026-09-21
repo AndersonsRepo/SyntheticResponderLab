@@ -166,8 +166,12 @@ function InterviewPageContent() {
     setSystemPrompt("");
     setError("");
     setExpensiveOptIn(false);
-    setInterviewerModel(defaultModelId);
-    setIntervieweeModel(defaultModelId);
+    setInterviewerModel((current) =>
+      resetExpensiveModelSelection(models, current, defaultModelId)
+    );
+    setIntervieweeModel((current) =>
+      resetExpensiveModelSelection(models, current, defaultModelId)
+    );
     setComparisonExpensiveOptIn(false);
     setComparisonModelIds(defaultInterviewComparisonModelIds(models));
     setComparedQuestion("");
@@ -728,6 +732,28 @@ function InterviewPageContent() {
                   {transcript.messages.map((message, index) => <p key={index} className="mt-3 whitespace-pre-wrap text-sm leading-6"><strong>{message.role === "user" ? "Interviewer" : transcript.persona_id}: </strong>{message.content}</p>)}
                 </details>)}
               </div> : batchLoading ? <p role="status">Starting batch…</p> : null}
+            </GlassPanel>
+
+            <GlassPanel hidden={step !== 1} style={{ display: step !== 1 ? "none" : undefined }} className="p-5">
+              <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-app-muted">
+                Interviewing
+                <select
+                  aria-label="Persona to interview"
+                  value={selectedId}
+                  disabled={busy || personas.length === 0}
+                  onChange={(event) => selectPersona(event.target.value)}
+                  className="mt-2 block w-full rounded-xl border border-app-border bg-transparent px-3 py-2 text-sm font-normal normal-case tracking-normal text-app-text disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {personas.map((entry) => (
+                    <option key={entry.persona_id} value={entry.persona_id}>
+                      {entry.persona_id} · {entry.age_bucket} · {entry.home_type}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="mt-2 text-xs leading-5 text-app-muted">
+                Switching starts a fresh conversation with that household.
+              </p>
             </GlassPanel>
 
             {persona ? (
