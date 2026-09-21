@@ -170,12 +170,20 @@ def test_answer_overrun_is_cached_before_batch_stops(db_session, recording, monk
     assert len(db_session.scalars(select(InterviewTurn).where(InterviewTurn.role == "assistant")).all()) == 1
 
 
-def test_cli_entrypoint_dry_run(recording):
+def test_cli_entrypoint_dry_run(recording, tmp_path):
     import os
     import subprocess
 
     env = os.environ.copy()
     env["DATABASE_URL"] = recording.database_url
+    # AppSettings requires these four on main; they had defaults on yaza_Aug_work. Without
+    # them the subprocess only started because a developer's local config file happened to
+    # exist, which is why this passed there and not in a clean checkout. Supply them
+    # explicitly so the test states its own environment instead of inheriting one.
+    env.setdefault("APP_ENV", "test")
+    env.setdefault("APP_DEBUG", "false")
+    env.setdefault("ARTIFACTS_ROOT", str(tmp_path / "artifacts"))
+    env.setdefault("LEGACY_APP_ROOT", str(API_ROOT / "legacy_runtime"))
     env["OPENROUTER_API_KEY"] = ""
     result = subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts/prerecord_interviews.py"), "--dry-run"],

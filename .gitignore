@@ -17,6 +17,10 @@
 # Node / Next.js
 node_modules/
 .next/
+*.tsbuildinfo
+
+# Local editor/agent config (machine-specific paths, personal permissions)
+.claude/
 out/
 .turbo/
 .test-dist/
@@ -65,6 +69,11 @@ tmp_api_artifacts/
 # Generated artifacts
 artifacts/
 apps/api/artifacts/
+
+# The rule above is unanchored, so it also swallows the QA evidence tree. That evidence is
+# deliberately version-controlled: the findings in "QA August 17"/*.md cite these payloads and
+# scripts, and a reviewer cannot check a claim against evidence that was never committed.
+!/QA August 17/artifacts/
 apps/api/tmp_artifacts/
 
 # Legacy local environments / caches
@@ -76,3 +85,6 @@ NeoSmart-Hackathon-App/.streamlit/
 coverage/
 htmlcov/
 .build-loop/
+
+# Research pipeline: raw Census archives (hundreds of MB, re-downloadable).
+research/neo_persona_set/raw/

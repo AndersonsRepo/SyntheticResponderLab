@@ -113,6 +113,14 @@ def test_cli_dry_run_projects_cost_and_low_limit_refuses_without_provider_calls(
 
     env = os.environ.copy()
     env["DATABASE_URL"] = f"sqlite:///{database_path}"
+    # AppSettings requires these four on main; they had defaults on yaza_Aug_work. Without
+    # them the subprocess only started because a developer's local config file happened to
+    # exist, which is why this passed there and not in a clean checkout. Supply them
+    # explicitly so the test states its own environment instead of inheriting one.
+    env.setdefault("APP_ENV", "test")
+    env.setdefault("APP_DEBUG", "false")
+    env.setdefault("ARTIFACTS_ROOT", str(tmp_path / "artifacts"))
+    env.setdefault("LEGACY_APP_ROOT", str(API_ROOT / "legacy_runtime"))
     env.pop("OPENROUTER_API_KEY", None)
     command = [sys.executable, str(REPO_ROOT / "scripts/prewarm_cache.py"), "--dry-run"]
 

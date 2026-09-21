@@ -1,21 +1,32 @@
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from html import unescape
+import base64
 import inspect
 import json
 from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 import pandas as pd
+import requests
 from pydantic import ValidationError
 
+from src.api.errors import serializable_validation_errors
 from src.adapters.legacy_backend.runtime import load_module, load_service_account_info, temporary_env
 from src.adapters.legacy_backend.survey_docx_fallback import parse_aytm_style_docx_to_validated_schema
 from src.config.settings import AppSettings
-from src.services.exceptions import LegacyModuleApiError, ProviderUnavailableApiError, ValidationApiError
+from src.services.exceptions import ApiError, LegacyModuleApiError, ProviderUnavailableApiError, ValidationApiError
 
+
+# Respondent requests are independent provider round-trips, so they are issued
+# concurrently. Kept modest by default to stay well inside provider rate limits;
+# override with SIMULATION_MAX_CONCURRENCY.
+DEFAULT_SIMULATION_MAX_CONCURRENCY = 8
 
 _ANALYSIS_STOP_WORDS = {
     "about",
@@ -115,7 +126,7 @@ def validate_audience(payload: dict, legacy_root: Path) -> dict:
     try:
         return schemas.AudienceFilter(**payload).model_dump()
     except ValidationError as exc:
-        raise ValidationApiError("Audience validation failed.", {"errors": exc.errors()}) from exc
+        raise ValidationApiError("Audience validation failed.", {"errors": serializable_validation_errors(exc)}) from exc
 
 
 def validate_product(payload: dict, legacy_root: Path) -> dict:
@@ -123,7 +134,7 @@ def validate_product(payload: dict, legacy_root: Path) -> dict:
     try:
         return schemas.BusinessProductContext(**payload).model_dump()
     except ValidationError as exc:
-        raise ValidationApiError("Product validation failed.", {"errors": exc.errors()}) from exc
+        raise ValidationApiError("Product validation failed.", {"errors": serializable_validation_errors(exc)}) from exc
 
 
 def validate_market(payload: dict, legacy_root: Path) -> dict:
@@ -134,7 +145,7 @@ def validate_market(payload: dict, legacy_root: Path) -> dict:
         normalized["direct_competitors"] = competitors
         return schemas.MarketContext(**normalized).model_dump()
     except ValidationError as exc:
-        raise ValidationApiError("Market validation failed.", {"errors": exc.errors()}) from exc
+        raise ValidationApiError("Market validation failed.", {"errors": serializable_validation_errors(exc)}) from exc
 
 
 def validate_experiment(payload: dict, legacy_root: Path) -> dict:
@@ -142,7 +153,7 @@ def validate_experiment(payload: dict, legacy_root: Path) -> dict:
     try:
         return schemas.ExperimentPlan(**payload).model_dump()
     except ValidationError as exc:
-        raise ValidationApiError("Experiment validation failed.", {"errors": exc.errors()}) from exc
+        raise ValidationApiError("Experiment validation failed.", {"errors": serializable_validation_errors(exc)}) from exc
 
 
 def list_model_catalog(*, settings: AppSettings) -> dict:
@@ -155,8 +166,8 @@ def list_model_catalog(*, settings: AppSettings) -> dict:
             "completion_price_per_million": None,
         },
         {
-            "id": "google/gemini-2.0-flash-001",
-            "name": "google/gemini-2.0-flash-001",
+            "id": "anthropic/claude-sonnet-4.5",
+            "name": "anthropic/claude-sonnet-4.5",
             "prompt_price_per_million": None,
             "completion_price_per_million": None,
         },
@@ -379,6 +390,14 @@ def _build_prompt_payload_with_override(
     }
 
 
+# Provider statuses that will not resolve by trying again: the account cannot pay for the request, or
+# the requested model does not exist. Retrying or filling the gap with deterministic answers would
+# produce a complete-looking dataset that is entirely fabricated, so the run stops instead.
+# Verified against OpenRouter: 402 "requires more credits", 404 "No endpoints found for <model>",
+# 400 "<model> is not a valid model ID". Transient statuses (408, 429, 5xx) keep their fallback.
+_NON_RETRYABLE_PROVIDER_STATUSES = frozenset({400, 402, 404})
+
+
 def _extract_provider_error_detail(result: Dict[str, Any]) -> str:
     raw_text = str(result.get("raw_text") or "").strip()
     if raw_text:
@@ -399,6 +418,31 @@ def _extract_provider_error_detail(result: Dict[str, Any]) -> str:
     return str(result.get("error") or "Unknown provider error").strip()
 
 
+def _terminal_provider_error(result: Dict[str, Any], model_name: str) -> Optional[ApiError]:
+    """Return the error to raise if this provider result cannot be recovered by falling back.
+
+    Bad credentials and non-retryable statuses fail identically for every remaining respondent, so
+    filling their answers in would produce a complete-looking dataset that is entirely invented.
+    Returns ``None`` for transient failures (408, 429, 5xx), which keep the fallback path.
+
+    Kept separate from the record-assembly loop so the check can run as each response lands rather
+    than after the whole batch has been paid for.
+    """
+    if bool(result.get("ok")):
+        return None
+    status_code = result.get("status_code")
+    if status_code in {401, 403}:
+        return LegacyModuleApiError(
+            f"OpenRouter authentication failed: {_extract_provider_error_detail(result)}"
+        )
+    if status_code in _NON_RETRYABLE_PROVIDER_STATUSES:
+        return ProviderUnavailableApiError(
+            f"OpenRouter could not run model {model_name} (HTTP {status_code}): "
+            f"{_extract_provider_error_detail(result)}"
+        )
+    return None
+
+
 def _generate_live_response_records_with_debug(
     *,
     schemas: Any,
@@ -413,7 +457,8 @@ def _generate_live_response_records_with_debug(
     market_context: Any,
     prompt_user_template_override: Optional[str],
     openrouter_timeout_sec: int = 45,
-) -> tuple[List[Any], Dict[str, Any]]:
+    max_concurrency: int = DEFAULT_SIMULATION_MAX_CONCURRENCY,
+) -> tuple[List[Any], Dict[str, Any], List[bool]]:
     extract_answer_map = getattr(run_manager, "_extract_answer_map_from_openrouter_result")
     coerce_answer = getattr(run_manager, "_coerce_openrouter_answer_value")
     generate_mock_answer = getattr(run_manager, "_generate_mock_answer")
@@ -444,31 +489,74 @@ def _generate_live_response_records_with_debug(
     fallback_count = 0
     parsed_count = 0
     records: List[Any] = []
+    record_is_fallback: List[bool] = []
 
-    for respondent_id, model_name, respondent_index, rerun in respondent_model_pairs:
-        persona = persona_profiles[(respondent_index - 1) % len(persona_profiles)]
-        segment_label = persona.segment_label or "General Segment"
-        prompt_payload = _build_prompt_payload_with_override(
+    # Each respondent is an independent provider round-trip, so the requests are
+    # issued concurrently. Only the network calls are parallel: prompts are built
+    # up front and results are folded back in the original respondent order, so a
+    # run stays byte-for-byte deterministic regardless of completion order.
+    prompt_payloads = [
+        _build_prompt_payload_with_override(
             prompt_builder=prompt_builder,
             prompt_user_template_override=prompt_user_template_override,
-            persona=persona,
+            persona=persona_profiles[(respondent_index - 1) % len(persona_profiles)],
             survey_schema=survey_schema,
             business_product_context=business_product_context,
             market_context=market_context,
             audience_filter=audience_filter,
         )
-        result = llm_client.generate_survey_response_with_openrouter(
+        for _respondent_id, _model_name, respondent_index, _rerun in respondent_model_pairs
+    ]
+
+    def _dispatch(index: int) -> dict:
+        _respondent_id, model_name, _respondent_index, _rerun = respondent_model_pairs[index]
+        return llm_client.generate_survey_response_with_openrouter(
             model_name=model_name,
-            prompt_payload=prompt_payload,
+            prompt_payload=prompt_payloads[index],
             timeout=openrouter_timeout_sec,
         )
+
+    # A failure that will repeat for every respondent -- bad credentials, no credit, a model the
+    # provider does not serve -- is checked as each response lands rather than after the whole batch,
+    # so a misconfigured study costs a handful of requests instead of sample_size x models.
+    worker_count = max(1, min(int(max_concurrency), len(respondent_model_pairs) or 1))
+    results: List[Optional[dict]] = [None] * len(respondent_model_pairs)
+
+    if worker_count == 1 or len(respondent_model_pairs) <= 1:
+        for index in range(len(respondent_model_pairs)):
+            results[index] = _dispatch(index)
+            terminal = _terminal_provider_error(results[index], respondent_model_pairs[index][1])
+            if terminal is not None:
+                raise terminal
+    else:
+        executor = ThreadPoolExecutor(max_workers=worker_count)
+        try:
+            pending = {
+                executor.submit(_dispatch, index): index
+                for index in range(len(respondent_model_pairs))
+            }
+            for future in as_completed(pending):
+                index = pending[future]
+                results[index] = future.result()
+                terminal = _terminal_provider_error(results[index], respondent_model_pairs[index][1])
+                if terminal is not None:
+                    raise terminal
+        finally:
+            # Requests that have not started yet are dropped; the handful already in flight are left
+            # to finish on their own rather than blocking the error from reaching the caller. Their
+            # results are discarded.
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    for index, (respondent_id, model_name, respondent_index, rerun) in enumerate(respondent_model_pairs):
+        persona = persona_profiles[(respondent_index - 1) % len(persona_profiles)]
+        segment_label = persona.segment_label or "General Segment"
+        result = results[index]
         if not bool(result.get("ok")):
+            # Anything terminal already stopped the run at dispatch, so every failure reaching this
+            # point is transient and is counted, reported, and filled from the fallback generator.
             request_errors += 1
             status_code = result.get("status_code")
             error_text = str(result.get("error") or "").lower()
-            if status_code in {401, 403}:
-                detail = _extract_provider_error_detail(result)
-                raise LegacyModuleApiError(f"OpenRouter authentication failed: {detail}")
             if status_code and int(status_code) >= 400:
                 provider_error_count += 1
             if "json" in error_text:
@@ -478,6 +566,7 @@ def _generate_live_response_records_with_debug(
         for question_index, question in enumerate(survey_schema.questions, start=1):
             answer_value = parsed_answers.get(question.id)
             validated_answer = coerce_answer(question, answer_value)
+            validated_answer_was_replaced = validated_answer is None
             if validated_answer is None:
                 fallback_count += 1
                 validated_answer = generate_mock_answer(
@@ -507,11 +596,16 @@ def _generate_live_response_records_with_debug(
                     run_id=config.run_id,
                 )
             )
+            # Parallel to `records`: whether this answer was synthesized rather than returned by the
+            # model. Tracked here rather than on MockResponseRecord because that schema lives in the
+            # legacy tree, which exists in two copies that can drift (see QA baseline §4).
+            record_is_fallback.append(validated_answer_was_replaced)
 
     generation_debug = {
         "generation_mode": "openrouter_live",
         "model": config.selected_models[0] if len(config.selected_models) == 1 else None,
-        "respondents": int(len(respondent_model_pairs)),
+        "executions": int(len(respondent_model_pairs)),
+        "answer_records": int(len(records)),
         "questions_total": int(len(records)),
         "request_errors": int(request_errors),
         "provider_error_count": int(provider_error_count),
@@ -519,7 +613,59 @@ def _generate_live_response_records_with_debug(
         "questions_fallback_to_mock": int(fallback_count),
         "questions_parsed_from_live": int(parsed_count),
     }
-    return records, generation_debug
+    return records, generation_debug, record_is_fallback
+
+
+def _docx_fallback_schema(parser: Any, validator: Any, file_bytes: bytes) -> dict:
+    """Re-read a .docx with the layout-aware parser that understands its option formatting."""
+    try:
+        extracted_text = parser._extract_text_from_docx(file_bytes)
+        return parse_aytm_style_docx_to_validated_schema(text=extracted_text, validator_module=validator)
+    except ValueError as fallback_exc:
+        raise ValidationApiError(str(fallback_exc)) from fallback_exc
+    except Exception as fallback_exc:
+        raise LegacyModuleApiError(f"DOCX fallback parsing failed: {fallback_exc}") from fallback_exc
+
+
+NOT_A_SURVEY_MESSAGE = (
+    "This document does not appear to contain a recognizable survey. No questions with answer "
+    "options or scales were found. Upload the survey instrument itself — a Google Forms PDF export, "
+    "or the .md or .docx original — rather than a report, brief, or brochure about it."
+)
+
+
+def _looks_like_a_survey(validated: Any) -> bool:
+    """Whether a parsed document has any structural evidence of being a survey instrument.
+
+    Prose extraction is willing: a marketing brochure, a design brief, a slide deck and a 60-page
+    results report each parsed into "questions" built out of sentences, and each was accepted. What
+    separates a real instrument is that at least one question offers something to answer — options, or
+    a scale.
+
+    The cost of this rule is a genuine all-open-text survey delivered as a PDF, which is refused. That
+    is the intended trade: a refusal is visible and correctable, while an invented survey is neither.
+    """
+    questions = list(getattr(validated, "questions", []) or [])
+    if not questions:
+        return False
+    return any(
+        getattr(question, "options", None)
+        or str(getattr(question, "question_type", "")) != "open_text"
+        for question in questions
+    )
+
+
+def _has_no_scorable_questions(validated: Any) -> bool:
+    """Whether every question came out as open text.
+
+    A survey of nothing but open text produces no distributions, no means and no charts, and cannot rise
+    above "Low confidence" in the trust assessment. For a .docx it almost always means the options were
+    there and were not recognised rather than that the researcher wrote no closed questions.
+    """
+    questions = list(getattr(validated, "questions", []) or [])
+    return bool(questions) and all(
+        str(getattr(question, "question_type", "")) == "open_text" for question in questions
+    )
 
 
 def parse_normalize_validate_survey(file_name: str, file_bytes: bytes, legacy_root: Path) -> dict:
@@ -530,23 +676,260 @@ def parse_normalize_validate_survey(file_name: str, file_bytes: bytes, legacy_ro
     try:
         raw = parser.parse_uploaded_survey(file_name=file_name, file_bytes=file_bytes)
         normalized = normalizer.normalize_survey_payload(raw)
+        # Checked before validation. A brief or a report also trips the duplicate-id check, because
+        # prose repeats words like "AI" and "ID" -- and being told a document has duplicate question
+        # ids, when it has no questions at all, sends the reader looking for the wrong problem.
+        if extension == "pdf" and not _looks_like_a_survey(normalized):
+            raise ValidationApiError(NOT_A_SURVEY_MESSAGE)
         validated = validator.validate_survey_schema(normalized)
+        # The .docx fallback used to be reached only when the primary parser happened to raise on
+        # duplicate ids -- an accident that correlated with it having done badly, not a check that it
+        # had. It is now chosen on the result: the primary parser reads .docx as flat paragraphs and
+        # loses the option formatting, so an all-open-text outcome means the wrong reader was used.
+        if extension == "docx" and _has_no_scorable_questions(validated):
+            return _docx_fallback_schema(parser, validator, file_bytes)
         return validated.model_dump()
+    except ApiError:
+        # Already classified above -- re-wrapping it as a 500 would hide an actionable message.
+        raise
     except ValueError as exc:
-        if extension == "docx" and "Duplicate question ids found" in str(exc):
-            try:
-                extracted_text = parser._extract_text_from_docx(file_bytes)
-                return parse_aytm_style_docx_to_validated_schema(
-                    text=extracted_text,
-                    validator_module=validator,
-                )
-            except ValueError as fallback_exc:
-                raise ValidationApiError(str(fallback_exc)) from fallback_exc
-            except Exception as fallback_exc:
-                raise LegacyModuleApiError(f"DOCX fallback parsing failed: {fallback_exc}") from fallback_exc
+        if extension == "docx":
+            return _docx_fallback_schema(parser, validator, file_bytes)
         raise ValidationApiError(str(exc)) from exc
     except Exception as exc:
         raise LegacyModuleApiError(f"Survey parsing failed: {exc}") from exc
+
+
+SURVEY_GENERATION_MIN_QUESTIONS = 3
+SURVEY_GENERATION_MAX_QUESTIONS = 60
+SURVEY_GENERATION_MODEL = "anthropic/claude-sonnet-4.5"
+
+_SURVEY_GENERATION_SYSTEM_PROMPT = """You are a senior quantitative market researcher. \
+You design survey instruments that will be answered by synthetic respondents in a \
+simulation, so every question must be machine-scorable.
+
+Return STRICT JSON only, with no markdown fences and no commentary, in this shape:
+{
+  "survey_title": "string",
+  "description": "string",
+  "summary": "2-3 sentences explaining the survey's structure and what it measures",
+  "questions": [
+    {
+      "id": "Q1",
+      "text": "full question wording shown to the respondent",
+      "question_type": "single_choice" | "multi_choice" | "likert" | "numeric" | "open_text",
+      "options": ["only for single_choice and multi_choice"],
+      "min_value": 1,
+      "max_value": 5,
+      "required": true,
+      "help_text": null
+    }
+  ]
+}
+
+Rules:
+- Produce EXACTLY the requested number of questions.
+- Every question id must be unique, short, and uppercase (Q1, Q2, S1, ...).
+- likert questions MUST set min_value 1 and max_value 5 and MUST leave options empty.
+- single_choice and multi_choice MUST provide 2-7 mutually exclusive, concretely worded options.
+- numeric and open_text MUST leave options empty.
+- Favour likert and single_choice; use open_text sparingly (at most 2) because it is
+  the hardest to analyse quantitatively.
+- Ground every question in the supplied product, market, and audience context. Reference
+  real attributes, prices, and competitors from that context rather than generic wording.
+- Include screening, category baseline, post-exposure evaluation, barriers, and
+  positioning coverage when the question count allows.
+- Never invent facts that contradict the supplied context."""
+
+
+def _survey_generation_context(
+    *,
+    product: Optional[Dict[str, Any]],
+    market: Optional[Dict[str, Any]],
+    audience: Optional[Dict[str, Any]],
+) -> str:
+    """Render saved study context into the prompt body."""
+
+    def block(label: str, payload: Optional[Dict[str, Any]]) -> str:
+        if not payload:
+            return f"{label}: (not provided)"
+        cleaned = {
+            key: value
+            for key, value in payload.items()
+            if value not in (None, "", [], {}) and not key.endswith("_at")
+        }
+        return f"{label}:\n{json.dumps(cleaned, indent=2, ensure_ascii=False)}"
+
+    return "\n\n".join(
+        [
+            block("PRODUCT CONTEXT", product),
+            block("MARKET CONTEXT", market),
+            block("AUDIENCE CONTEXT", audience),
+        ]
+    )
+
+
+def generate_survey_schema(
+    *,
+    settings: AppSettings,
+    product: Optional[Dict[str, Any]],
+    market: Optional[Dict[str, Any]],
+    audience: Optional[Dict[str, Any]],
+    question_count: int,
+    instructions: Optional[str] = None,
+    previous_schema: Optional[Dict[str, Any]] = None,
+    conversation: Optional[List[Dict[str, str]]] = None,
+) -> Dict[str, Any]:
+    """Draft a survey schema from saved study context using the configured LLM.
+
+    Returns a validated schema plus the model's summary. Nothing is persisted;
+    the caller decides whether to save the draft.
+    """
+    if not settings.openrouter_api_key:
+        raise ProviderUnavailableApiError(
+            "OPENROUTER_API_KEY is required to generate a survey."
+        )
+
+    if question_count < SURVEY_GENERATION_MIN_QUESTIONS or question_count > SURVEY_GENERATION_MAX_QUESTIONS:
+        raise ValidationApiError(
+            f"question_count must be between {SURVEY_GENERATION_MIN_QUESTIONS} "
+            f"and {SURVEY_GENERATION_MAX_QUESTIONS}."
+        )
+
+    sections = [
+        _survey_generation_context(product=product, market=market, audience=audience),
+        f"Produce exactly {question_count} questions.",
+    ]
+
+    if previous_schema and previous_schema.get("questions"):
+        sections.append(
+            "You previously drafted this survey:\n"
+            + json.dumps(
+                {
+                    "survey_title": previous_schema.get("survey_title"),
+                    "questions": previous_schema.get("questions"),
+                },
+                indent=2,
+                ensure_ascii=False,
+            )[:12000]
+            + "\n\nRevise it according to the latest instruction. Keep everything the "
+            "instruction does not ask you to change."
+        )
+
+    for turn in conversation or []:
+        role = str(turn.get("role") or "").strip()
+        content = str(turn.get("content") or "").strip()
+        if role and content:
+            sections.append(f"{role.upper()} SAID: {content}")
+
+    if instructions:
+        sections.append(f"LATEST INSTRUCTION FROM THE RESEARCHER:\n{instructions.strip()}")
+
+    endpoint = f"{settings.openrouter_base_url.rstrip('/')}/chat/completions"
+    try:
+        response = requests.post(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {settings.openrouter_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": SURVEY_GENERATION_MODEL,
+                "messages": [
+                    {"role": "system", "content": _SURVEY_GENERATION_SYSTEM_PROMPT},
+                    {"role": "user", "content": "\n\n".join(sections)},
+                ],
+                "temperature": 0.4,
+                "max_tokens": 8000,
+            },
+            timeout=180,
+        )
+    except requests.RequestException as exc:
+        raise ProviderUnavailableApiError(f"Survey generation request failed: {exc}") from exc
+
+    if response.status_code >= 400:
+        detail = _extract_provider_error_detail({"raw_text": response.text})
+        raise ProviderUnavailableApiError(
+            f"Survey generation provider returned HTTP {response.status_code}: {detail}"
+        )
+
+    try:
+        raw_content = response.json()["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise ProviderUnavailableApiError("Survey generation returned an unreadable response.") from exc
+
+    parsed = _parse_survey_generation_json(raw_content)
+    summary = str(parsed.get("summary") or "").strip()
+
+    validator = load_module("backend.survey.validator", settings.legacy_app_root)
+    normalizer = load_module("backend.survey.schema_normalizer", settings.legacy_app_root)
+    payload = {
+        "survey_title": parsed.get("survey_title") or "Generated survey",
+        "description": parsed.get("description"),
+        "source_format": "ai_generated",
+        "questions": parsed.get("questions") or [],
+    }
+    try:
+        normalized = normalizer.normalize_survey_payload(payload)
+        validated = validator.validate_survey_schema(normalized)
+    except ValueError as exc:
+        raise ValidationApiError(f"Generated survey failed validation: {exc}") from exc
+    except Exception as exc:
+        raise LegacyModuleApiError(f"Generated survey could not be normalized: {exc}") from exc
+
+    schema = validated.model_dump()
+    warnings: List[str] = []
+    actual = len(schema.get("questions") or [])
+    if actual != question_count:
+        warnings.append(
+            f"Requested {question_count} questions but the model returned {actual}."
+        )
+
+    return {"survey_schema": schema, "summary": summary, "warnings": warnings}
+
+
+def _parse_survey_generation_json(raw_content: Any) -> Dict[str, Any]:
+    """Parse the model's survey JSON, tolerating markdown fences and stray prose."""
+    text = str(raw_content or "").strip()
+    if not text:
+        raise ProviderUnavailableApiError("Survey generation returned an empty response.")
+
+    fenced = re.search(r"```(?:json)?\s*(.+?)\s*```", text, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        text = fenced.group(1).strip()
+
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end <= start:
+            raise ProviderUnavailableApiError(
+                "Survey generation did not return valid JSON."
+            ) from None
+        try:
+            parsed = json.loads(text[start : end + 1])
+        except ValueError as exc:
+            raise ProviderUnavailableApiError(
+                "Survey generation did not return valid JSON."
+            ) from exc
+
+    if not isinstance(parsed, dict):
+        raise ProviderUnavailableApiError("Survey generation returned an unexpected JSON shape.")
+    return parsed
+
+
+def load_bundled_survey_schema(legacy_root: Path, filename: str) -> tuple[str, bytes, dict]:
+    """Load and validate a survey markdown file bundled under `Provided Info/`.
+
+    Used by demo presets that ship their own survey rather than going through the
+    Neo-specific loader in `backend.presets`.
+    """
+    survey_path = legacy_root / "Provided Info" / filename
+    if not survey_path.is_file():
+        raise ValidationApiError(f"Bundled survey preset not found: {filename}")
+    file_bytes = survey_path.read_bytes()
+    schema = parse_normalize_validate_survey(survey_path.name, file_bytes, legacy_root)
+    return survey_path.name, file_bytes, schema
 
 
 def load_neo_survey_schema_default(legacy_root: Path) -> tuple[str, bytes, dict]:
@@ -708,7 +1091,7 @@ def execute_simulation_run(
                 "OPENROUTER_BASE_URL": settings.openrouter_base_url,
             }
         ):
-            records, generation_debug = _generate_live_response_records_with_debug(
+            records, generation_debug, record_is_fallback = _generate_live_response_records_with_debug(
                 schemas=schemas,
                 run_manager=run_manager,
                 llm_client=llm_client,
@@ -720,6 +1103,7 @@ def execute_simulation_run(
                 business_product_context=business_product_context,
                 market_context=market_context,
                 prompt_user_template_override=prompt_user_template_override,
+                max_concurrency=settings.simulation_max_concurrency,
             )
             result = _run_simulation_compat(
                 run_manager,
@@ -728,7 +1112,9 @@ def execute_simulation_run(
                 provider_model_name=provider_model_name,
                 records=records,
             )
-    except LegacyModuleApiError:
+    except ApiError:
+        # Already-classified failures (provider unavailable, validation, auth) carry their own status
+        # and message; re-wrapping them as a 500 would hide an actionable cause behind a crash.
         raise
     except Exception as exc:
         raise LegacyModuleApiError(f"Simulation execution failed: {exc}") from exc
@@ -769,11 +1155,29 @@ def execute_simulation_run(
         prior_notes=prior_notes,
     )
 
+    # Three different quantities were all being reported as "responses". They are named separately here
+    # so no reader has to infer which one a number refers to.
+    #
+    # The legacy entry point sets total_generated = config.sample_size, which ignores models, reruns and
+    # whether any provider call succeeded -- a 20-persona x 2-model mirror run reported 20 while running
+    # 40 surveys. The execution count is the one that answers "how many completed surveys came back",
+    # so it is what the two totals now carry.
+    execution_count = int(generation_debug.get("executions") or 0) or len(
+        {(record.respondent_id, record.model) for record in records}
+    )
+    run_counts = {
+        "personas": len(personas),
+        "executions": execution_count,
+        "questions": int(result.question_count or 0),
+        "answer_records": len(records),
+    }
+
     return {
         "run_id": result.run_id,
         "status": result.status,
-        "total_requested_responses": result.total_requested_responses,
-        "total_generated_responses": result.total_generated_responses,
+        "run_counts": run_counts,
+        "total_requested_responses": execution_count,
+        "total_generated_responses": execution_count,
         "models_used": list(result.models_used),
         "experiment_mode": result.experiment_mode,
         "survey_title": result.survey_title,
@@ -835,8 +1239,14 @@ def execute_simulation_run(
             "selected_models": list(result.models_used),
         },
         "personas": [persona.model_dump() for persona in personas],
-        "response_records": [record.model_dump() for record in records],
-        "response_record_preview": [record.model_dump() for record in records[:24]],
+        "response_records": [
+            {**record.model_dump(), "is_fallback": bool(flag)}
+            for record, flag in zip(records, record_is_fallback)
+        ],
+        "response_record_preview": [
+            {**record.model_dump(), "is_fallback": bool(flag)}
+            for record, flag in list(zip(records, record_is_fallback))[:24]
+        ],
         "survey_parse_warnings": list(survey_payload.get("parse_warnings", [])),
     }
 
@@ -929,7 +1339,7 @@ def execute_stability_check(
                     "OPENROUTER_BASE_URL": settings.openrouter_base_url,
                 }
             ):
-                records, generation_debug = _generate_live_response_records_with_debug(
+                records, generation_debug, record_is_fallback = _generate_live_response_records_with_debug(
                     schemas=schemas,
                     run_manager=run_manager,
                     llm_client=llm_client,
@@ -941,6 +1351,7 @@ def execute_stability_check(
                     business_product_context=business_product_context,
                     market_context=market_context,
                     prompt_user_template_override=None,
+                    max_concurrency=settings.simulation_max_concurrency,
                 )
             run_summaries.append(
                 stability.summarize_run_outputs(records=records, personas=personas)
@@ -973,6 +1384,41 @@ def execute_stability_check(
     }
 
 
+def _split_live_and_fallback_records(
+    records: List[Dict[str, Any]]
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Separate answers a model returned from deterministic filler.
+
+    Fabricated answers are schema-valid and carry the real model name, so counting them would average
+    filler into every mean, percentage and ranking. They stay in the saved dataset — this only decides
+    what the analytical surfaces read.
+
+    Runs saved before provenance existed have no ``is_fallback`` key; those are treated as live, since
+    excluding them would erase historic results rather than correct them.
+    """
+    live: List[Dict[str, Any]] = []
+    fallback: List[Dict[str, Any]] = []
+    for record in records:
+        (fallback if record.get("is_fallback") is True else live).append(record)
+    return live, fallback
+
+
+def _answer_sourcing_summary(
+    live_records: List[Dict[str, Any]], fallback_records: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    total = len(live_records) + len(fallback_records)
+    return {
+        "live_answers_used": len(live_records),
+        "fallback_answers_excluded": len(fallback_records),
+        "total_answers": total,
+        "live_answer_rate": round(len(live_records) / total, 4) if total else None,
+        "note": (
+            "Charts, means and rankings use live model answers only. Fabricated answers remain in the "
+            "saved records, flagged, and are excluded from analysis."
+        ),
+    }
+
+
 def build_analysis_view(
     *,
     settings: AppSettings,
@@ -998,12 +1444,25 @@ def build_analysis_view(
             "transparency_note": transparency_note,
         }
 
-    records = list(latest_run_payload.get("response_records") or [])
+    all_records = list(latest_run_payload.get("response_records") or [])
     personas = list(latest_run_payload.get("personas") or [])
-    if not records:
+    if not all_records:
         return {
             "available": False,
             "message": "The latest run does not include response records yet.",
+            "transparency_note": transparency_note,
+        }
+
+    records, fallback_records = _split_live_and_fallback_records(all_records)
+    answer_sourcing = _answer_sourcing_summary(records, fallback_records)
+    if not records:
+        return {
+            "available": False,
+            "message": (
+                "Every answer in this run was deterministic filler rather than a model response, so "
+                "there is nothing to analyse. Check the run diagnostics before relying on it."
+            ),
+            "answer_sourcing": answer_sourcing,
             "transparency_note": transparency_note,
         }
 
@@ -1068,7 +1527,12 @@ def build_analysis_view(
         else pd.DataFrame(columns=["respondent_id", "model", "segment_label", "answer"])
     )
 
-    preview_df = filtered_df.iloc[records_offset : records_offset + records_limit].copy()
+    # The raw-record view intentionally pages over *all* saved rows, including fabricated ones, so a
+    # reader can inspect what was excluded rather than only being told a count.
+    all_filtered_df = _apply_record_filters(
+        df=pd.DataFrame(all_records), model=selected_model, segment_label=selected_segment
+    )
+    preview_df = all_filtered_df.iloc[records_offset : records_offset + records_limit].copy()
     benchmark_snapshot = _build_benchmark_snapshot(
         df=df,
         personas=personas,
@@ -1136,8 +1600,9 @@ def build_analysis_view(
             "selected_question_id": selected_open_text_question_id,
             "samples": _dataframe_to_records(open_text_samples_df),
         },
+        "answer_sourcing": answer_sourcing,
         "records_preview": {
-            "total": int(len(filtered_df)),
+            "total": int(len(all_filtered_df)),
             "offset": int(records_offset),
             "limit": int(records_limit),
             "rows": _dataframe_to_records(preview_df),
@@ -1167,12 +1632,27 @@ def build_insights_view(
             "transparency_note": transparency_note,
         }
 
-    records = list(latest_run_payload.get("response_records") or [])
+    all_records = list(latest_run_payload.get("response_records") or [])
+    records, fallback_records = _split_live_and_fallback_records(all_records)
+    answer_sourcing = _answer_sourcing_summary(records, fallback_records)
     personas = list(latest_run_payload.get("personas") or [])
-    if not records:
+    if not all_records:
         return {
             "available": False,
             "message": "The latest run does not include response records yet.",
+            "transparency_note": transparency_note,
+        }
+    if not records:
+        # The run stored a full set of records; every one of them is deterministic filler. Saying it
+        # holds nothing would name the wrong cause and send the reader off to wait for data that has
+        # already arrived. The sourcing summary travels with the refusal so the claim can be checked.
+        return {
+            "available": False,
+            "message": (
+                "Every answer in this run was deterministic filler rather than a model response, so "
+                "there is nothing to summarise. Check the run diagnostics before relying on it."
+            ),
+            "answer_sourcing": answer_sourcing,
             "transparency_note": transparency_note,
         }
 
@@ -1206,11 +1686,11 @@ def build_insights_view(
         realism_module=realism,
     )
 
-    barrier_ranking = _build_barrier_ranking(df)
-    message_performance = _build_message_performance(df)
-    use_case_share = _build_use_case_share(df)
-    interest_ladder = _build_interest_ladder(df)
-    segment_heatmap = _build_segment_heatmap(df, barrier_ranking, message_performance)
+    barrier_ranking = _build_barrier_ranking(df, study_mode)
+    message_performance = _build_message_performance(df, study_mode)
+    use_case_share = _build_use_case_share(df, study_mode)
+    interest_ladder = _build_interest_ladder(df, study_mode)
+    segment_heatmap = _build_segment_heatmap(df, barrier_ranking, message_performance, study_mode)
     model_difference_chart = _build_model_difference_chart(df)
 
     executive_summary = _build_executive_summary(
@@ -1219,6 +1699,7 @@ def build_insights_view(
         run_payload=latest_run_payload,
         use_case_share=use_case_share,
         model_notes=model_notes,
+        study_mode=study_mode,
     )
     trust_snapshot = _build_trust_snapshot(
         trust_map=trust_map,
@@ -1237,6 +1718,7 @@ def build_insights_view(
         df=df,
         segment_notes=segment_notes,
         segment_heatmap=segment_heatmap,
+        study_mode=study_mode,
     )
     context_notes = {
         "model_notes": model_notes,
@@ -1261,6 +1743,7 @@ def build_insights_view(
 
     return {
         "available": True,
+        "answer_sourcing": answer_sourcing,
         "transparency_note": transparency_note,
         "run": {
             "run_id": latest_run_payload.get("run_id"),
@@ -1594,6 +2077,8 @@ def _build_question_options(
                 "response_count": int(response_counts.get(question_id, 0)),
                 "question_order": index + 1,
                 "option_values": _extract_question_option_values(question),
+                "scale_min": question.get("min_value"),
+                "scale_max": question.get("max_value"),
             }
         )
 
@@ -1688,6 +2173,8 @@ def _build_analysis_dashboard_questions(
                 distribution_df,
                 chart_kind=chart_kind,
                 declared_options=list(option.get("option_values") or []),
+                scale_min=option.get("scale_min"),
+                scale_max=option.get("scale_max"),
             )
         elif chart_kind == "histogram":
             question_payload["histogram_bins"] = _compute_histogram_bins(question_df)
@@ -1724,11 +2211,39 @@ def _resolve_dashboard_chart_kind(question_df: pd.DataFrame, question_type: str)
     return "categorical_bar"
 
 
+def _likert_scale_position_labels(
+    declared_options: list[str],
+    scale_min: Optional[int],
+    scale_max: Optional[int],
+) -> dict[str, str]:
+    """Map a numeric answer onto the scale point it represents.
+
+    Models answer Likert questions with numbers while the question declares named scale points, so
+    "4" has to be resolved to the 4th declared option before counts can be matched. Only applied when
+    the declared options really are named and their count matches the declared range, so an
+    out-of-range or unexpected value is left alone and stays visible.
+    """
+    if scale_min is None or scale_max is None:
+        return {}
+    if scale_max < scale_min:
+        return {}
+    if len(declared_options) != (scale_max - scale_min + 1):
+        return {}
+    if all(str(option).strip().isdigit() for option in declared_options):
+        return {}
+    return {
+        str(value): str(declared_options[value - scale_min])
+        for value in range(scale_min, scale_max + 1)
+    }
+
+
 def _shape_distribution_rows(
     distribution_df: pd.DataFrame,
     *,
     chart_kind: str,
     declared_options: Optional[list[str]] = None,
+    scale_min: Optional[int] = None,
+    scale_max: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     if distribution_df.empty and not declared_options:
         return []
@@ -1737,10 +2252,16 @@ def _shape_distribution_rows(
     total = sum(int(row.get("count") or 0) for row in rows)
 
     if declared_options:
-        counts_by_label = {
-            str(row.get("answer_display") or "No answer"): int(row.get("count") or 0)
-            for row in rows
-        }
+        scale_labels = (
+            _likert_scale_position_labels(declared_options, scale_min, scale_max)
+            if chart_kind == "likert"
+            else {}
+        )
+        counts_by_label: dict[str, int] = {}
+        for row in rows:
+            raw_label = str(row.get("answer_display") or "No answer")
+            label = scale_labels.get(raw_label, raw_label)
+            counts_by_label[label] = counts_by_label.get(label, 0) + int(row.get("count") or 0)
         ordered_rows = []
         seen_labels: set[str] = set()
         for option in declared_options:
@@ -1759,12 +2280,21 @@ def _shape_distribution_rows(
 
         extras = [
             {
-                "label": str(row.get("answer_display") or "No answer"),
+                "label": scale_labels.get(
+                    str(row.get("answer_display") or "No answer"),
+                    str(row.get("answer_display") or "No answer"),
+                ),
                 "count": int(row.get("count") or 0),
                 "percentage": float(row.get("percentage") or 0),
             }
             for row in rows
-            if str(row.get("answer_display") or "No answer") not in seen_labels
+            # Compare the *mapped* label: a numeric answer resolved onto a declared scale point has
+            # already been counted above, so re-emitting it would duplicate the bar.
+            if scale_labels.get(
+                str(row.get("answer_display") or "No answer"),
+                str(row.get("answer_display") or "No answer"),
+            )
+            not in seen_labels
         ]
         if chart_kind == "likert":
             extras.sort(key=lambda row: _likert_sort_key(str(row.get("label") or "")))
@@ -2153,10 +2683,13 @@ def _build_realism_scorecard(
     records: list[dict],
     realism_module: Any,
 ) -> dict:
-    if study_mode != "neo_smart":
+    if not _is_neo_study(study_mode):
+        # The scorecard compares answers against benchmark targets recorded for the Neo survey, so it
+        # has nothing to say here. Naming the Neo mode would explain the absence in terms of a study
+        # the researcher is not running.
         return {
             "available": False,
-            "message": "Realism scorecard is shown only for Neo Smart mode.",
+            "message": GENERIC_INSIGHT_UNAVAILABLE_MESSAGE,
             "summary": None,
             "question_rows": [],
         }
@@ -2227,6 +2760,7 @@ def _build_executive_summary(
     run_payload: dict[str, Any],
     use_case_share: dict[str, Any],
     model_notes: list[str],
+    study_mode: Optional[str] = None,
 ) -> dict[str, Any]:
     top_use_case = "N/A"
     top_use_case_share = None
@@ -2235,8 +2769,12 @@ def _build_executive_summary(
         top_use_case = str(top_row.get("label") or "N/A")
         top_use_case_share = top_row.get("share")
 
-    average_interest = _first_question_numeric_mean(df, ["Q1", "Q0B", "Q2"])
-    strongest_segment = _compute_strongest_segment(df)
+    # Both of these average the Neo decision-ladder questions. Run against another survey they
+    # average whatever happens to carry those ids -- in the coffee preset, a dollar spend band --
+    # and report the result as an interest score.
+    neo_study = _is_neo_study(study_mode)
+    average_interest = _first_question_numeric_mean(df, ["Q1", "Q0B", "Q2"]) if neo_study else None
+    strongest_segment = _compute_strongest_segment(df) if neo_study else None
     differing_questions = sum(
         1 for note in model_notes if "differences observed" in str(note).lower()
     )
@@ -2446,9 +2984,11 @@ def _build_segment_story(
     df: pd.DataFrame,
     segment_notes: list[str],
     segment_heatmap: dict[str, Any],
+    study_mode: Optional[str] = None,
 ) -> dict[str, Any]:
-    strongest_segment = _compute_strongest_segment(df)
-    weakest_segment = _compute_weakest_segment(df)
+    neo_study = _is_neo_study(study_mode)
+    strongest_segment = _compute_strongest_segment(df) if neo_study else None
+    weakest_segment = _compute_weakest_segment(df) if neo_study else None
     return {
         "strongest_segment": strongest_segment,
         "weakest_segment": weakest_segment,
@@ -2457,13 +2997,45 @@ def _build_segment_story(
     }
 
 
-def _build_barrier_ranking(df: pd.DataFrame) -> dict[str, Any]:
+GENERIC_INSIGHT_UNAVAILABLE_MESSAGE = "This insight is not applicable to this survey."
+
+NEO_STUDY_MODE = "neo_smart"
+
+
+def _is_neo_study(study_mode: Optional[str]) -> bool:
+    """Whether this study is the one survey whose question ids carry known research meaning.
+
+    The metrics below read literal ids — Q1, Q2, Q3, Q0B, S3, Q5_*, Q9A/Q9B..Q13A/Q13B — and attach
+    Neo's meaning to whatever answers them. Those ids are not rare: `schema_normalizer` assigns
+    `Q{index}` to any question that declares no id, so an ordinary uploaded survey lands on them by
+    default. Reading an id is therefore not evidence that the question means what Neo's does, and the
+    study mode is the only thing that is.
+    """
+    return str(study_mode or "") == NEO_STUDY_MODE
+
+
+def _neo_metric_unavailable() -> dict[str, Any]:
+    """The stand-in for a Neo metric in a study whose schema it knows nothing about.
+
+    Deliberately empty rather than approximated: there is no honest substitute for "how does this
+    audience rank the Neo barrier matrix" in a survey that never asked it.
+    """
+    return {"available": False, "message": GENERIC_INSIGHT_UNAVAILABLE_MESSAGE, "rows": []}
+
+
+def _build_barrier_ranking(df: pd.DataFrame, study_mode: Optional[str] = None) -> dict[str, Any]:
+    if not _is_neo_study(study_mode):
+        return _neo_metric_unavailable()
     if df.empty or "question_id" not in df.columns:
         return {"available": False, "message": "No records available.", "rows": []}
 
     barrier_df = df[df["question_id"].astype(str).str.startswith("Q5_")].copy()
     if barrier_df.empty:
-        return {"available": False, "message": "Barrier matrix items were not found in this run.", "rows": []}
+        return {
+            "available": False,
+            "message": "Barrier matrix items were not found in this run.",
+            "rows": [],
+        }
 
     rows: list[dict[str, Any]] = []
     for question_id, qdf in barrier_df.groupby("question_id"):
@@ -2484,7 +3056,9 @@ def _build_barrier_ranking(df: pd.DataFrame) -> dict[str, Any]:
     return {"available": True, "rows": rows}
 
 
-def _build_message_performance(df: pd.DataFrame) -> dict[str, Any]:
+def _build_message_performance(df: pd.DataFrame, study_mode: Optional[str] = None) -> dict[str, Any]:
+    if not _is_neo_study(study_mode):
+        return _neo_metric_unavailable()
     if df.empty:
         return {"available": False, "message": "No records available.", "rows": []}
 
@@ -2514,10 +3088,16 @@ def _build_message_performance(df: pd.DataFrame) -> dict[str, Any]:
     return {"available": True, "rows": rows}
 
 
-def _build_use_case_share(df: pd.DataFrame) -> dict[str, Any]:
+def _build_use_case_share(df: pd.DataFrame, study_mode: Optional[str] = None) -> dict[str, Any]:
+    if not _is_neo_study(study_mode):
+        return _neo_metric_unavailable()
     distribution = _compute_question_answer_distribution(df, "Q3")
     if getattr(distribution, "empty", True):
-        return {"available": False, "message": "Primary use question Q3 was not found.", "rows": []}
+        return {
+            "available": False,
+            "message": "Primary use question Q3 was not found.",
+            "rows": [],
+        }
 
     rows = [
         {
@@ -2530,7 +3110,9 @@ def _build_use_case_share(df: pd.DataFrame) -> dict[str, Any]:
     return {"available": True, "rows": rows}
 
 
-def _build_interest_ladder(df: pd.DataFrame) -> dict[str, Any]:
+def _build_interest_ladder(df: pd.DataFrame, study_mode: Optional[str] = None) -> dict[str, Any]:
+    if not _is_neo_study(study_mode):
+        return _neo_metric_unavailable()
     if df.empty:
         return {"available": False, "message": "No records available.", "rows": []}
 
@@ -2557,7 +3139,11 @@ def _build_interest_ladder(df: pd.DataFrame) -> dict[str, Any]:
         )
 
     if not rows:
-        return {"available": False, "message": "Core decision-ladder questions were not found.", "rows": []}
+        return {
+            "available": False,
+            "message": "Core decision-ladder questions were not found.",
+            "rows": [],
+        }
     return {"available": True, "rows": rows}
 
 
@@ -2565,7 +3151,13 @@ def _build_segment_heatmap(
     df: pd.DataFrame,
     barrier_ranking: dict[str, Any],
     message_performance: dict[str, Any],
+    study_mode: Optional[str] = None,
 ) -> dict[str, Any]:
+    # Every row this can offer comes from a Neo id: Q1/Q2/Q3 directly, or a barrier or concept pair
+    # discovered by the two Neo charts above.
+    if not _is_neo_study(study_mode):
+        return {**_neo_metric_unavailable(), "segments": []}
+
     segments = _list_segments(df)
     if not segments:
         return {"available": False, "message": "No segment labels were found in this run.", "segments": [], "rows": []}
@@ -2730,18 +3322,26 @@ def _question_positive_share(qdf: pd.DataFrame) -> Optional[float]:
     return float(positives.mean() * 100)
 
 
-def _compute_strongest_segment(df: pd.DataFrame) -> str:
+def _compute_strongest_segment(df: pd.DataFrame) -> Optional[str]:
+    """Highest-scoring segment, or None when the run cannot support the comparison.
+
+    `_segment_score_table` only scores segments that have numeric answers for Q0B/Q1/Q2, so a survey
+    using different question ids scores nothing. Ranking needs at least two scored segments: with
+    none there is nothing to rank, and with one `max` and `min` return the same label, which
+    previously surfaced the same segment as both strongest and weakest. Returning None keeps the
+    metric out of the evidence package handed to the summarising model.
+    """
     segment_scores = _segment_score_table(df)
-    if not segment_scores:
-        segments = _list_segments(df)
-        return segments[0] if segments else "N/A"
+    if len(segment_scores) < 2:
+        return None
     return max(segment_scores.items(), key=lambda item: item[1])[0]
 
 
-def _compute_weakest_segment(df: pd.DataFrame) -> str:
+def _compute_weakest_segment(df: pd.DataFrame) -> Optional[str]:
+    """Lowest-scoring segment, or None when fewer than two segments could be scored."""
     segment_scores = _segment_score_table(df)
-    if not segment_scores:
-        return "N/A"
+    if len(segment_scores) < 2:
+        return None
     return min(segment_scores.items(), key=lambda item: item[1])[0]
 
 
@@ -2803,15 +3403,22 @@ def _build_realism_detail(realism_scorecard: dict[str, Any]) -> Optional[str]:
 
 
 def product_url_autofill(*, settings: AppSettings, url: str) -> dict:
-    if not settings.openrouter_api_key:
-        raise ProviderUnavailableApiError("OPENROUTER_API_KEY is required for product URL autofill.")
-
     scraper = load_module("backend.scraper", settings.legacy_app_root)
-    vision = load_module("backend.vision", settings.legacy_app_root)
     schemas = load_module("backend.schemas", settings.legacy_app_root)
 
     try:
         page_text = scraper.scrape_product_page(url)
+        if not settings.openrouter_api_key:
+            return {
+                "page_text": page_text,
+                "product_patch": _build_product_context_from_page_text(
+                    page_text=page_text,
+                    url=url,
+                    schemas=schemas,
+                ),
+            }
+
+        vision = load_module("backend.vision", settings.legacy_app_root)
         with temporary_env(
             {
                 "OPENROUTER_API_KEY": settings.openrouter_api_key,
@@ -2825,11 +3432,125 @@ def product_url_autofill(*, settings: AppSettings, url: str) -> dict:
             "product_patch": validated.model_dump(),
         }
     except ValidationError as exc:
-        raise LegacyModuleApiError("Legacy URL autofill returned invalid product context.", {"errors": exc.errors()}) from exc
+        raise LegacyModuleApiError("Legacy URL autofill returned invalid product context.", {"errors": serializable_validation_errors(exc)}) from exc
     except RuntimeError as exc:
         raise ProviderUnavailableApiError(str(exc)) from exc
     except Exception as exc:
         raise LegacyModuleApiError("Product URL autofill failed.") from exc
+
+
+def _build_product_context_from_page_text(*, page_text: str, url: str, schemas: Any) -> dict:
+    """Build a reviewable product draft without requiring an LLM provider."""
+    text = re.sub(r"\s+", " ", unescape(page_text)).strip()
+    product_name = _extract_product_name_from_page_text(text)
+    product_description = _extract_product_description_from_page_text(text)
+
+    if not product_name and not product_description:
+        raise LegacyModuleApiError(
+            "The product page did not expose enough public text to build a draft."
+        )
+
+    hostname = (urlsplit(url).hostname or "").removeprefix("www.")
+    brand = hostname.split(".", 1)[0].replace("-", " ").title() or None
+    product_type, industry = _infer_product_category(product_name or product_description or "")
+    price_match = re.search(
+        r"\$\d[\d,]*(?:\.\d{2})?(?:\s+\$\d[\d,]*(?:\.\d{2})?)?",
+        text,
+    )
+    price_range = price_match.group(0) if price_match else None
+
+    context = schemas.BusinessProductContext(
+        business_name=brand,
+        industry=industry,
+        product_name=product_name,
+        product_type=product_type,
+        product_description=product_description or product_name,
+        target_customer=_infer_target_customer(product_name or ""),
+        price_range=price_range,
+        primary_goal=(
+            f"Understand audience response to {product_name}."
+            if product_name
+            else "Understand audience response to this product."
+        ),
+        key_features=_extract_product_features(text),
+        notes="Drafted from public product-page text without AI enrichment. Review before applying.",
+    )
+    return context.model_dump()
+
+
+def _extract_product_name_from_page_text(text: str) -> Optional[str]:
+    domain_title = re.match(
+        r"^(.{2,140}?)\.\s+[A-Za-z0-9-]+\.(?:com|co|net|org|io)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if domain_title:
+        return domain_title.group(1).strip()
+
+    first_sentence = re.match(r"^(.{2,140}?)\.", text)
+    return first_sentence.group(1).strip() if first_sentence else None
+
+
+def _extract_product_description_from_page_text(text: str) -> Optional[str]:
+    description_match = re.search(
+        r"(?:Favorite|Wishlist).*?([A-Z][a-z][^.!?]{20,600}[.!?])\s*(?:Shown:|Product Details)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if description_match:
+        return description_match.group(1).strip()
+
+    details_match = re.search(
+        r"Product Details\s+(.{30,600}?)(?:Size\s*&\s*Fit|Shipping\s*&\s*Returns|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if details_match:
+        return details_match.group(1).strip()
+    return None
+
+
+def _extract_product_features(text: str) -> list[str]:
+    details_match = re.search(
+        r"Product Details\s+(.{0,1200}?)(?:Size\s*&\s*Fit|Shipping\s*&\s*Returns|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not details_match:
+        return []
+
+    candidates = re.split(r"(?<=[.!?])\s+", details_match.group(1))
+    ignored_prefixes = ("shown:", "style:", "size & fit", "shipping", "returns")
+    features = []
+    for candidate in candidates:
+        cleaned = candidate.strip(" .")
+        if len(cleaned) < 3 or cleaned.lower().startswith(ignored_prefixes):
+            continue
+        if cleaned not in features:
+            features.append(cleaned)
+        if len(features) == 6:
+            break
+    return features
+
+
+def _infer_product_category(value: str) -> tuple[str, str]:
+    normalized = value.lower()
+    if any(token in normalized for token in ("shoe", "sneaker", "boot", "sandal")):
+        return "Footwear", "Consumer footwear"
+    if any(token in normalized for token in ("fleece", "hoodie", "crew", "shirt", "jacket", "pants", "shorts")):
+        return "Apparel", "Consumer apparel"
+    return "Consumer product", "Consumer goods"
+
+
+def _infer_target_customer(product_name: str) -> Optional[str]:
+    normalized = product_name.lower()
+    if "men" in normalized:
+        return "Men"
+    if "women" in normalized:
+        return "Women"
+    if any(token in normalized for token in ("kid", "youth", "boys", "girls")):
+        return "Kids and families"
+    return None
 
 
 def product_image_analysis(*, settings: AppSettings, file_bytes: bytes) -> dict:
@@ -2840,14 +3561,29 @@ def product_image_analysis(*, settings: AppSettings, file_bytes: bytes) -> dict:
     if not settings.google_cloud_api_key and service_account is None:
         raise ProviderUnavailableApiError("Google Vision credentials are required for product image analysis.")
 
-    vision = load_module("backend.vision", settings.legacy_app_root)
-    try:
-        with temporary_env({"GOOGLE_CLOUD_API_KEY": settings.google_cloud_api_key}):
-            analysis = vision.extract_full_analysis(file_bytes, service_account_info=service_account)
-    except RuntimeError as exc:
-        raise ProviderUnavailableApiError(str(exc)) from exc
-    except Exception as exc:
-        raise LegacyModuleApiError("Product image analysis failed.") from exc
+    # Two very different things can produce this analysis: Google Vision's label and object detection,
+    # or a general-purpose language model looking at the image. They disagree in kind, not just in
+    # quality, and the result carried no record of which one ran -- so a researcher could not tell
+    # whether "labels" came from a detector or from a model's description.
+    analysis_source = "google_vision"
+    if service_account is None and settings.openrouter_api_key:
+        analysis = _openrouter_product_image_analysis(settings=settings, file_bytes=file_bytes)
+        analysis_source = "openrouter_model"
+    else:
+        vision = load_module("backend.vision", settings.legacy_app_root)
+        try:
+            with temporary_env({"GOOGLE_CLOUD_API_KEY": settings.google_cloud_api_key}):
+                analysis = vision.extract_full_analysis(file_bytes, service_account_info=service_account)
+        except RuntimeError as exc:
+            if not settings.openrouter_api_key:
+                raise ProviderUnavailableApiError(str(exc)) from exc
+            analysis = _openrouter_product_image_analysis(settings=settings, file_bytes=file_bytes)
+            analysis_source = "openrouter_model"
+        except Exception as exc:
+            if not settings.openrouter_api_key:
+                raise LegacyModuleApiError("Product image analysis failed.") from exc
+            analysis = _openrouter_product_image_analysis(settings=settings, file_bytes=file_bytes)
+            analysis_source = "openrouter_model"
 
     colors = []
     for color in analysis.get("colors", []):
@@ -2862,9 +3598,137 @@ def product_image_analysis(*, settings: AppSettings, file_bytes: bytes) -> dict:
 
     return {
         "analysis": analysis,
+        "analysis_source": analysis_source,
+        "analysis_source_label": (
+            "Google Cloud Vision label and object detection"
+            if analysis_source == "google_vision"
+            else "An OpenRouter language model reading the image"
+        ),
         "product_patch": {
             "product_image_labels": analysis.get("labels", []),
             "product_image_objects": analysis.get("objects", []),
             "product_image_colors": colors,
         },
+    }
+
+
+_IMAGE_MAGIC_BYTES = (
+    (b"\x89PNG\r\n\x1a\n", "image/png", "PNG"),
+    (b"\xff\xd8\xff", "image/jpeg", "JPEG"),
+)
+
+# Formats a browser or phone will happily hand over with a .jpg/.png filename
+# but which the vision providers reject.
+_UNSUPPORTED_IMAGE_SIGNATURES = (
+    ("HEIC/HEIF (iPhone photo)", lambda b: b[4:12] in {b"ftypheic", b"ftypheix", b"ftypmif1", b"ftypmsf1"}),
+    ("WEBP", lambda b: b[:4] == b"RIFF" and b[8:12] == b"WEBP"),
+    ("GIF", lambda b: b[:6] in {b"GIF87a", b"GIF89a"}),
+    ("TIFF", lambda b: b[:4] in {b"II*\x00", b"MM\x00*"}),
+    ("BMP", lambda b: b[:2] == b"BM"),
+    ("PDF", lambda b: b[:5] == b"%PDF-"),
+)
+
+
+def detect_product_image_mime(file_bytes: bytes) -> str:
+    """Return the real MIME type of `file_bytes`, or explain why it is unusable.
+
+    The upload endpoint only checks the filename extension, so the actual bytes
+    can be anything. Sending an unsupported format to the provider produced an
+    opaque "HTTP 400", so the format is resolved here and named in the error.
+    """
+    header = file_bytes[:32]
+    for magic, mime, _label in _IMAGE_MAGIC_BYTES:
+        if header.startswith(magic):
+            return mime
+
+    for label, matches in _UNSUPPORTED_IMAGE_SIGNATURES:
+        try:
+            if matches(header):
+                raise ValidationApiError(
+                    f"This file is {label}, not JPG or PNG. "
+                    "Re-save or export it as JPG or PNG and upload again."
+                )
+        except ValidationApiError:
+            raise
+        except Exception:
+            continue
+
+    raise ValidationApiError(
+        "This file does not look like a JPG or PNG image. "
+        "Please upload a valid jpg, jpeg, or png file."
+    )
+
+
+def _openrouter_product_image_analysis(*, settings: AppSettings, file_bytes: bytes) -> dict:
+    """Use the configured multimodal LLM when Google Vision is unavailable locally."""
+    endpoint = f"{settings.openrouter_base_url.rstrip('/')}/chat/completions"
+    mime_type = detect_product_image_mime(file_bytes)
+    image_data_url = f"data:{mime_type};base64," + base64.b64encode(file_bytes).decode("ascii")
+    prompt = (
+        "Analyze this product image for a market-research product brief. Return strict JSON only with this shape: "
+        '{"labels":["short label"],"objects":["short object"],'
+        '"colors":[{"hex":"#000000","percentage":0}],"text":"detected text"}. '
+        "Use up to 12 labels, up to 12 objects, and up to 6 dominant colors. "
+        "Use an empty string when no text is legible and estimate color percentages as whole numbers."
+    )
+    try:
+        response = requests.post(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {settings.openrouter_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "openai/gpt-4o-mini",
+                "messages": [
+                    {"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": image_data_url}},
+                    ]}
+                ],
+                "temperature": 0.1,
+                "max_tokens": 900,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=35,
+        )
+    except requests.RequestException as exc:
+        raise ProviderUnavailableApiError(f"Image analysis provider request failed: {exc}") from exc
+
+    if response.status_code >= 400:
+        detail = _extract_provider_error_detail({"raw_text": response.text})
+        raise ProviderUnavailableApiError(
+            f"Image analysis provider returned HTTP {response.status_code}: {detail}"
+        )
+
+    try:
+        payload = response.json()
+        raw_content = payload["choices"][0]["message"]["content"]
+        parsed = json.loads(raw_content if isinstance(raw_content, str) else "")
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise ProviderUnavailableApiError("Image analysis provider returned malformed JSON.") from exc
+
+    if not isinstance(parsed, dict):
+        raise ProviderUnavailableApiError("Image analysis provider returned an invalid result.")
+
+    labels = [str(item).strip() for item in parsed.get("labels", []) if str(item).strip()][:12]
+    objects = [str(item).strip() for item in parsed.get("objects", []) if str(item).strip()][:12]
+    colors = parsed.get("colors", []) if isinstance(parsed.get("colors", []), list) else []
+    normalized_colors = []
+    for color in colors[:6]:
+        if not isinstance(color, dict):
+            continue
+        hex_value = str(color.get("hex", "")).strip()
+        if not hex_value:
+            continue
+        normalized_colors.append({
+            "hex": hex_value,
+            "percentage": color.get("percentage", 0),
+        })
+
+    return {
+        "labels": labels,
+        "objects": objects,
+        "colors": normalized_colors,
+        "text": str(parsed.get("text", "") or "").strip(),
     }

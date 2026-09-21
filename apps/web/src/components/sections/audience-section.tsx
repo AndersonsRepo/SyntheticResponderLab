@@ -6,7 +6,12 @@ import {
   AudiencePayload,
   saveAudience,
 } from "@/lib/api";
-import { resolveSetupSeedSource } from "@/lib/setup-flow-utils";
+import {
+  fromOwnershipFilter,
+  OwnershipFilter,
+  resolveSetupSeedSource,
+  toOwnershipFilter,
+} from "@/lib/setup-flow-utils";
 import { cn } from "@/lib/utils";
 import { useStudy } from "@/providers/study-provider";
 import { useSectionRegistry } from "@/providers/section-registry-provider";
@@ -18,7 +23,6 @@ import {
   TextAreaInput,
   TextInput,
   TokenInput,
-  ToggleChip,
 } from "@/components/ui/form-controls";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { RevealOnScroll } from "@/components/ui/reveal-on-scroll";
@@ -175,6 +179,58 @@ export function AudienceSection() {
   });
   const [isSaving, setIsSaving] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
+
+  useEffect(() => {
+    const zip = draft.zip_code.trim();
+    if (!/^\d{5}$/.test(zip)) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const lookupZip = async () => {
+      try {
+        const response = await fetch(`https://api.zippopotam.us/us/${zip}`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = (await response.json()) as {
+          places?: Array<{
+            [key: string]: string | undefined;
+            "place name"?: string;
+            state?: string;
+          }>;
+        };
+        const place = payload.places?.[0];
+        const city = place?.["place name"]?.trim();
+        const state = place?.state?.trim();
+        if (!city && !state) {
+          return;
+        }
+
+        setDraft((current) => ({
+          ...current,
+          metro: current.metro.trim() ? current.metro : city ?? current.metro,
+          state: current.state === "Any" ? state ?? current.state : current.state,
+        }));
+        setStatus((current) =>
+          current.tone === "error"
+            ? current
+            : {
+                tone: "neutral",
+                message: `ZIP ${zip} matched ${[city, state].filter(Boolean).join(", ")}.`,
+              }
+        );
+      } catch {
+        // ZIP lookup is an enhancement; the audience form remains usable offline.
+      }
+    };
+
+    void lookupZip();
+    return () => controller.abort();
+  }, [draft.zip_code]);
 
   useEffect(() => {
     let cancelled = false;
@@ -373,11 +429,14 @@ export function AudienceSection() {
                     }))}
                   />
                 </Field>
-                <Field label="Metro" hint="Optional. Add a metro area to narrow location.">
+                <Field
+                  label="City or Area"
+                  hint="Optional. Add a city, county, or regional area to narrow location."
+                >
                   <TextInput
                     value={draft.metro}
                     onChange={(value) => updateDraft("metro", value)}
-                    placeholder="San Francisco-Oakland-Berkeley"
+                    placeholder="San Francisco or Bay Area"
                   />
                 </Field>
                 <Field
@@ -415,7 +474,7 @@ export function AudienceSection() {
                       inputMode="numeric"
                     />
                   </Field>
-                  <Field label="Income Min" error={fieldErrors.income_min}>
+                  <Field label="Household Income Min" error={fieldErrors.income_min}>
                     <TextInput
                       value={draft.income_min}
                       onChange={(value) => updateDraft("income_min", value)}
@@ -423,7 +482,7 @@ export function AudienceSection() {
                       inputMode="numeric"
                     />
                   </Field>
-                  <Field label="Income Max" error={fieldErrors.income_max}>
+                  <Field label="Household Income Max" error={fieldErrors.income_max}>
                     <TextInput
                       value={draft.income_max}
                       onChange={(value) => updateDraft("income_max", value)}
@@ -460,18 +519,24 @@ export function AudienceSection() {
                 title="Housing"
                 description="Use these only if housing profile matters for this study."
               >
-                <div className="flex flex-wrap gap-3">
-                  <ToggleChip
-                    checked={draft.homeowner_only}
-                    onChange={(checked) => updateDraft("homeowner_only", checked)}
-                    label="Homeowner Only"
+                <Field
+                  label="Ownership"
+                  hint="Any includes both owners and renters, in their real population mix."
+                >
+                  <SelectInput
+                    value={toOwnershipFilter(draft)}
+                    onChange={(value) => {
+                      const flags = fromOwnershipFilter(value as OwnershipFilter);
+                      updateDraft("homeowner_only", flags.homeowner_only);
+                      updateDraft("renter_only", flags.renter_only);
+                    }}
+                    options={[
+                      { label: "Any (owners and renters)", value: "any" },
+                      { label: "Homeowner only", value: "homeowner_only" },
+                      { label: "Renter only", value: "renter_only" },
+                    ]}
                   />
-                  <ToggleChip
-                    checked={draft.renter_only}
-                    onChange={(checked) => updateDraft("renter_only", checked)}
-                    label="Renter Only"
-                  />
-                </div>
+                </Field>
                 {fieldErrors.form ? (
                   <p className="text-xs leading-5 text-app-gold">{fieldErrors.form}</p>
                 ) : null}
@@ -518,7 +583,7 @@ export function AudienceSection() {
                     addLabel="Add Tag"
                   />
                 </Field>
-                <Field label="Notes">
+                <Field label="Anything else you want to add to improve research accuracy.">
                   <TextAreaInput
                     value={draft.notes}
                     onChange={(value) => updateDraft("notes", value)}
