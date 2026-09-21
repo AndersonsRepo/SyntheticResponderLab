@@ -159,13 +159,21 @@ function InterviewPageContent() {
 
   function selectPersona(id: string) {
     if (activity.current) return;
-    if (id === selectedId) return;
-    // The transcript is the artifact the student hands in, and switching discards it with
-    // no undo. The model selects beside this one lock once there are turns; this one asks.
+    // The transcript and the comparison answers are what the student hands in, and both are
+    // paid for. Selecting a persona discards them with no undo — including re-selecting the
+    // current one, which is how you start over — so it asks first.
+    const discards =
+      turns.length > 0
+        ? `${turns.length} message${turns.length === 1 ? "" : "s"}`
+        : comparisonResults.length > 0
+          ? `${comparisonResults.length} compared model answer${comparisonResults.length === 1 ? "" : "s"}`
+          : "";
     if (
-      turns.length > 0 &&
+      discards &&
       !window.confirm(
-        `Switch to ${id}? This interview with ${selectedId} has ${turns.length} message${turns.length === 1 ? "" : "s"} and cannot be recovered. Export it first if you need it.`
+        id === selectedId
+          ? `Start over with ${id}? The ${discards} already here cannot be recovered. Export first if you need them.`
+          : `Switch to ${id}? The ${discards} with ${selectedId} cannot be recovered. Export first if you need them.`
       )
     ) {
       return;
@@ -184,17 +192,12 @@ function InterviewPageContent() {
       resetExpensiveModelSelection(models, current, defaultModelId)
     );
     setComparisonExpensiveOptIn(false);
-    setComparisonModelIds((current) =>
-      current.length > 0
-        ? Array.from(
-            new Set(
-              current.map((modelId) =>
-                resetExpensiveModelSelection(models, modelId, defaultModelId)
-              )
-            )
-          )
-        : defaultInterviewComparisonModelIds(models)
-    );
+    setComparisonModelIds((current) => {
+      const affordable = removeExpensiveComparisonModels(models, current);
+      return canRunInterviewComparison(affordable)
+        ? affordable
+        : defaultInterviewComparisonModelIds(models);
+    });
     setComparedQuestion("");
     setComparisonResults([]);
     setRegenerationCost(null);

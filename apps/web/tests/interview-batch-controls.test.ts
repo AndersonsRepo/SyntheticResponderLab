@@ -569,3 +569,76 @@ test("switching persona mid-interview asks first, and a declined switch keeps th
   assert.equal(picker().props.value, "neo-001", "a declined switch must not change persona");
   assert.match(ui.text(), /Original 1/, "the transcript survives a declined switch");
 });
+
+test("an accepted switch clears the interview and keeps the run's models", async () => {
+  const ui = harness();
+  await ui.settle();
+  ui.nodes()
+    .find((node) => node.props["aria-label"] === "Interviewee model")!
+    .props.onChange({ target: { value: "cheap-b" } });
+  ui.render();
+  await ui.button("Ask").props.onClick();
+  await ui.settle();
+  assert.match(ui.text(), /Original 1/);
+  const picker = () =>
+    ui.nodes().find((node) => node.props["aria-label"] === "Persona to interview")!;
+  // The destructive branch, confirmed: the transcript really does go.
+  picker().props.onChange({ target: { value: "neo-002" } });
+  ui.render();
+  assert.match(ui.confirmations.at(-1)!, /Switch to neo-002/);
+  assert.equal(picker().props.value, "neo-002");
+  assert.doesNotMatch(ui.text(), /Original 1/);
+  assert.equal(
+    ui.nodes().find((node) => node.props["aria-label"] === "Interviewee model")!.props.value,
+    "cheap-b",
+    "the models chosen for this run survive the switch"
+  );
+});
+
+test("re-selecting the persona already in the chair is the start-over control, and it asks", async () => {
+  const ui = harness();
+  await ui.settle();
+  await ui.button("Ask").props.onClick();
+  await ui.settle();
+  assert.match(ui.text(), /Original 1/);
+  ui.button("neo-001").props.onClick();
+  ui.render();
+  assert.match(ui.confirmations.at(-1)!, /Start over with neo-001/);
+  assert.doesNotMatch(ui.text(), /Original 1/);
+});
+
+test("switching persona drops an expensive comparison model instead of substituting one", async () => {
+  const ui = harness();
+  await ui.settle();
+  // The checkboxes carry no label of their own; flatten() is depth-first, so the first
+  // input after a label element is that label's own control.
+  const checkboxIn = (labelText: string) => {
+    const nodes = ui.nodes();
+    const label = nodes.findIndex((node) => {
+      if (node.type !== "label") return false;
+      // The model <select>s list every model as an <option>, so a name match alone finds
+      // the wrong label. Only the checkbox labels are meant here.
+      const children = JSON.stringify(node.props.children ?? "");
+      return children.includes(labelText) && children.includes('"checkbox"');
+    });
+    assert.ok(label >= 0, `no label matching ${labelText}`);
+    const input = nodes.slice(label).find((node) => node.props.type === "checkbox");
+    assert.ok(input, `no checkbox under ${labelText}`);
+    return input!;
+  };
+  checkboxIn("Enable expensive models for this comparison").props.onChange({
+    target: { checked: true },
+  });
+  ui.render();
+  checkboxIn("Expensive A").props.onChange({ target: { checked: true } });
+  ui.render();
+  assert.match(ui.text(), /Models to compare \(3 selected\)/);
+  ui.nodes()
+    .find((node) => node.props["aria-label"] === "Persona to interview")!
+    .props.onChange({ target: { value: "neo-002" } });
+  ui.render();
+  // Two cheap models remain selected: the expensive one is dropped, not swapped for a
+  // default the student never checked, and the set can still run.
+  assert.match(ui.text(), /Models to compare \(2 selected\)/);
+  assert.equal(checkboxIn("Expensive A").props.checked, false);
+});
