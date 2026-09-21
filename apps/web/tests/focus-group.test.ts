@@ -294,12 +294,8 @@ test("classroom students can drive a room without hitting a login wall", () => {
   }
 });
 
-test("a student can end their session so the next one on the device starts clean", () => {
+// ponytail: the hand-off button was removed from the page; the endpoint behind it still stands.
+test("ending a session clears the classroom cookie so the next student starts clean", () => {
   assert.match(endSessionSource, /cookies\.delete\(CLASSROOM_SESSION_COOKIE_NAME\)/);
   assert.match(middlewareSource, /pathname\.startsWith\("\/api\/classroom\/"\)/);
-  assert.match(
-    pageSource,
-    /fetch\("\/api\/classroom\/end-session", \{ method: "POST" \}\)[\s\S]*?window\.location\.reload\(\)/
-  );
-  assert.match(pageSource, /End my session and hand off this device/);
 });
