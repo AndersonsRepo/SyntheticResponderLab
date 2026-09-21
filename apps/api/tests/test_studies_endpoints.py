@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from sqlalchemy import select
 
 from src.persistence.models import InterviewTurn, Persona, Study
@@ -291,7 +293,7 @@ def test_bootstrap_neo_demo_endpoint_persists_ready_interview_setup(client, monk
     assert payload["survey"]["status"] == "saved"
     assert payload["survey"]["source_filename"] == "Neo Smart Living — Survey_HighPriority.md"
     assert payload["experiment"]["status"] == "saved"
-    assert payload["experiment"]["value"]["sample_size"] == 100
+    assert payload["experiment"]["value"]["sample_size"] == 20
     assert payload["experiment"]["value"]["experiment_mode"] == "split"
     assert payload["derived"]["workflow"]["ready_for_persona_preview"] is True
     assert payload["derived"]["latest_persona_preview"]["status"] == "completed"
@@ -980,6 +982,8 @@ def test_upload_aytm_docx_succeeds_with_fallback_parser(client):
         / "Provided Info"
         / "aytm Survey #760085  (Neo Smart Living — Tahoe Mini Survey).docx"
     )
+    if not docx_path.exists():
+        pytest.skip(f"provided fixture not present in this checkout: {docx_path}")
 
     created = client.post("/api/v1/studies", json={}).json()["data"]["study"]
     study_id = created["study_id"]
@@ -1026,6 +1030,31 @@ def test_save_experiment_endpoint(client):
     assert payload["experiment"]["value"]["experiment_mode"] == "split"
     assert payload["experiment"]["value"]["split_across_models"] is True
     assert payload["workflow"]["ready_for_persona_preview"] is False
+
+
+def test_invalid_experiment_returns_validation_error_not_500(client):
+    """A model-validator ValueError must surface as a clean 400.
+
+    ``ValidationError.errors()`` embeds the raw ``ValueError`` under ``ctx``,
+    which is not JSON-serializable and turned this into an opaque 500.
+    """
+    created = client.post("/api/v1/studies", json={}).json()["data"]["study"]
+    study_id = created["study_id"]
+
+    response = client.patch(
+        f"/api/v1/studies/{study_id}/experiment",
+        json={
+            "sample_size": 10,
+            "selected_models": ["openai/gpt-4o-mini"],
+            "experiment_mode": "split",
+            "reruns_per_persona": 1,
+        },
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "validation_error"
+    assert "at least 2 selected models" in json.dumps(error["details"])
 
 
 def test_persona_preview_requires_saved_experiment(client):
@@ -1187,16 +1216,26 @@ def test_general_mode_partial_setup_rehydrates_correctly(client):
     assert payload["derived"]["workflow"]["next_recommended_stage"] == "market"
 
 
-def test_product_provider_gaps_fail_clearly(client):
+def test_product_url_autofill_falls_back_without_openrouter_key(client, monkeypatch):
     created = client.post("/api/v1/studies", json={}).json()["data"]["study"]
     study_id = created["study_id"]
+
+    from src.adapters.legacy_backend.runtime import load_module
+
+    scraper = load_module("backend.scraper", client.app.state.settings.legacy_app_root)
+    monkeypatch.setattr(scraper, "scrape_product_page", lambda url: "Example Product — great for everyone.")
 
     url_response = client.post(
         f"/api/v1/studies/{study_id}/product/url-autofill",
         json={"url": "https://example.com/product", "apply_to_product": False},
     )
-    assert url_response.status_code == 503
-    assert "OPENROUTER_API_KEY is required" in url_response.json()["error"]["message"]
+    assert url_response.status_code == 200
+    assert url_response.json()["data"]["enrichment"]["input_url"] == "https://example.com/product"
+
+
+def test_product_image_analysis_provider_gap_fails_clearly(client):
+    created = client.post("/api/v1/studies", json={}).json()["data"]["study"]
+    study_id = created["study_id"]
 
     image_response = client.post(
         f"/api/v1/studies/{study_id}/product/image-analysis",
@@ -1646,6 +1685,10 @@ def test_analysis_endpoint_returns_summary_and_question_explorer(client, monkeyp
     assert open_text_question["quotes"]
     assert payload["benchmark_snapshot"]["available"] is True
     assert payload["run_debug_summary"]["truly_live_answers"] == 4
+    # realism_targets_neo_smart_template.json now ships inside the canonical runtime, so the scorecard
+    # is available here for the same reason it is available in production. This assertion previously
+    # read `is False`, which passed only because tests and the deployed image disagreed about which
+    # files existed.
     assert payload["realism_scorecard"]["available"] is True
     assert payload["open_text"]["available"] is True
     assert payload["records_preview"]["total"] == 4
@@ -1798,3 +1841,134 @@ def test_insights_endpoint_caches_llm_summary_per_run(client, monkeypatch, test_
     assert first_response.json()["data"]["insights"]["llm_summary"]["cached"] is False
     assert second_response.json()["data"]["insights"]["llm_summary"]["cached"] is True
     assert call_count["value"] == 1
+
+
+def test_request_body_validation_error_returns_clean_400(client):
+    """FastAPI's RequestValidationError.errors() takes no kwargs.
+
+    The shared sanitizer must handle it, or every malformed request body 500s.
+    """
+    created = client.post("/api/v1/studies", json={}).json()["data"]["study"]
+    study_id = created["study_id"]
+
+    response = client.post(
+        f"/api/v1/studies/{study_id}/survey/generate",
+        json={"question_count": "not-a-number"},
+    )
+
+    assert response.status_code == 400
+    payload = response.json()["error"]
+    assert payload["code"] == "validation_error"
+    # Must be JSON-serializable all the way down.
+    assert json.loads(json.dumps(payload["details"]))
+
+def test_simulation_run_reports_unavailable_not_server_error_for_retired_model(client, monkeypatch):
+    """F-04b: a model the provider no longer serves is a configuration problem, not a crash.
+
+    It should surface like the missing-credentials case — 503 provider_unavailable with the
+    provider's own message and a saved failed job — rather than a 500 that reads as an app bug.
+    """
+    import json as _json
+
+    from src.adapters.legacy_backend.runtime import load_module
+
+    study_id = _create_ready_to_run_study(client)
+    settings = client.app.state.settings
+    settings.openrouter_api_key = "test-openrouter-key"
+
+    llm_client = load_module("backend.simulation.llm_client", settings.legacy_app_root)
+
+    class _NotFound:
+        status_code = 404
+        text = _json.dumps(
+            {"error": {"message": "No endpoints found for google/gemini-2.0-flash-001.", "code": 404}}
+        )
+
+        def json(self):
+            return _json.loads(self.text)
+
+    monkeypatch.setattr(llm_client.requests, "post", lambda url, headers, json, timeout: _NotFound())
+
+    response = client.post(f"/api/v1/studies/{study_id}/simulation-runs")
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "provider_unavailable"
+    assert "No endpoints found" in response.json()["error"]["message"]
+
+    latest = client.get(f"/api/v1/studies/{study_id}/simulation-runs/latest").json()["data"]["simulation_run"]
+    assert latest["status"] == "failed"
+    assert "No endpoints found" in latest["error"]["message"]
+def _bootstrap_neo_study(client, monkeypatch) -> str:
+    created = client.post("/api/v1/studies", json={}).json()["data"]["study"]
+    study_id = created["study_id"]
+    monkeypatch.setattr(
+        "src.services.study_service.preview_personas",
+        lambda **kwargs: {
+            "generation_mode": "grounded_priors",
+            "grounded_priors_available": True,
+            "cex_affordability_available": True,
+            "prior_notes": [{"note": "Grounded priors active"}],
+            "personas": [
+                {
+                    "persona_id": "neo-001",
+                    "segment_label": "Backyard office homeowners",
+                    "fit_tier": "strong",
+                }
+            ],
+        },
+    )
+    assert client.post(f"/api/v1/studies/{study_id}/study-mode/bootstrap/neo").status_code == 200
+    return study_id
+
+
+def test_neo_interview_run_discloses_fixture_provenance(client, monkeypatch):
+    """F-07 regression: a Neo interview run is seeded fixture data, not two live model interviews.
+
+    The backend already records ``demo_fixture``, ``fixture_source`` and ``judge_model`` on the job
+    result, but ``_serialize_interview_job`` dropped all three, so no client could tell a fixture
+    apart from a genuine dual-model batch. The UI meanwhile claims both models interviewed every
+    persona and that a judge LLM scored their agreement.
+    """
+    study_id = _bootstrap_neo_study(client, monkeypatch)
+
+    response = client.post(f"/api/v1/studies/{study_id}/interview/runs", json={})
+    assert response.status_code == 200
+
+    run = response.json()["data"]["interview_run"]
+    assert run["demo_fixture"] is True, "Neo interview runs must declare that they are fixture-generated"
+    assert run["fixture_source"], "fixture provenance must reach the client"
+    assert run["judge_model"] == "demo/stamp-fixture", (
+        "the fixture's stand-in judge must be disclosed rather than presented as a real judge LLM"
+    )
+
+
+def test_live_interview_run_is_not_flagged_as_fixture():
+    """A genuine (non-Neo) interview batch must report demo_fixture=False.
+
+    Guards the disclosure from degrading into a constant: the flag has to track the job's
+    actual provenance, otherwise a live Custom Study batch would be mislabelled as seeded.
+    """
+    from src.persistence.models import Job
+    from src.services.interview_service import _serialize_interview_job
+
+    live_job = Job(
+        public_id="job_live_interview",
+        job_type="interview_run",
+        status="completed",
+        payload_json={"model_a": "openai/gpt-4o-mini", "model_b": "google/gemini-2.5-flash"},
+        result_json={
+            "persona_count": 2,
+            "model_a": "openai/gpt-4o-mini",
+            "model_b": "google/gemini-2.5-flash",
+            "judge_model": "openai/o4-mini",
+            "pairs": [],
+            "grounding_report": {"corpus_average": 0.75},
+        },
+        error_json=None,
+    )
+
+    serialized = _serialize_interview_job(live_job)
+
+    assert serialized["demo_fixture"] is False
+    assert serialized["fixture_source"] is None
+    assert serialized["judge_model"] == "openai/o4-mini"

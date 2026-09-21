@@ -12,6 +12,7 @@ import {
   AnalysisPayload,
   getAnalysis,
 } from "@/lib/api";
+import { formatAnswerSourcing } from "@/lib/answer-sourcing";
 import { cn } from "@/lib/utils";
 import { useStudy } from "@/providers/study-provider";
 import { useSectionRegistry } from "@/providers/section-registry-provider";
@@ -107,6 +108,7 @@ export function AnalysisSection() {
     <SectionWrapper
       id="analysis"
       scrollable
+      className="lg:isolate lg:overflow-hidden"
       contentClassName="relative scrollbar-hidden"
     >
       <div className="grid items-start gap-8">
@@ -139,13 +141,36 @@ export function AnalysisSection() {
             </GlassPanel>
           ) : (
             <>
-              <div className="lg:sticky lg:top-0 z-20 -mx-1 bg-[linear-gradient(180deg,rgba(7,11,15,0.96)_0%,rgba(7,11,15,0.88)_78%,rgba(7,11,15,0)_100%)] px-1 pb-5 pt-1">
-                <div className="rounded-[1.55rem] border border-app-border/70 px-5 py-4 shadow-[0_18px_44px_rgba(0,0,0,0.24)] backdrop-blur-xl [background:linear-gradient(180deg,rgba(16,23,29,0.92),rgba(13,19,24,0.88))] sm:px-6">
+              <div className="lg:sticky lg:top-0 z-20 -mx-1 px-1 pb-5 pt-1 [background:var(--theme-sticky-scrim)]">
+                <div className="rounded-[1.55rem] border border-app-border/70 px-5 py-4 shadow-[0_18px_44px_rgba(0,0,0,0.24)] backdrop-blur-xl [background:var(--theme-panel-gradient-strong)] sm:px-6">
                   <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                     <div className="flex flex-wrap items-center gap-3">
                       <h2 className="text-[1.12rem] font-semibold tracking-tight text-app-text sm:text-[1.22rem] lg:text-[1.35rem]">
                         Result Dashboard
                       </h2>
+              {(() => {
+                const sourcing = formatAnswerSourcing(analysis?.answer_sourcing ?? null);
+                if (!sourcing.shown) return null;
+                return (
+                  <p
+                    className={
+                      sourcing.excluded > 0
+                        ? "mt-3 rounded-[1.2rem] border border-amber-400/30 bg-amber-400/[0.06] px-4 py-3 text-xs leading-5 text-amber-300"
+                        : "mt-3 rounded-[1.2rem] border border-app-border bg-white/[0.02] px-4 py-3 text-xs leading-5 text-app-muted"
+                    }
+                  >
+                    {sourcing.summary}
+                    {sourcing.ratePercent !== null ? ` Live-answer rate ${sourcing.ratePercent}%.` : ""}
+                  </p>
+                );
+              })()}
+              {/* The same caveat the Insights page carries. Charts and question statistics are findings
+                  too, and this was the one surface showing numbers with no methodological note at all. */}
+              {analysis?.transparency_note ? (
+                <p className="mt-3 rounded-[1.2rem] border border-app-gold/25 bg-[rgba(216,186,103,0.07)] px-4 py-3 text-xs leading-5 text-app-gold">
+                  {analysis.transparency_note}
+                </p>
+              ) : null}
                       <span className="inline-flex items-center rounded-full border border-app-border/70 px-3.5 py-1.5 text-sm font-medium text-app-muted [background:var(--status-neutral-bg)]">
                         {`${questions.length} questions`}
                       </span>
@@ -262,7 +287,7 @@ function QuestionDashboardCard({
           {question.question_text}
         </h3>
 
-        <div className="mt-5 rounded-[1.35rem] p-3 sm:p-4 [background:linear-gradient(180deg,rgba(11,16,20,0.9),rgba(8,12,15,0.84))] shadow-[inset_0_0_0_1px_rgba(118,228,255,0.06)]">
+        <div className="mt-5 rounded-[1.35rem] p-3 sm:p-4 [background:var(--chart-shell-bg)] shadow-[inset_0_0_0_1px_rgba(118,228,255,0.06)]">
           {isVisible ? (
             <QuestionChartSwitch question={question} />
           ) : (

@@ -14,11 +14,11 @@ def test_settings_resolve_relative_paths():
         APP_DEBUG=True,
         DATABASE_URL="sqlite:///./local-dev.db",
         ARTIFACTS_ROOT="./artifacts",
-        LEGACY_APP_ROOT="../../NeoSmart-Hackathon-App",
+        LEGACY_APP_ROOT="./legacy_runtime",
     )
 
     assert settings.artifacts_root == (API_ROOT / "artifacts").resolve()
-    assert settings.legacy_app_root == (API_ROOT / "../../NeoSmart-Hackathon-App").resolve()
+    assert settings.legacy_app_root == (API_ROOT / "./legacy_runtime").resolve()
 
 
 def test_settings_reject_invalid_database_url():
@@ -28,7 +28,7 @@ def test_settings_reject_invalid_database_url():
             APP_DEBUG=True,
             DATABASE_URL="not-a-valid-db-url",
             ARTIFACTS_ROOT="./artifacts",
-            LEGACY_APP_ROOT="../../NeoSmart-Hackathon-App",
+            LEGACY_APP_ROOT="./legacy_runtime",
         )
 
 
@@ -39,7 +39,7 @@ def test_settings_reject_non_positive_upload_limits():
             APP_DEBUG=True,
             DATABASE_URL="sqlite:///./local-dev.db",
             ARTIFACTS_ROOT="./artifacts",
-            LEGACY_APP_ROOT="../../NeoSmart-Hackathon-App",
+            LEGACY_APP_ROOT="./legacy_runtime",
             MAX_SURVEY_UPLOAD_BYTES=0,
         )
 

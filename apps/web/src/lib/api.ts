@@ -395,6 +395,14 @@ export type SimulationRunConditions = {
   selected_models?: string[];
 };
 
+export type AnswerSourcing = {
+  live_answers_used: number;
+  fallback_answers_excluded: number;
+  total_answers: number;
+  live_answer_rate: number | null;
+  note?: string;
+};
+
 export type SimulationRunDebugSummary = {
   primary_live_path?: boolean;
   total_answers?: number;
@@ -411,6 +419,13 @@ export type SimulationRunResultPayload = {
   status: string;
   total_requested_responses: number;
   total_generated_responses: number;
+  /** Named separately because a mirror run's personas, completed surveys and answer rows all differ. */
+  run_counts?: {
+    personas: number;
+    executions: number;
+    questions: number;
+    answer_records: number;
+  } | null;
   models_used: string[];
   experiment_mode: string;
   survey_title?: string | null;
@@ -530,6 +545,7 @@ export type AnalysisPayload = {
   available: boolean;
   message?: string;
   transparency_note?: string;
+  answer_sourcing?: AnswerSourcing | null;
   run?: {
     run_id?: string;
     status?: string;
@@ -655,6 +671,7 @@ export type InsightsPayload = {
   available: boolean;
   message?: string;
   transparency_note?: string;
+  answer_sourcing?: AnswerSourcing | null;
   run?: {
     run_id?: string;
     status?: string;
@@ -921,6 +938,9 @@ export type InterviewRunPayload = {
   model_a: string | null;
   model_b: string | null;
   grounding_report: InterviewGroundingReport | null;
+  demo_fixture: boolean;
+  fixture_source: string | null;
+  judge_model: string | null;
   pairs: InterviewPair[] | null;
   error: { message?: string } | null;
   queued_at: string | null;
@@ -1442,6 +1462,37 @@ export async function bootstrapNeoDemoStudy(studyId: string) {
   return normalizeCanonicalStudy(study);
 }
 
+export async function bootstrapDemoPresetStudy(studyId: string, presetKey: string) {
+  const apiBaseUrl = getApiBaseUrl();
+
+  const response = await fetch(
+    `${apiBaseUrl}/api/v1/studies/${studyId}/study-mode/bootstrap/preset/${encodeURIComponent(presetKey)}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      await readApiErrorMessage(
+        response,
+        `Demo preset bootstrap failed with status ${response.status}`
+      )
+    );
+  }
+
+  const payload = (await response.json()) as GetStudyResponse;
+  const study = payload.data?.study;
+  if (!study?.study_id) {
+    throw new Error("Demo preset bootstrap succeeded but no canonical study was returned.");
+  }
+
+  return normalizeCanonicalStudy(study);
+}
+
 export async function saveAudience(studyId: string, payload: AudiencePayload) {
   const apiBaseUrl = getApiBaseUrl();
 
@@ -1630,6 +1681,69 @@ export async function loadNeoSurveyPreset(studyId: string) {
   if (!response.ok) {
     throw new Error(
       await readApiErrorMessage(response, `Neo survey preset load failed with status ${response.status}`)
+    );
+  }
+
+  const result = (await response.json()) as SurveyUploadResponse;
+  return {
+    asset: result.data?.asset ?? null,
+    survey: normalizeSurveyResponse(result.data?.survey),
+    workflow: result.data?.workflow ?? null,
+  };
+}
+
+export type GeneratedSurveyResult = {
+  survey_schema: Record<string, unknown>;
+  summary: string;
+  warnings: string[];
+  question_count: number;
+};
+
+export async function generateSurvey(
+  studyId: string,
+  payload: {
+    question_count: number;
+    instructions?: string | null;
+    previous_schema?: Record<string, unknown> | null;
+    conversation?: Array<{ role: string; content: string }>;
+  }
+) {
+  const apiBaseUrl = getApiBaseUrl();
+
+  const response = await fetch(`${apiBaseUrl}/api/v1/studies/${studyId}/survey/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      await readApiErrorMessage(response, `Survey generation failed with status ${response.status}`)
+    );
+  }
+
+  const result = (await response.json()) as { data?: GeneratedSurveyResult };
+  if (!result.data?.survey_schema) {
+    throw new Error("Survey generation returned no survey.");
+  }
+  return result.data;
+}
+
+export async function acceptGeneratedSurvey(
+  studyId: string,
+  surveySchema: Record<string, unknown>
+) {
+  const apiBaseUrl = getApiBaseUrl();
+
+  const response = await fetch(`${apiBaseUrl}/api/v1/studies/${studyId}/survey/generated`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ survey_schema: surveySchema }),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      await readApiErrorMessage(response, `Saving the generated survey failed with status ${response.status}`)
     );
   }
 

@@ -10,7 +10,11 @@ from src.api.auth import AuthUser, get_current_user
 from src.api.dependencies import get_db_session, get_settings
 from src.api.errors import response_envelope
 from src.config.settings import AppSettings
-from src.services.exceptions import PayloadTooLargeApiError, UnsupportedMediaTypeApiError
+from src.services.exceptions import (
+    NotFoundApiError,
+    PayloadTooLargeApiError,
+    UnsupportedMediaTypeApiError,
+)
 from src.schemas.study import (
     InterviewChatRequest,
     InterviewComparisonRequest,
@@ -22,8 +26,13 @@ from src.schemas.study import (
     StabilityCheckRequest,
     StudyCreateRequest,
     StudyModeUpdateRequest,
+    SurveyGenerationAcceptRequest,
+    SurveyGenerationRequest,
 )
 from src.services.study_service import (
+    DEMO_PRESETS,
+    accept_generated_survey,
+    bootstrap_demo_study,
     bootstrap_neo_demo_study,
     clear_latest_simulation_runs,
     create_persona_preview,
@@ -37,6 +46,7 @@ from src.services.study_service import (
     get_models,
     get_workflow,
     handle_neo_survey_preset,
+    handle_survey_generation,
     handle_product_image_analysis,
     handle_product_url_autofill,
     handle_survey_upload,
@@ -180,6 +190,28 @@ def bootstrap_neo_demo_endpoint(
 ):
     study = get_owned_study_or_404(db, study_id, current_user)
     result = bootstrap_neo_demo_study(db, settings, study)
+    return response_envelope(
+        request,
+        {"study": result.model_dump(mode="json", by_alias=True)},
+    )
+
+
+@router.post("/api/v1/studies/{study_id}/study-mode/bootstrap/preset/{preset_key}")
+def bootstrap_demo_preset_endpoint(
+    study_id: str,
+    preset_key: str,
+    request: Request,
+    db: Session = Depends(get_db_session),
+    settings: AppSettings = Depends(get_settings),
+    current_user: AuthUser = Depends(get_current_user),
+):
+    preset = DEMO_PRESETS.get(preset_key.strip().lower())
+    if preset is None:
+        raise NotFoundApiError(
+            f"Unknown demo preset '{preset_key}'. Available: {', '.join(sorted(DEMO_PRESETS))}."
+        )
+    study = get_owned_study_or_404(db, study_id, current_user)
+    result = bootstrap_demo_study(db, settings, study, preset)
     return response_envelope(
         request,
         {"study": result.model_dump(mode="json", by_alias=True)},
@@ -344,6 +376,42 @@ def neo_survey_preset_endpoint(
 ):
     study = get_owned_study_or_404(db, study_id, current_user)
     result = handle_neo_survey_preset(db, settings, study)
+    return response_envelope(request, result)
+
+
+@router.post("/api/v1/studies/{study_id}/survey/generate")
+def generate_survey_endpoint(
+    study_id: str,
+    payload: SurveyGenerationRequest,
+    request: Request,
+    db: Session = Depends(get_db_session),
+    settings: AppSettings = Depends(get_settings),
+    current_user: AuthUser = Depends(get_current_user),
+):
+    study = get_owned_study_or_404(db, study_id, current_user)
+    result = handle_survey_generation(
+        db,
+        settings,
+        study,
+        question_count=payload.question_count,
+        instructions=payload.instructions,
+        previous_schema=payload.previous_schema,
+        conversation=[turn.model_dump() for turn in payload.conversation],
+    )
+    return response_envelope(request, result)
+
+
+@router.post("/api/v1/studies/{study_id}/survey/generated")
+def accept_generated_survey_endpoint(
+    study_id: str,
+    payload: SurveyGenerationAcceptRequest,
+    request: Request,
+    db: Session = Depends(get_db_session),
+    settings: AppSettings = Depends(get_settings),
+    current_user: AuthUser = Depends(get_current_user),
+):
+    study = get_owned_study_or_404(db, study_id, current_user)
+    result = accept_generated_survey(db, settings, study, survey_schema=payload.survey_schema)
     return response_envelope(request, result)
 
 

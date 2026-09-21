@@ -11,6 +11,11 @@ from typing import Any, Dict, List, Optional
 QUESTION_PATTERNS = [
 	re.compile(r"^\s*(?P<id>[A-Za-z]?\d+[A-Za-z]?)\s*[:\.\-]\s*(?P<text>.+)$", re.IGNORECASE),
 	re.compile(r"^\s*Question\s*(?P<id>[A-Za-z]?\d+[A-Za-z]?)\s*[:\.\-]\s*(?P<text>.+)$", re.IGNORECASE),
+	# Semantic ids such as `BENEFIT.` or `PRICE:`. Deliberately case-SENSITIVE and all-caps: a
+	# researcher writing a question code shouts it, whereas prose keys like `Note:` or `Mode:` are
+	# title case. Matching those would turn narrative lines into questions, because
+	# `_match_question_start` runs on every line before the metadata check.
+	re.compile(r"^\s*(?P<id>[A-Z][A-Z0-9_]{1,31})\s*[:\.\-]\s*(?P<text>.+)$"),
 ]
 
 # Only accept these keys from `Key: value` metadata lines.
@@ -23,6 +28,9 @@ _MULTI_SELECT_PATTERNS = [
 	re.compile(r"choose\s+up\s+to\s+\d+", re.IGNORECASE),
 	re.compile(r"check\s+all\s+that\s+apply", re.IGNORECASE),
 ]
+
+
+from backend.survey.pdf_form_parser import reconstruct_google_forms_export
 
 
 def parse_uploaded_survey(file_name: str, file_bytes: bytes) -> Dict[str, Any]:
@@ -76,7 +84,17 @@ def parse_text_to_raw_payload(text: str, source_format: str) -> Dict[str, Any]:
 	- Markdown checkbox options: `- [ ] Option text`
 	- Markdown table scales: header row with labels + row with `| 1 | 2 | ... |`
 	- Matrix tables: `| Row item | o | o | o | ... |`
+
+	A PDF is tried against the Google Forms export layout first. That export separates every question
+	from its own options, so the rules below read it as prose and flatten the whole survey to open text.
+	The reconstruction returns None for anything that is not such an export, and the rules below then
+	run unchanged.
 	"""
+	if str(source_format or "").lower() == "pdf":
+		rebuilt = reconstruct_google_forms_export(text)
+		if rebuilt is not None:
+			return rebuilt
+
 	lines = [line.rstrip() for line in text.splitlines()]
 	non_empty_lines = [line.strip() for line in lines if line.strip()]
 
@@ -296,8 +314,12 @@ def _flush_matrix_rows(
 	)
 
 
-def _match_question_start(line: str) -> Optional[tuple[str, str]]:
-	"""Match a question start line and return normalized (id, text)."""
+def _match_question_start(line: str) -> Optional[tuple[Optional[str], str]]:
+	"""Match a question start line and return (declared id or None, text).
+
+	The id is ``None`` when the line was numbered rather than named, so that the caller can tell an id
+	the document chose from a position the parser read off a list.
+	"""
 	# Normalize common markdown wrappers used in provided survey docs.
 	candidate = line.strip()
 	candidate = re.sub(r"^\*\*(.+)\*\*$", r"\1", candidate).strip()
@@ -307,11 +329,17 @@ def _match_question_start(line: str) -> Optional[tuple[str, str]]:
 		match = pattern.match(candidate)
 		if match:
 			raw_id = match.group("id").strip()
+			# Reserved metadata keys describe a question; they never introduce one.
+			if raw_id.lower().replace(" ", "_") in _KNOWN_METADATA_KEYS:
+				continue
 			if raw_id and raw_id[0].isalpha():
-				normalized_id = raw_id.upper()
-			else:
-				normalized_id = f"Q{raw_id}"
-			return normalized_id, match.group("text").strip()
+				# The document named this question. Its id is the researcher's, and is kept.
+				return raw_id.upper(), match.group("text").strip()
+			# A bare list number is a position, not a name. Turning "1." into "Q1" invented an id the
+			# document never claimed, and a Google Forms export -- which numbers every field, including
+			# the email capture -- then collided with the survey's own "Q1." and was rejected outright.
+			# Left unset, so the normalizer assigns one that nothing else is using.
+			return None, match.group("text").strip()
 	return None
 
 

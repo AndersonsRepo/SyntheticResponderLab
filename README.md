@@ -22,8 +22,7 @@ SyntheticResponderLab/
 │   ├── api/                     # FastAPI backend for the new product
 │   └── web/                     # Next.js frontend for the new product
 ├── Documentation/              # migration docs, specs, and implementation notes
-├── UI Prototype/               # visual reference files
-└── NeoSmart-Hackathon-App/     # legacy Streamlit app kept as reference
+└── UI Prototype/               # visual reference files
 ```
 
 ## Architecture
@@ -40,10 +39,11 @@ SyntheticResponderLab/
 - SQLite for local development
 - wraps legacy Python logic instead of rewriting it in JavaScript
 
-### `NeoSmart-Hackathon-App`
-- the original multipage Streamlit prototype
-- kept in the repo as the reference logic source
-- not the primary app to run for the new product
+### `apps/api/legacy_runtime`
+- the simulation engine originally written for the Streamlit prototype
+- vendored in-tree and used directly by `apps/api` in both local development and production
+- `LEGACY_APP_ROOT` points here; there is a single copy, so local and deployed behaviour cannot drift
+- also carries the Neo survey presets and the `scripts/` pipeline that builds the grounding priors
 
 ## Current Workflow
 
@@ -90,6 +90,10 @@ Run the migration:
 alembic upgrade head
 ```
 
+It targets whatever `DATABASE_URL` the application resolves — an exported variable if you set one,
+otherwise the value in `apps/api/.env`. If neither provides one it stops with an error rather than
+migrating a default database the app never opens.
+
 Start the API:
 
 ```bash
@@ -135,6 +139,101 @@ Important variables:
 - `DAILY_STUDY_CREATE_LIMIT`
 - `DAILY_UPLOAD_LIMIT`
 - `DAILY_PROVIDER_RUN_LIMIT`
+- `SIMULATION_MAX_CONCURRENCY`
+
+### Simulation performance
+
+Each respondent in a run is one provider round-trip, so run duration scales with
+sample size. Those requests are issued concurrently, bounded by
+`SIMULATION_MAX_CONCURRENCY` (default `8`, max `32`). Measured on a 20-respondent
+× 32-question × 2-model run: **139.7s at concurrency 1, 22.2s at concurrency 8.**
+
+Results are folded back in respondent order, so raising concurrency changes run
+time only — never the saved output. Lower it if the provider starts rate-limiting.
+
+### Demo presets
+
+One-click setups that fill audience, product, market, survey, and experiment so a
+study is immediately runnable:
+
+```
+POST /api/v1/studies/{study_id}/study-mode/bootstrap/preset/{preset_key}
+```
+
+| Preset | Mode | Product |
+| --- | --- | --- |
+| `neo` | `neo_smart` | Tahoe Mini modular backyard studio |
+| `coffee` | `general` | Cortado Roasters "Everyday Origins" coffee subscription |
+
+The `coffee` preset exists to exercise the product-agnostic path: a different
+category, price point, and audience shape (renters included, no housing
+constraint) with its own bundled 32-question survey. It is API-only — there is
+no UI entry point — and is intended for verifying that the full chain runs on a
+product unrelated to Neo Smart.
+
+Add a preset by appending a `DemoPreset` to `DEMO_PRESETS` in
+`apps/api/src/services/study_service.py`; a preset that ships its own survey
+markdown places it in `apps/api/legacy_runtime/Provided Info/`.
+
+### Uploading a survey
+
+`.md`, `.docx` and `.pdf` are accepted.
+
+**Markdown** is the most reliable and is what the bundled presets use. It reads `**Q1. Title** text`
+headings, `- [ ] Option` checkboxes, and markdown tables for Likert scales and matrix questions.
+
+**DOCX** is read by a layout-aware fallback when the primary parser returns a flat, all-open-text result,
+which is what it does for AYTM-style documents.
+
+**PDF** is best-effort. A Google Forms export is reconstructed by pairing each page's answer blocks with
+that page's question headings, which recovers single-choice, multi-choice and linear-scale questions.
+Two things do not survive extraction, and the parser reports both rather than guessing:
+
+- **Matrix questions.** The per-row items are word-wrapped and duplicated by the PDF text layer beyond
+  safe reassembly, so a matrix is kept as a single scale and a warning says the rows were lost. Upload the
+  `.md` or `.docx` original to get one question per row.
+- **Typographic ligatures.** "office" can arrive as "oce". Which characters were lost is not recoverable.
+
+A PDF that yields no question with options or a scale is **refused** with *"This document does not appear
+to contain a recognizable survey."* That is deliberate: a report, brief or brochure would otherwise be
+parsed into questions invented from its prose. The cost is that a genuine all-open-text PDF survey is also
+refused — upload it as `.md` or `.docx`.
+
+Check the parse warnings after any upload. They name what the parser could not read.
+
+### AI survey generation
+
+In General Custom Study mode the survey step offers an AI generator as an
+alternative to uploading a file. It drafts questions from the study's saved
+product, market, and audience context:
+
+```
+POST /api/v1/studies/{study_id}/survey/generate    # draft, nothing persisted
+POST /api/v1/studies/{study_id}/survey/generated   # save an approved draft
+```
+
+`generate` takes `question_count` (3-60), an optional `instructions` string, and
+the `previous_schema` plus `conversation` history for iterative refinement, so
+the UI can keep revising a draft in a chat until the researcher accepts it. Every
+draft is run through the same normalizer and validator as an uploaded file, and
+generation counts against `DAILY_PROVIDER_RUN_LIMIT`.
+
+Saved Product details are required; market and audience are optional but their
+absence is reported as a warning because it weakens the generated questions.
+
+### Grounding priors
+
+Persona generation samples from ACS prior tables in
+`apps/api/legacy_runtime/data/processed/priors/`. When those tables are missing,
+persona generation silently degrades to rule-based profiles. Regenerate them
+from Census ACS PUMS microdata (no API key needed) with:
+
+```bash
+python apps/api/scripts/build_grounding_priors.py
+```
+
+The production image copies these tables in and the Docker build fails if they
+are absent, so a deployment cannot quietly serve heuristic personas.
 
 Production-like startup rules:
 - `APP_ENV` must not be `development`, `dev`, `test`, or `local`

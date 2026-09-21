@@ -10,6 +10,7 @@ import {
   saveProduct,
 } from "@/lib/api";
 import { resolveSetupSeedSource } from "@/lib/setup-flow-utils";
+import { describeProductReset } from "@/lib/product-reset";
 import { cn } from "@/lib/utils";
 import { useStudy } from "@/providers/study-provider";
 import { useSectionRegistry } from "@/providers/section-registry-provider";
@@ -17,6 +18,7 @@ import { BadgeChip } from "@/components/ui/badge-chip";
 import { Button } from "@/components/ui/button";
 import {
   Field,
+  SelectInput,
   TextAreaInput,
   TextInput,
   TokenInput,
@@ -117,6 +119,25 @@ const NEO_PRODUCT_DEFAULTS: ProductDraft = {
   notes: "Demo preset based on Neo Smart Living materials.",
 };
 
+const INDUSTRY_OPTIONS = [
+  "Consumer goods",
+  "Apparel and accessories",
+  "Beauty and personal care",
+  "Food and beverage",
+  "Home and garden",
+  "Technology and software",
+  "Financial services",
+  "Healthcare",
+  "Education",
+  "Travel and hospitality",
+  "Media and entertainment",
+  "Professional services",
+  "Real estate and construction",
+  "Automotive and transportation",
+  "Energy and utilities",
+  "Nonprofit and public sector",
+];
+
 export function ProductSection() {
   const {
     studyId,
@@ -129,6 +150,7 @@ export function ProductSection() {
   const { scrollToSection } = useSectionRegistry();
   const [draft, setDraft] = useState<ProductDraft>(EMPTY_PRODUCT_DRAFT);
   const [savedSnapshot, setSavedSnapshot] = useState<string>("");
+  const [isProductReset, setIsProductReset] = useState(false);
   const [studyMode, setStudyMode] = useState<string | null>(null);
   const [status, setStatus] = useState<ProductStatusState>({
     tone: "neutral",
@@ -146,6 +168,7 @@ export function ProductSection() {
   const [uploadedImagePreviewUrl, setUploadedImagePreviewUrl] = useState<string | null>(
     null
   );
+  const [isDraggingImage, setIsDraggingImage] = useState(false);
   const [isAnalyzingImage, setIsAnalyzingImage] = useState(false);
   const [latestImageAnalysis, setLatestImageAnalysis] =
     useState<ProductEnrichmentSummary | null>(null);
@@ -177,7 +200,9 @@ export function ProductSection() {
         studyMode: study.study_mode.value,
       });
       const nextDraft =
-        seedSource === "saved"
+        isProductReset
+          ? EMPTY_PRODUCT_DRAFT
+          : seedSource === "saved"
           ? productPayloadToDraft(study.product?.value)
           : seedSource === "neo_default"
             ? { ...NEO_PRODUCT_DEFAULTS }
@@ -203,7 +228,9 @@ export function ProductSection() {
         setStatus({
           tone: seedSource === "saved" ? "success" : "neutral",
           message:
-            seedSource === "saved"
+            isProductReset
+              ? "Product details were cleared. Add your own details, then save when ready."
+              : seedSource === "saved"
               ? "Loaded your saved product details."
               : seedSource === "neo_default"
                 ? "Neo demo defaults loaded. Review and save if you want to keep them."
@@ -222,6 +249,7 @@ export function ProductSection() {
     study?.product?.updated_at,
     study?.product?.status,
     study?.study_mode?.value,
+    isProductReset,
   ]);
 
   useEffect(() => {
@@ -296,6 +324,7 @@ export function ProductSection() {
 
       await saveProduct(resolvedStudyId, draftPayload);
       await refreshStudy(resolvedStudyId);
+      setIsProductReset(false);
       setSavedSnapshot(JSON.stringify(draftPayload));
       setStatus({
         tone: "success",
@@ -316,19 +345,21 @@ export function ProductSection() {
   }
 
   function handleClearSavedContext() {
+    setIsProductReset(true);
     setDraft(EMPTY_PRODUCT_DRAFT);
-    setStatus({
-      tone: "warning",
-      message:
-        "Product details were reset locally. Save new details if you want to replace what is currently saved.",
-    });
+    // Reset clears the form only. It makes no API call, and isProductReset does not survive a reload,
+    // so the saved section is still there and will load again -- which the message has to say.
+    setStatus(
+      describeProductReset({ hasSavedProduct: study?.product?.status === "saved" })
+    );
   }
 
   function handleResetToNeoDefaults() {
+    setIsProductReset(false);
     setDraft(NEO_PRODUCT_DEFAULTS);
     setStatus({
       tone: "neutral",
-      message: "Neo demo defaults loaded. Review and save if you want to keep them.",
+      message: "Neo demo examples loaded. Review them carefully; they are examples until you save.",
     });
   }
 
@@ -384,6 +415,79 @@ export function ProductSection() {
       tone: "success",
       message: "Autofill details added to your draft. Save when you're ready.",
     });
+  }
+
+  const ACCEPTED_IMAGE_TYPES = ["image/png", "image/jpeg"];
+  const pasteShortcutLabel =
+    typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform)
+      ? "⌘V"
+      : "Ctrl+V";
+
+  function acceptImageFile(file: File | null | undefined) {
+    if (!file) {
+      return;
+    }
+    // The backend only accepts JPG/PNG, so reject anything else here rather
+    // than letting it fail as an opaque provider error after upload.
+    if (!ACCEPTED_IMAGE_TYPES.includes(file.type)) {
+      setStatus({
+        tone: "error",
+        message: `${file.type || "That file"} is not supported. Please use a JPG or PNG image.`,
+      });
+      return;
+    }
+    setUploadedImageFile(file);
+    setStatus({
+      tone: "neutral",
+      message: "Image ready. Run AI image analysis to extract visual details.",
+    });
+  }
+
+  function handleImagePaste(event: React.ClipboardEvent) {
+    const items = Array.from(event.clipboardData?.items ?? []);
+    const imageItem = items.find((item) => item.type.startsWith("image/"));
+    if (!imageItem) {
+      return;
+    }
+    event.preventDefault();
+    acceptImageFile(imageItem.getAsFile());
+  }
+
+  useEffect(() => {
+    // Screenshots are the common case, so accept a paste anywhere in the page
+    // -- but never steal one aimed at a text field the user is typing into.
+    function onWindowPaste(event: ClipboardEvent) {
+      if (uploadedImageFile || latestImageAnalysis) {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      const imageItem = Array.from(event.clipboardData?.items ?? []).find((item) =>
+        item.type.startsWith("image/")
+      );
+      if (!imageItem) {
+        return;
+      }
+      event.preventDefault();
+      acceptImageFile(imageItem.getAsFile());
+    }
+
+    window.addEventListener("paste", onWindowPaste);
+    return () => window.removeEventListener("paste", onWindowPaste);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uploadedImageFile, latestImageAnalysis]);
+
+  function handleImageDrop(event: React.DragEvent) {
+    event.preventDefault();
+    setIsDraggingImage(false);
+    acceptImageFile(event.dataTransfer?.files?.[0]);
   }
 
   async function handleAnalyzeImage() {
@@ -577,10 +681,19 @@ export function ProductSection() {
                     />
                   </Field>
                   <Field label="Industry">
-                    <TextInput
+                    <SelectInput
                       value={draft.industry}
                       onChange={(value) => updateDraft("industry", value)}
-                      placeholder="Backyard modular studios"
+                      options={[
+                        ...(draft.industry && !INDUSTRY_OPTIONS.includes(draft.industry)
+                          ? [{ label: `${draft.industry} (current)`, value: draft.industry }]
+                          : []),
+                        { label: "Choose an industry", value: "" },
+                        ...INDUSTRY_OPTIONS.map((industry) => ({
+                          label: industry,
+                          value: industry,
+                        })),
+                      ]}
                     />
                   </Field>
                 </div>
@@ -730,13 +843,26 @@ export function ProductSection() {
                   ) : null}
 
                   {!uploadedImagePreviewUrl && !latestImageAnalysis ? (
-                    <label className="mt-5 flex cursor-pointer flex-col items-center justify-center rounded-[1.45rem] border border-dashed border-app-border [background:var(--status-neutral-bg)] px-6 py-10 text-center transition hover:border-app-cyan/25 hover:[background:var(--button-secondary-bg-hover)]">
+                    <label
+                      tabIndex={0}
+                      onPaste={handleImagePaste}
+                      onDrop={handleImageDrop}
+                      onDragOver={(event) => {
+                        event.preventDefault();
+                        setIsDraggingImage(true);
+                      }}
+                      onDragLeave={() => setIsDraggingImage(false)}
+                      className={cn(
+                        "mt-5 flex cursor-pointer flex-col items-center justify-center rounded-[1.45rem] border border-dashed px-6 py-10 text-center transition [background:var(--status-neutral-bg)] hover:border-app-cyan/25 hover:[background:var(--button-secondary-bg-hover)] focus:outline-none focus-visible:border-app-cyan/40",
+                        isDraggingImage ? "border-app-cyan/50" : "border-app-border"
+                      )}
+                    >
                       <div className="text-sm font-medium text-app-text">
                         Upload Product Image
                       </div>
                       <p className="mt-2 max-w-xs text-sm leading-6 text-app-muted">
-                        Upload a product image when you want Google Vision to add
-                        visual cues like labels, objects, colors, and text.
+                        Click to browse, drag an image here, or click this box and
+                        press {pasteShortcutLabel} to paste from your clipboard.
                       </p>
                       <div className="mt-3 text-xs uppercase tracking-[0.22em] text-app-muted">
                         JPG, JPEG, PNG
@@ -745,9 +871,7 @@ export function ProductSection() {
                         type="file"
                         accept=".jpg,.jpeg,.png,image/png,image/jpeg"
                         className="hidden"
-                        onChange={(event) =>
-                          setUploadedImageFile(event.target.files?.[0] ?? null)
-                        }
+                        onChange={(event) => acceptImageFile(event.target.files?.[0])}
                       />
                     </label>
                   ) : (
@@ -858,7 +982,7 @@ export function ProductSection() {
                 title="Notes"
                 description="Optional notes, caveats, or special context for this study."
               >
-                <Field label="Notes">
+                <Field label="Anything else you want to add to improve research accuracy.">
                   <TextAreaInput
                     value={draft.notes}
                     onChange={(value) => updateDraft("notes", value)}

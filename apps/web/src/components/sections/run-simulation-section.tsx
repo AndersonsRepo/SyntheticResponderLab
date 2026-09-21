@@ -11,6 +11,8 @@ import {
   SimulationStabilityResultPayload,
   startSimulationRun,
 } from "@/lib/api";
+import { describeRunEvidence } from "@/lib/run-evidence";
+import { describeRunCounts } from "@/lib/run-counts";
 import { cn } from "@/lib/utils";
 import { useStudy } from "@/providers/study-provider";
 import { useSectionRegistry } from "@/providers/section-registry-provider";
@@ -141,11 +143,15 @@ export function RunSimulationSection() {
 
   const runReady = useMemo(() => isReadyToRun(study), [study]);
   const readinessBanner = useMemo(() => buildReadinessBanner(study), [study]);
+  const runEvidence = describeRunEvidence(
+    latestRun?.result?.run_debug_summary ?? null,
+    latestRun?.result?.persona_generation_mode ?? null
+  );
   const latestRunWarnings = latestRun?.result?.warnings ?? [];
   const latestParseWarnings = latestRun?.result?.survey_parse_warnings ?? [];
   const allPersonas = latestRun?.result?.personas ?? [];
-  const completedResponseCount = useMemo(
-    () => getCompletedResponseCount(latestRun?.result),
+  const runCounts = useMemo(
+    () => describeRunCounts(latestRun?.result),
     [latestRun?.result]
   );
   const allResponseRecords =
@@ -269,6 +275,7 @@ export function RunSimulationSection() {
     <SectionWrapper
       id="run-simulation"
       scrollable
+      className="lg:isolate lg:overflow-hidden"
       contentClassName="relative scrollbar-hidden"
     >
       <div className="grid items-start gap-8">
@@ -365,8 +372,9 @@ export function RunSimulationSection() {
                   <>
                     <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                       <MetaCard
-                        label="Responses"
-                        value={String(completedResponseCount)}
+                        label={runCounts.responsesLabel}
+                        value={runCounts.responsesValue}
+                        caption={runCounts.detail}
                       />
                       <MetaCard
                         label="Experiment mode"
@@ -381,6 +389,8 @@ export function RunSimulationSection() {
                         value={String(latestRun.result.question_count ?? 0)}
                       />
                     </div>
+
+                    <AnswerSourcingPanel evidence={runEvidence} />
 
                     {latestRunWarnings.length > 0 || latestParseWarnings.length > 0 ? (
                       <div className="mt-5 grid gap-4 xl:grid-cols-2">
@@ -539,9 +549,14 @@ function buildRunStatus(
   if (latestRun?.status === "completed" && latestRun.result) {
     const warningCount = latestRun.result.warnings?.length ?? 0;
     if (warningCount > 0) {
+      const warningPreview = (latestRun.result.warnings ?? [])
+        .slice(0, 2)
+        .map((warning) => String(warning).trim())
+        .filter(Boolean)
+        .join(" | ");
       return {
         tone: "warning",
-        message: `Run completed with ${warningCount} warning${warningCount === 1 ? "" : "s"}. Review the prompt setup and result summary before moving to Analysis.`,
+        message: `Run completed with ${warningCount} warning${warningCount === 1 ? "" : "s"}. ${warningPreview ? `What happened: ${warningPreview} ` : ""}See the “Run warnings” panel below for the full details and where to look before moving to Result.`,
       };
     }
     return {
@@ -640,38 +655,6 @@ function formatMode(mode?: string | null) {
   return mode || "Unknown";
 }
 
-function getCompletedResponseCount(result?: SimulationRunResultPayload | null) {
-  if (!result) {
-    return 0;
-  }
-
-  const respondentIds = new Set(
-    (result.response_records ?? [])
-      .map((record) => toOptionalString(record.respondent_id))
-      .filter((value): value is string => Boolean(value))
-  );
-  if (respondentIds.size > 0) {
-    return respondentIds.size;
-  }
-
-  const generatedAnswers = Number(result.total_generated_responses ?? 0);
-  const questionCount = Number(result.question_count ?? 0);
-  if (generatedAnswers > 0 && questionCount > 0) {
-    return Math.max(1, Math.round(generatedAnswers / questionCount));
-  }
-
-  if ((result.personas?.length ?? 0) > 0) {
-    return result.personas?.length ?? 0;
-  }
-
-  const previewRespondentIds = new Set(
-    (result.response_record_preview ?? [])
-      .map((record) => toOptionalString(record.respondent_id))
-      .filter((value): value is string => Boolean(value))
-  );
-  return previewRespondentIds.size;
-}
-
 function formatAnswer(answer: unknown) {
   if (Array.isArray(answer)) {
     return answer.map((value) => String(value)).join(" • ");
@@ -711,13 +694,73 @@ function StatusBanner({
   );
 }
 
-function MetaCard({ label, value }: { label: string; value: string }) {
+function AnswerSourcingPanel({
+  evidence,
+}: {
+  evidence: ReturnType<typeof describeRunEvidence>;
+}) {
+  const toneClass =
+    evidence.tone === "ok"
+      ? "border-emerald-400/30 bg-emerald-400/[0.07] text-emerald-300"
+      : evidence.tone === "caution"
+        ? "border-amber-400/30 bg-amber-400/[0.07] text-amber-300"
+        : evidence.tone === "critical"
+          ? "border-red-400/35 bg-red-400/[0.08] text-red-300"
+          : "border-app-border bg-white/[0.02] text-app-muted";
+
+  return (
+    <div className={cn("mt-5 rounded-[1.45rem] border px-5 py-4", toneClass)}>
+      <div className="flex flex-wrap items-baseline justify-between gap-3">
+        <p className="text-sm font-semibold">{evidence.headline}</p>
+        <p className="font-mono text-sm tabular-nums">{evidence.liveAnswerRateLabel}</p>
+      </div>
+      <p className="mt-1 text-xs leading-5 text-app-muted">{evidence.detail}</p>
+
+      {evidence.available ? (
+        <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 text-xs sm:grid-cols-4">
+          <SourcingStat label="Live answers" value={`${evidence.liveAnswers} / ${evidence.totalAnswers}`} />
+          <SourcingStat label="Fabricated" value={String(evidence.fabricatedAnswers)} />
+          <SourcingStat label="Provider errors" value={String(evidence.providerErrors)} />
+          <SourcingStat label="Malformed JSON" value={String(evidence.malformedJson)} />
+        </dl>
+      ) : null}
+
+      <p className="mt-3 border-t border-white/10 pt-3 text-xs leading-5 text-app-muted">
+        <span className="font-semibold text-app-text">{evidence.personaGrounding.label}.</span>{" "}
+        {evidence.personaGrounding.detail}
+      </p>
+    </div>
+  );
+}
+
+function SourcingStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex flex-col">
+      <dt className="text-[0.62rem] uppercase tracking-[0.12em] text-app-muted">{label}</dt>
+      <dd className="font-mono tabular-nums text-app-text">{value}</dd>
+    </div>
+  );
+}
+
+
+function MetaCard({
+  label,
+  value,
+  caption,
+}: {
+  label: string;
+  value: string;
+  caption?: string;
+}) {
   return (
     <div className="rounded-[1.15rem] border border-white/6 bg-white/[0.03] p-4">
       <div className="text-[0.68rem] uppercase tracking-[0.22em] text-app-muted">
         {label}
       </div>
       <div className="mt-2 text-sm leading-6 text-app-text">{value}</div>
+      {caption ? (
+        <div className="mt-1 text-[0.7rem] leading-5 text-app-muted">{caption}</div>
+      ) : null}
     </div>
   );
 }
@@ -840,13 +883,22 @@ function ResponseRecordCard({
   const questionId = toOptionalString(record.question_id) || "Q";
   const questionText = prettifyQuestionText(record.question_text);
   const answer = formatAnswer(record.answer);
+  // Fabricated rows are stamped with the real model name and are otherwise schema-valid, so without
+  // this marker they are indistinguishable from answers the model actually returned.
+  const isFabricated = record.is_fallback === true;
 
   return (
-    <div className="rounded-[1.2rem] border border-white/6 bg-black/10 p-4">
+    <div
+      className={cn(
+        "rounded-[1.2rem] border p-4",
+        isFabricated ? "border-amber-400/35 bg-amber-400/[0.05]" : "border-white/6 bg-black/10"
+      )}
+    >
       <div className="flex flex-wrap items-center gap-2">
         <BadgeChip>{respondentId}</BadgeChip>
         <BadgeChip>{model}</BadgeChip>
         <BadgeChip tone="neutral">{questionId}</BadgeChip>
+        {isFabricated ? <BadgeChip tone="gold">Fabricated — not from the model</BadgeChip> : null}
       </div>
 
       <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,0.9fr)]">
