@@ -27,6 +27,7 @@ function useIsClassroomDevice(pathname: string) {
 export function UserMenuSlot() {
   const pathname = usePathname();
   const isClassroomDevice = useIsClassroomDevice(pathname);
+  const [endFailed, setEndFailed] = useState(false);
   const isClerkConfigured =
     (process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY?.trim() || "") !== "";
 
@@ -36,13 +37,21 @@ export function UserMenuSlot() {
     <button
       type="button"
       onClick={async () => {
-        await fetch("/api/classroom/end-session", { method: "POST" });
+        // Reload only on a confirmed clear: this is the handoff boundary, and a silent
+        // failure hands the next student the previous one's rooms and spend.
+        const response = await fetch("/api/classroom/end-session", {
+          method: "POST",
+        }).catch(() => null);
+        if (!response?.ok) {
+          setEndFailed(true);
+          return;
+        }
         window.location.reload();
       }}
       title="Ends your session so the next student on this device gets a clean room list"
       className="shrink-0 whitespace-nowrap rounded-full border px-3 py-2 text-[0.7rem] text-app-muted transition hover:text-app-text [background:var(--button-secondary-bg)] [border-color:var(--button-secondary-border)]"
     >
-      End session
+      {endFailed ? "Not ended — try again" : "End session"}
     </button>
   ) : null;
 

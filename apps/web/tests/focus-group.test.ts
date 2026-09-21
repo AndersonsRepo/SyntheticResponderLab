@@ -316,7 +316,11 @@ test("a student can end their session so the next one on the device starts clean
   assert.match(endSessionSource, /cookies\.delete\(CLASSROOM_MODE_COOKIE_NAME\)/);
   assert.match(
     userMenuSource,
-    /fetch\("\/api\/classroom\/end-session", \{ method: "POST" \}\)[\s\S]*?window\.location\.reload\(\)/
+    /fetch\(\s*"\/api\/classroom\/end-session",[\s\S]*?window\.location\.reload\(\)/
   );
-  assert.match(pageSource, /WorkflowNav/);
+  // The rendered element, not the import line: deleting <WorkflowNav /> from the JSX takes
+  // the only remaining end-session control off the page, and an import-only grep stays green.
+  assert.match(pageSource, /<WorkflowNav\s*\/>/);
+  // A failed clear must not look like a successful handoff.
+  assert.match(userMenuSource, /if \(!response\?\.ok\)/);
 });

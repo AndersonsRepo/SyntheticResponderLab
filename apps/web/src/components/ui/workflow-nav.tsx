@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import { BadgeChip } from "@/components/ui/badge-chip";
 import { UserMenuSlot } from "@/components/ui/user-menu-slot";
 import { canOpenCompactAppMenu, standaloneAppLinks } from "@/lib/app-navigation";
+import { isClassroomStudentPage } from "@/lib/classroom-access";
 import { workflowSections, WorkflowSectionId } from "@/lib/workflow-sections";
 import { cn } from "@/lib/utils";
 import { useOptionalSectionRegistry } from "@/providers/section-registry-provider";
@@ -16,11 +17,19 @@ import { useTheme } from "@/providers/theme-provider";
 const APP_LOGO_SRC = "/brand/app-logo.png";
 
 export function WorkflowNav() {
-  // Absent on /interview and /focus-group: those are separate routes with no sections of
-  // their own, so a tab there is a trip home to that section's anchor instead of a scroll.
   const registry = useOptionalSectionRegistry();
   const router = useRouter();
   const pathname = usePathname();
+  // /interview and /focus-group are separate routes with no sections of their own, so a tab
+  // there is a trip home to that section's anchor instead of a scroll. The ROUTE decides
+  // that, not the registry being null: a null on the workflow page means the provider
+  // failed to mount, which must stay as loud as the throwing hook used to be.
+  const isStandaloneRoute = isClassroomStudentPage(pathname);
+  if (!isStandaloneRoute && !registry) {
+    throw new Error(
+      "WorkflowNav rendered on a workflow route with no SectionRegistryProvider above it."
+    );
+  }
   const navigationLocked = registry?.navigationLocked ?? false;
   const scrollToSection =
     registry?.scrollToSection ??
