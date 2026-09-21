@@ -76,7 +76,8 @@ function harness(savedBatches: any[] = [], comparisonFetcher?: Parameters<typeof
     "@/lib/utils": { cn: (...args: unknown[]) => args.filter(Boolean).join(" ") },
     "@/providers/study-provider": { StudyProvider: "provider", useStudy: () => ({ studyId: "std_1" }) },
   };
-  for (const [file, component] of [["badge-chip", "BadgeChip"], ["button", "Button"], ["glass-panel", "GlassPanel"]]) {
+  mocks["@/providers/theme-provider"] = { ThemeProvider: "theme-provider", useTheme: () => ({ theme: "dark", toggle() {} }) };
+  for (const [file, component] of [["badge-chip", "BadgeChip"], ["button", "Button"], ["glass-panel", "GlassPanel"], ["workflow-nav", "WorkflowNav"]]) {
     mocks[`@/components/ui/${file}`] = { [component]: component };
   }
   const source = readFileSync(resolve(__dirname, "../../src/app/interview/page.tsx"), "utf8");
@@ -85,7 +86,14 @@ function harness(savedBatches: any[] = [], comparisonFetcher?: Parameters<typeof
   const storage = { getItem: (key: string) => memory.get(key) ?? null, setItem: (key: string, value: string) => memory.set(key, value), removeItem: (key: string) => memory.delete(key) };
   const dom = { createElement: () => ({ click() {}, remove() {} }), body: { appendChild() {} } };
   new Function("require", "exports", "localStorage", "document", "window", compiled)((name: string) => mocks[name] ?? require(name), exported, storage, dom, { confirm: (message: string) => { confirmations.push(message); return confirmResult; } });
-  const component = exported.default().props.children.type;
+  // ponytail: the page's default export is just provider wrappers; find the one real component inside.
+  const findComponent = (node: any): any => Array.isArray(node)
+    ? node.map(findComponent).find(Boolean)
+    : node && typeof node === "object"
+      ? (typeof node.type === "function" ? node.type : findComponent(node.props?.children))
+      : null;
+  const component = findComponent(exported.default());
+  assert.ok(component, "interview page renders no component inside its providers");
   let tree: Element;
   function render() { cursor = 0; tree = component(); first = false; return tree; }
   render();

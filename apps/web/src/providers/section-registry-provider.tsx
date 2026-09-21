@@ -475,6 +475,11 @@ export function SectionRegistryProvider({ children }: PropsWithChildren) {
   );
 }
 
+export function useOptionalSectionRegistry() {
+  // Null outside a provider. Standalone routes render the nav without one.
+  return useContext(SectionRegistryContext);
+}
+
 export function useSectionRegistry() {
   const context = useContext(SectionRegistryContext);
 

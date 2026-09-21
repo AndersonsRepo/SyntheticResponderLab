@@ -34,7 +34,9 @@ import {
 } from "@/lib/interview-models";
 import { InterviewOperationError, interviewOperation } from "@/lib/standalone-interview";
 import { cn } from "@/lib/utils";
+import { WorkflowNav } from "@/components/ui/workflow-nav";
 import { StudyProvider, useStudy } from "@/providers/study-provider";
+import { ThemeProvider } from "@/providers/theme-provider";
 
 const STAGE_PROMPTS: Record<FocusGroupStage, string> = {
   icebreaker: "Let's go around the room — who lives with you, and what does a weekday look like?",
@@ -46,9 +48,12 @@ const STAGE_PROMPTS: Record<FocusGroupStage, string> = {
 
 export default function FocusGroupPage() {
   return (
-    <StudyProvider>
-      <FocusGroupPageContent />
-    </StudyProvider>
+    <ThemeProvider>
+      <StudyProvider>
+        <WorkflowNav />
+        <FocusGroupPageContent />
+      </StudyProvider>
+    </ThemeProvider>
   );
 }
 
@@ -510,19 +515,6 @@ function FocusGroupPageContent() {
             </Button>
           </div>
         ))}
-        <p className="text-xs text-app-muted">
-          Sharing a classroom machine? End your session before you hand it over — the next student
-          gets a new room list, and cannot see yours.
-        </p>
-        <Button
-          variant="secondary"
-          onClick={async () => {
-            await fetch("/api/classroom/end-session", { method: "POST" });
-            window.location.reload();
-          }}
-        >
-          End my session and hand off this device
-        </Button>
       </GlassPanel>
     </main>
   );

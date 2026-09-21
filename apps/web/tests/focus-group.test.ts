@@ -297,9 +297,30 @@ test("classroom students can drive a room without hitting a login wall", () => {
 test("a student can end their session so the next one on the device starts clean", () => {
   assert.match(endSessionSource, /cookies\.delete\(CLASSROOM_SESSION_COOKIE_NAME\)/);
   assert.match(middlewareSource, /pathname\.startsWith\("\/api\/classroom\/"\)/);
-  assert.match(
-    pageSource,
-    /fetch\("\/api\/classroom\/end-session", \{ method: "POST" \}\)[\s\S]*?window\.location\.reload\(\)/
+  // The control moved off the page and into the nav, where a sign-out would be. It is
+  // reachable from both student pages, and only where there is no Clerk session to end.
+  const userMenuSource = readFileSync(
+    resolve(__dirname, "../../src/components/ui/user-menu-slot.tsx"),
+    "utf8"
   );
-  assert.match(pageSource, /End my session and hand off this device/);
+  assert.match(userMenuSource, /isClassroomStudentPage\(pathname\)/);
+  // Keyed on the classroom marker, not on which auth the deployment uses: classroom mode
+  // runs with Clerk configured too, and there the student would otherwise have no way out.
+  assert.match(userMenuSource, /CLASSROOM_MODE_COOKIE_NAME/);
+  assert.doesNotMatch(
+    userMenuSource,
+    /isClerkConfigured[\s\S]{0,120}end-session/,
+    "the end-session control must not be gated on Clerk being absent"
+  );
+  assert.match(middlewareSource, /CLASSROOM_MODE_COOKIE_NAME, "1"/);
+  assert.match(endSessionSource, /cookies\.delete\(CLASSROOM_MODE_COOKIE_NAME\)/);
+  assert.match(
+    userMenuSource,
+    /fetch\(\s*"\/api\/classroom\/end-session",[\s\S]*?window\.location\.reload\(\)/
+  );
+  // The rendered element, not the import line: deleting <WorkflowNav /> from the JSX takes
+  // the only remaining end-session control off the page, and an import-only grep stays green.
+  assert.match(pageSource, /<WorkflowNav\s*\/>/);
+  // A failed clear must not look like a successful handoff.
+  assert.match(userMenuSource, /if \(!response\?\.ok\)/);
 });

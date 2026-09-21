@@ -36,7 +36,9 @@ import {
   resetExpensiveModelSelection,
 } from "@/lib/interview-models";
 import { cn } from "@/lib/utils";
+import { WorkflowNav } from "@/components/ui/workflow-nav";
 import { StudyProvider, useStudy } from "@/providers/study-provider";
+import { ThemeProvider } from "@/providers/theme-provider";
 
 import { batchExport } from "@/lib/interview-batch-export";
 import { InterviewOperationError, interviewOperation, type Batch, type RegeneratedAnswer } from "@/lib/standalone-interview";
@@ -59,9 +61,12 @@ const SUGGESTED = [
 
 export default function InterviewPage() {
   return (
-    <StudyProvider>
-      <InterviewPageContent />
-    </StudyProvider>
+    <ThemeProvider>
+      <StudyProvider>
+        <WorkflowNav />
+        <InterviewPageContent />
+      </StudyProvider>
+    </ThemeProvider>
   );
 }
 
@@ -462,7 +467,6 @@ function InterviewPageContent() {
   return (
     <main className="min-h-svh px-4 py-10 sm:px-6 lg:px-12">
       <div className="mx-auto w-full max-w-[88rem]">
-        <a href="/" className="underline">Back to home</a>
         <div className="mb-4 flex flex-wrap items-center gap-2.5 sm:gap-3">
           <BadgeChip tone="gold">Interview</BadgeChip>
           <BadgeChip>Student interviews a persona</BadgeChip>

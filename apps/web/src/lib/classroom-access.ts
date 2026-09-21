@@ -1,4 +1,8 @@
 export const CLASSROOM_SESSION_COOKIE_NAME = "synthetic_responder_classroom_session";
+// The session cookie is httpOnly, so nothing in the browser can see it. This marker rides
+// beside it, carries no session value, and is how a client component knows the device is in
+// classroom mode — which Clerk being configured or not does not answer.
+export const CLASSROOM_MODE_COOKIE_NAME = "synthetic_responder_classroom_mode";
 export const CLASSROOM_AUTH_MODE = "classroom-no-login";
 
 const CLASSROOM_SESSION_ID_PATTERN =

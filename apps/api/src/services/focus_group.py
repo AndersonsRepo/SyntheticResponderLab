@@ -122,10 +122,39 @@ _STANCES = (
 assert len(_STANCES) >= MAX_PERSONAS, "every seat in a full room needs its own stance"
 
 
-def room_stance(persona_ids, persona_id: str) -> str:
-    """One disposition per seat, so a room of N draws N different stances.
+# _STANCES are dispositions toward the product, so they cannot appear before the product
+# does. That gate (below) is right, but it leaves icebreaker and space_needs with nothing
+# steering HOW a seat talks: the prompts differ by persona (id and description), yet none of
+# them asks for a distinct voice, so a room of five answers the first two questions in one
+# register. A manner is about how a person talks, not what they think of anything, so it
+# carries no product awareness and is safe at every stage.
+_MANNERS = (
+    "You answer briefly. Two or three sentences and you are done; you do not pad with"
+    " background nobody asked for.",
+    "You think out loud and reach your point late. Start with the specific thing that"
+    " happened recently, then say what it means.",
+    "You qualify almost everything -- 'it depends', 'usually', 'I guess'. Stating something"
+    " flatly makes you uncomfortable when the real answer varies.",
+    "You state things flatly and do not hedge. If you are unsure you say so outright, but you"
+    " never soften the part you do know.",
+    "You are the one who disagrees. When the room converges, look for what nobody said and"
+    " name where your own experience does not match theirs.",
+    "You reach for concrete numbers and times -- how many minutes, how many times a week --"
+    " instead of calling something 'a lot' or 'a while'.",
+    "You volunteer more than was asked: a side story, an aside about someone else, the thing"
+    " it reminds you of.",
+    "You answer narrowly and literally. Respond to the question that was actually asked and"
+    " do not extend it.",
+)
 
-    The modulo never actually wraps — the assert above keeps _STANCES at least
+# Same rule as _STANCES: no two seats in a full room share one.
+assert len(_MANNERS) >= MAX_PERSONAS, "every seat in a full room needs its own manner"
+
+
+def _seat_pick(options, persona_ids, persona_id: str) -> str:
+    """Give each seat its own entry from options, deterministically.
+
+    The modulo never actually wraps — the asserts above keep every list at least
     MAX_PERSONAS long — it is there so a larger room degrades to a repeat rather
     than an IndexError mid-answer.
     """
@@ -133,7 +162,22 @@ def room_stance(persona_ids, persona_id: str) -> str:
     # The roster is what builds the answer rows, so a persona is always on it. Falling
     # back to the first seat keeps a malformed room answering rather than raising mid-turn.
     seat = seats.index(persona_id) if persona_id in seats else 0
-    return _STANCES[seat % len(_STANCES)]
+    return options[seat % len(options)]
+
+
+def room_stance(persona_ids, persona_id: str) -> str:
+    """One disposition per seat, so a room of N draws N different stances."""
+    return _seat_pick(_STANCES, persona_ids, persona_id)
+
+
+def room_manner(persona_ids, persona_id: str) -> str:
+    """One speaking manner per seat, drawn the same way a stance is.
+
+    Kept separate from room_stance because the two answer different questions: a stance is
+    what this person thinks of the product, a manner is how they talk at all. Only the
+    second one is safe before the product has been introduced.
+    """
+    return _seat_pick(_MANNERS, persona_ids, persona_id)
 
 
 def persona_description(profile: dict) -> str:
@@ -141,7 +185,7 @@ def persona_description(profile: dict) -> str:
     return build_persona_description(profile)
 
 
-def build_room_system_prompt(profile: dict, stage: str, stance: str = "") -> str:
+def build_room_system_prompt(profile: dict, stage: str, stance: str = "", manner: str = "") -> str:
     context = _STAGE_CONTEXT[stage]
     product = f"\n{context}\n" if context else "\n"
     # Pre-exposure stages get no stance. Every disposition below is about the product,
@@ -149,13 +193,15 @@ def build_room_system_prompt(profile: dict, stage: str, stance: str = "") -> str
     # the contamination _STAGE_CONTEXT exists to prevent (refuter FG-STANCE-2). Gate on
     # the same boundary rather than a second copy of the stage list.
     stance_block = f"\nYOUR STANCE GOING IN:\n{stance}\n" if stance and context else ""
+    # A manner carries no product awareness, so unlike a stance it is not gated on context.
+    manner_block = f"\nHOW YOU TALK:\n{manner}\n" if manner else ""
     return f"""You are role-playing as a real person taking part in a moderated focus group with other participants.
 
 You are participant {profile.get('persona_id', 'unknown')} in this room.
 
 YOUR PERSONA:
 {persona_description(profile)}
-{product}{stance_block}
+{product}{stance_block}{manner_block}
 INSTRUCTIONS:
 - Stay fully in character. Answer the moderator as this person would, in first person.
 - This is a group, not an interview. Whenever other participants' answers are shown to you,
@@ -384,9 +430,11 @@ def ask_round(session, settings, study, room_id, payload):
         nonlocal charged_any
         persona = session.get(Persona, answer["persona_id"])
         stage_ = round_["stage"]
-        stance = room_stance(room.payload_json["persona_ids"], answer["persona_id"])
+        seats = room.payload_json["persona_ids"]
+        stance = room_stance(seats, answer["persona_id"])
+        manner = room_manner(seats, answer["persona_id"])
         prior = [{"role": "system",
-                  "content": build_room_system_prompt(persona.profile_json, stage_, stance)},
+                  "content": build_room_system_prompt(persona.profile_json, stage_, stance, manner)},
                  *_prior_messages(history, answer["persona_id"])]
         question_text = round_["question"]
         budget_error = None

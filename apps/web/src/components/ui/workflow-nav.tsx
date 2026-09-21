@@ -2,20 +2,38 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
 import { BadgeChip } from "@/components/ui/badge-chip";
 import { UserMenuSlot } from "@/components/ui/user-menu-slot";
 import { canOpenCompactAppMenu, standaloneAppLinks } from "@/lib/app-navigation";
-import { workflowSections } from "@/lib/workflow-sections";
+import { isClassroomStudentPage } from "@/lib/classroom-access";
+import { workflowSections, WorkflowSectionId } from "@/lib/workflow-sections";
 import { cn } from "@/lib/utils";
-import { useSectionRegistry } from "@/providers/section-registry-provider";
+import { useOptionalSectionRegistry } from "@/providers/section-registry-provider";
 import { useTheme } from "@/providers/theme-provider";
 
 const APP_LOGO_SRC = "/brand/app-logo.png";
 
 export function WorkflowNav() {
-  const { activeSectionId, navigationLocked, scrollToSection } = useSectionRegistry();
+  const registry = useOptionalSectionRegistry();
+  const router = useRouter();
+  const pathname = usePathname();
+  // /interview and /focus-group are separate routes with no sections of their own, so a tab
+  // there is a trip home to that section's anchor instead of a scroll. The ROUTE decides
+  // that, not the registry being null: a null on the workflow page means the provider
+  // failed to mount, which must stay as loud as the throwing hook used to be.
+  const isStandaloneRoute = isClassroomStudentPage(pathname);
+  if (!isStandaloneRoute && !registry) {
+    throw new Error(
+      "WorkflowNav rendered on a workflow route with no SectionRegistryProvider above it."
+    );
+  }
+  const navigationLocked = registry?.navigationLocked ?? false;
+  const scrollToSection =
+    registry?.scrollToSection ??
+    ((id: WorkflowSectionId) => router.push(id === "main" ? "/" : `/#${id}`));
   const { isReady, theme, toggleTheme } = useTheme();
   const [isCompactMenuOpen, setIsCompactMenuOpen] = useState(false);
   const compactMenuDisabled = !canOpenCompactAppMenu(
@@ -35,15 +53,20 @@ export function WorkflowNav() {
     "research-brief",
     "interview-insights",
   ]);
-  const resolvedActiveSectionId =
-    activeSectionId === "main" ? "study-mode" : activeSectionId;
+  // Off the workflow page nothing in the workflow is current, so no tab is highlighted.
+  const resolvedActiveSectionId = !registry
+    ? null
+    : registry.activeSectionId === "main"
+    ? "study-mode"
+    : registry.activeSectionId;
+  const standaloneHere = standaloneAppLinks.find((link) => link.href === pathname);
 
   const currentIndex = Math.max(
     0,
     navSections.findIndex((section) => {
       const isInterviewGroupTab = section.id === "interview-synthesis";
       return isInterviewGroupTab
-        ? interviewGroupIds.has(resolvedActiveSectionId)
+        ? resolvedActiveSectionId !== null && interviewGroupIds.has(resolvedActiveSectionId)
         : resolvedActiveSectionId === section.id;
     })
   );
@@ -88,11 +111,12 @@ export function WorkflowNav() {
           </button>
 
           <nav className="min-w-0 flex-1 overflow-hidden">
-            <div className="grid w-full grid-cols-10 items-center rounded-[1.5rem] border px-1 py-1.5 [background:var(--theme-panel-inline-gradient)] [border-color:var(--button-secondary-border)] [box-shadow:inset_0_1px_0_rgba(255,255,255,0.03)] xl:px-2">
+            <div className="grid w-full grid-flow-col auto-cols-fr items-center rounded-[1.5rem] border px-1 py-1.5 [background:var(--theme-panel-inline-gradient)] [border-color:var(--button-secondary-border)] [box-shadow:inset_0_1px_0_rgba(255,255,255,0.03)] xl:px-2">
               {navSections.map((section) => {
                 const isInterviewGroupTab = section.id === "interview-synthesis";
                 const isActive = isInterviewGroupTab
-                  ? interviewGroupIds.has(resolvedActiveSectionId)
+                  ? resolvedActiveSectionId !== null &&
+                    interviewGroupIds.has(resolvedActiveSectionId)
                   : resolvedActiveSectionId === section.id;
 
                 return (
@@ -127,7 +151,13 @@ export function WorkflowNav() {
                 <Link
                   key={link.href}
                   href={link.href}
-                  className="relative shrink-0 rounded-full px-3.5 py-2 font-medium tracking-[0.003em] text-app-muted transition-all duration-200 hover:text-app-text hover:[background:var(--button-secondary-bg-hover)]"
+                  aria-current={link.href === pathname ? "page" : undefined}
+                  className={cn(
+                    "relative shrink-0 rounded-full px-3.5 py-2 font-medium tracking-[0.003em] transition-all duration-200",
+                    link.href === pathname
+                      ? "border [background:var(--nav-active-pill-bg)] [border-color:var(--button-secondary-border)] text-app-text"
+                      : "text-app-muted hover:text-app-text hover:[background:var(--button-secondary-bg-hover)]"
+                  )}
                 >
                   <span className="block whitespace-nowrap text-[clamp(0.68rem,0.82vw,0.98rem)] leading-none">
                     {link.label}
@@ -221,7 +251,7 @@ export function WorkflowNav() {
                       Current Step
                     </span>
                     <span className="mt-1 block truncate text-[0.95rem] font-medium text-app-text sm:text-[1rem]">
-                      {currentSection?.label ?? "Set Up"}
+                      {standaloneHere?.label ?? currentSection?.label ?? "Set Up"}
                     </span>
                   </span>
                   <span
@@ -234,30 +264,36 @@ export function WorkflowNav() {
                 </span>
               </button>
 
-              <div className="shrink-0 rounded-[1.05rem] border px-3 py-2 text-right [background:var(--status-neutral-bg)] [border-color:var(--button-secondary-border)]">
-                <div className="text-[0.6rem] uppercase tracking-[0.18em] text-app-muted">Progress</div>
-                <div className="mt-1 text-[0.92rem] font-medium text-app-text">
-                  {currentIndex + 1} of {navSections.length}
+              {registry ? (
+                <div className="shrink-0 rounded-[1.05rem] border px-3 py-2 text-right [background:var(--status-neutral-bg)] [border-color:var(--button-secondary-border)]">
+                  <div className="text-[0.6rem] uppercase tracking-[0.18em] text-app-muted">Progress</div>
+                  <div className="mt-1 text-[0.92rem] font-medium text-app-text">
+                    {currentIndex + 1} of {navSections.length}
+                  </div>
                 </div>
-              </div>
+              ) : null}
             </div>
 
-            <div className="mt-3 h-1.5 overflow-hidden rounded-full border [background:var(--status-neutral-bg)] [border-color:var(--button-secondary-border)]">
-              <motion.div
-                animate={{ width: `${Math.max(progressRatio * 100, 8)}%` }}
-                transition={{ duration: 0.3, ease: "easeOut" }}
-                className="h-full rounded-full bg-[linear-gradient(90deg,rgba(15,216,255,0.9),rgba(216,186,103,0.72))]"
-              />
-            </div>
+            {registry ? (
+              <>
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full border [background:var(--status-neutral-bg)] [border-color:var(--button-secondary-border)]">
+                  <motion.div
+                    animate={{ width: `${Math.max(progressRatio * 100, 8)}%` }}
+                    transition={{ duration: 0.3, ease: "easeOut" }}
+                    className="h-full rounded-full bg-[linear-gradient(90deg,rgba(15,216,255,0.9),rgba(216,186,103,0.72))]"
+                  />
+                </div>
 
-            <div className="mt-3 flex items-center justify-between gap-3 text-[0.72rem] text-app-muted">
-              <span className="min-w-0 truncate">
-                {nearbySections.prev ? `Prev: ${nearbySections.prev.label}` : "Start"}
-              </span>
-              <span className="min-w-0 truncate text-right">
-                {nearbySections.next ? `Next: ${nearbySections.next.label}` : "Final step"}
-              </span>
-            </div>
+                <div className="mt-3 flex items-center justify-between gap-3 text-[0.72rem] text-app-muted">
+                  <span className="min-w-0 truncate">
+                    {nearbySections.prev ? `Prev: ${nearbySections.prev.label}` : "Start"}
+                  </span>
+                  <span className="min-w-0 truncate text-right">
+                    {nearbySections.next ? `Next: ${nearbySections.next.label}` : "Final step"}
+                  </span>
+                </div>
+              </>
+            ) : null}
 
             <AnimatePresence initial={false}>
               {isCompactMenuOpen ? (
@@ -273,7 +309,8 @@ export function WorkflowNav() {
                     {navSections.map((section, index) => {
                       const isInterviewGroupTab = section.id === "interview-synthesis";
                       const isActive = isInterviewGroupTab
-                        ? interviewGroupIds.has(resolvedActiveSectionId)
+                        ? resolvedActiveSectionId !== null &&
+                          interviewGroupIds.has(resolvedActiveSectionId)
                         : resolvedActiveSectionId === section.id;
                       const isCompleted = index < currentIndex;
 
@@ -323,7 +360,13 @@ export function WorkflowNav() {
                         key={link.href}
                         href={link.href}
                         onClick={() => setIsCompactMenuOpen(false)}
-                        className="flex w-full items-center justify-between gap-3 rounded-[1rem] border px-3.5 py-2.5 text-left transition [background:var(--theme-panel-inline-gradient)] [border-color:var(--button-secondary-border)]"
+                        aria-current={link.href === pathname ? "page" : undefined}
+                        className={cn(
+                          "flex w-full items-center justify-between gap-3 rounded-[1rem] border px-3.5 py-2.5 text-left transition [border-color:var(--button-secondary-border)]",
+                          link.href === pathname
+                            ? "[background:var(--nav-active-pill-bg)]"
+                            : "[background:var(--theme-panel-inline-gradient)]"
+                        )}
                       >
                         <div className="flex min-w-0 items-center gap-3">
                           <div className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-app-cyan/30 bg-app-cyan/12 text-app-cyan">
@@ -334,7 +377,7 @@ export function WorkflowNav() {
                               {link.label}
                             </div>
                             <div className="mt-1 text-[0.66rem] uppercase tracking-[0.18em] text-app-muted">
-                              Standalone section
+                              {link.href === pathname ? "Current" : "Standalone section"}
                             </div>
                           </div>
                         </div>

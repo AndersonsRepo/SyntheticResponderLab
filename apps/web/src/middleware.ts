@@ -8,6 +8,7 @@ import {
   isAppAccessGateEnabled,
 } from "./lib/access-control";
 import {
+  CLASSROOM_MODE_COOKIE_NAME,
   CLASSROOM_SESSION_COOKIE_NAME,
   isClassroomInterviewApiRequest,
   isClassroomNoLoginEnabled,
@@ -50,6 +51,13 @@ function classroomAccessResponse(request: NextRequest) {
 
   if (isClassroomStudentPage(pathname)) {
     const response = NextResponse.next();
+    response.cookies.set(CLASSROOM_MODE_COOKIE_NAME, "1", {
+      httpOnly: false,
+      sameSite: "lax",
+      secure: request.nextUrl.protocol === "https:",
+      path: "/",
+      maxAge: 60 * 60 * 12,
+    });
     if (!isValidClassroomSessionId(sessionId)) {
       response.cookies.set(CLASSROOM_SESSION_COOKIE_NAME, crypto.randomUUID(), {
         httpOnly: true,
