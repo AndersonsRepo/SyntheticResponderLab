@@ -900,11 +900,12 @@ def test_no_stance_reaches_a_pre_exposure_stage():
 
 
 def test_every_seat_in_a_room_gets_a_different_manner():
-    """The first two rounds are uniform unless the seats talk differently.
+    """The first two rounds sound uniform unless the seats talk differently.
 
-    _STANCES cannot run before the product is introduced, so without a manner every seat
-    sends a byte-identical system prompt at icebreaker and space_needs — which is what a
-    room answering the first question in one voice actually looks like.
+    _STANCES cannot run before the product is introduced, so at icebreaker and space_needs
+    nothing in the prompt asks one seat to sound unlike another. The prompts are not
+    identical — persona id and description differ — but nothing steers the register, which
+    is what a room answering the first question in one voice actually looks like.
     """
     for size in range(1, fg.MAX_PERSONAS + 1):
         roster = [f"P{i:03d}" for i in range(1, size + 1)]
@@ -928,7 +929,11 @@ def test_manner_reaches_every_stage_including_pre_exposure():
 
 
 def test_manner_changes_the_prompt_between_seats():
-    """Two seats that share a prompt share a cached answer, so the manner must differ."""
+    """The manner alone must move the prompt, so it cannot be a no-op the persona masks.
+
+    One profile is used for both seats on purpose: that isolates the manner as the only
+    varying input. A real room also differs by persona id and description.
+    """
     profile = {"persona_id": "P001"}
     first = fg.build_room_system_prompt(profile, "icebreaker", "", fg.room_manner(THREE, "P001"))
     second = fg.build_room_system_prompt(profile, "icebreaker", "", fg.room_manner(THREE, "P002"))

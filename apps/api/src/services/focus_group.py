@@ -123,9 +123,10 @@ assert len(_STANCES) >= MAX_PERSONAS, "every seat in a full room needs its own s
 
 
 # _STANCES are dispositions toward the product, so they cannot appear before the product
-# does. That gate (below) is right, but it leaves icebreaker and space_needs undifferentiated
-# -- every seat runs the identical prompt, and a room of five answers the first two questions
-# in one voice. A manner is about HOW a person talks, not what they think of anything, so it
+# does. That gate (below) is right, but it leaves icebreaker and space_needs with nothing
+# steering HOW a seat talks: the prompts differ by persona (id and description), yet none of
+# them asks for a distinct voice, so a room of five answers the first two questions in one
+# register. A manner is about how a person talks, not what they think of anything, so it
 # carries no product awareness and is safe at every stage.
 _MANNERS = (
     "You answer briefly. Two or three sentences and you are done; you do not pad with"
