@@ -897,3 +897,58 @@ def test_no_stance_reaches_a_pre_exposure_stage():
         else:
             assert "YOUR STANCE GOING IN:" not in prompt, f"{stage} leaked a stance"
             assert stance not in prompt
+
+
+def test_every_seat_in_a_room_gets_a_different_manner():
+    """The first two rounds are uniform unless the seats talk differently.
+
+    _STANCES cannot run before the product is introduced, so without a manner every seat
+    sends a byte-identical system prompt at icebreaker and space_needs — which is what a
+    room answering the first question in one voice actually looks like.
+    """
+    for size in range(1, fg.MAX_PERSONAS + 1):
+        roster = [f"P{i:03d}" for i in range(1, size + 1)]
+        seated = [fg.room_manner(roster, pid) for pid in roster]
+        assert len(set(seated)) == size, f"a room of {size} doubled up on a manner"
+
+    manners = [fg.room_manner(THREE, pid) for pid in THREE]
+    assert all(m.strip() for m in manners)
+    # Stable across retries, so a re-asked answer is not a different person.
+    assert manners == [fg.room_manner(THREE, pid) for pid in THREE]
+
+
+def test_manner_reaches_every_stage_including_pre_exposure():
+    """The whole point is the stages a stance cannot reach."""
+    profile = {"persona_id": "P001"}
+    manner = fg.room_manner(THREE, "P001")
+    for stage in fg._STAGE_CONTEXT:
+        prompt = fg.build_room_system_prompt(profile, stage, "", manner)
+        assert "HOW YOU TALK:" in prompt, f"{stage} lost its manner"
+        assert manner in prompt, f"{stage} dropped the manner text"
+
+
+def test_manner_changes_the_prompt_between_seats():
+    """Two seats that share a prompt share a cached answer, so the manner must differ."""
+    profile = {"persona_id": "P001"}
+    first = fg.build_room_system_prompt(profile, "icebreaker", "", fg.room_manner(THREE, "P001"))
+    second = fg.build_room_system_prompt(profile, "icebreaker", "", fg.room_manner(THREE, "P002"))
+    bare = fg.build_room_system_prompt(profile, "icebreaker")
+    assert first != second
+    assert first != bare and second != bare
+
+
+def test_no_manner_mentions_the_product():
+    """A manner that leaks product awareness is a stance wearing a different label.
+
+    This is the FG-STANCE-2 guarantee restated for the ungated block: manners run before
+    the concept is introduced, so any of them naming it would contaminate exactly the
+    answers _STAGE_CONTEXT keeps clean.
+    """
+    banned = ("product", "buy", "purchase", "price", "cost", "device", "smart",
+              "brand", "company", "subscription", "app")
+    # Whole words only: a substring check flags "app" inside "happened", which is how the
+    # first version of this test failed on prose that named nothing at all.
+    for manner in fg._MANNERS:
+        lowered = manner.lower()
+        for word in banned:
+            assert not re.search(rf"\b{word}\b", lowered), f"manner names {word!r}: {manner!r}"
