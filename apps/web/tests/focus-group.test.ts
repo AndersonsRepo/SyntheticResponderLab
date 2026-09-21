@@ -304,6 +304,16 @@ test("a student can end their session so the next one on the device starts clean
     "utf8"
   );
   assert.match(userMenuSource, /isClassroomStudentPage\(pathname\)/);
+  // Keyed on the classroom marker, not on which auth the deployment uses: classroom mode
+  // runs with Clerk configured too, and there the student would otherwise have no way out.
+  assert.match(userMenuSource, /CLASSROOM_MODE_COOKIE_NAME/);
+  assert.doesNotMatch(
+    userMenuSource,
+    /isClerkConfigured[\s\S]{0,120}end-session/,
+    "the end-session control must not be gated on Clerk being absent"
+  );
+  assert.match(middlewareSource, /CLASSROOM_MODE_COOKIE_NAME, "1"/);
+  assert.match(endSessionSource, /cookies\.delete\(CLASSROOM_MODE_COOKIE_NAME\)/);
   assert.match(
     userMenuSource,
     /fetch\("\/api\/classroom\/end-session", \{ method: "POST" \}\)[\s\S]*?window\.location\.reload\(\)/

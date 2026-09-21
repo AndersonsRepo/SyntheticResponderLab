@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 
-import { CLASSROOM_SESSION_COOKIE_NAME } from "@/lib/classroom-access";
+import {
+  CLASSROOM_MODE_COOKIE_NAME,
+  CLASSROOM_SESSION_COOKIE_NAME,
+} from "@/lib/classroom-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,5 +18,6 @@ export const dynamic = "force-dynamic";
 export async function POST() {
   const response = NextResponse.json({ data: { ended: true } });
   response.cookies.delete(CLASSROOM_SESSION_COOKIE_NAME);
+  response.cookies.delete(CLASSROOM_MODE_COOKIE_NAME);
   return response;
 }
