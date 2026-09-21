@@ -102,7 +102,7 @@ export function WorkflowNav() {
           </button>
 
           <nav className="min-w-0 flex-1 overflow-hidden">
-            <div className="grid w-full grid-cols-10 items-center rounded-[1.5rem] border px-1 py-1.5 [background:var(--theme-panel-inline-gradient)] [border-color:var(--button-secondary-border)] [box-shadow:inset_0_1px_0_rgba(255,255,255,0.03)] xl:px-2">
+            <div className="grid w-full grid-flow-col auto-cols-fr items-center rounded-[1.5rem] border px-1 py-1.5 [background:var(--theme-panel-inline-gradient)] [border-color:var(--button-secondary-border)] [box-shadow:inset_0_1px_0_rgba(255,255,255,0.03)] xl:px-2">
               {navSections.map((section) => {
                 const isInterviewGroupTab = section.id === "interview-synthesis";
                 const isActive = isInterviewGroupTab
