@@ -650,3 +650,43 @@ test("the discard warning names every artifact the click destroys", async () => 
   assert.match(warning, /interview message/);
   assert.match(warning, /compared model answer/, "the paid comparison answers go too");
 });
+
+test("the interview step carries its own copy of the persona list, and it switches", async () => {
+  const ui = harness();
+  await ui.settle();
+  const named = (id: string) =>
+    ui.nodes().filter(
+      (node) => node.type === "button" && JSON.stringify(node.props.children ?? "").includes(id)
+    );
+  assert.equal(
+    named("neo-002").length,
+    2,
+    "one list in the choose step, one in the interview step"
+  );
+  // Click the interview step's copy specifically, not the one this page always had.
+  named("neo-002")[1].props.onClick();
+  ui.render();
+  assert.match(ui.text(), /Interviewing \(neo-002\)/);
+});
+
+test("a persona switch cannot land while the transcript export it advises is still running", async () => {
+  const ui = harness();
+  await ui.settle();
+  await ui.button("Ask").props.onClick();
+  await ui.settle();
+  let finishExport!: (value: any) => void;
+  ui.api.getInterviewTranscriptExport = () => new Promise((resolve) => { finishExport = resolve; });
+  const exportButton = ui
+    .nodes()
+    .find((node) => node.type === "Button" && JSON.stringify(node.props.children).includes("Markdown"))!;
+  const exporting = exportButton.props.onClick();
+  await ui.settle();
+  const personaButton = ui
+    .nodes()
+    .find((node) => node.type === "button" && JSON.stringify(node.props.children ?? "").includes("neo-002"))!;
+  assert.equal(personaButton.props.disabled, true, "switching is closed while the export is in flight");
+  finishExport({ blob: new Blob(["t"]), filename: "t.md" });
+  await exporting;
+  await ui.settle();
+  assert.match(ui.text(), /Original 1/);
+});
