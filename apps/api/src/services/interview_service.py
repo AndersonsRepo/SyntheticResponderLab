@@ -370,7 +370,26 @@ def save_research_brief(
 # Interview insights (theme extraction)
 # ---------------------------------------------------------------------------
 
-def _insights_system_prompt(brief_context: str = "") -> str:
+# Only the classroom path reads the surprise and the answer options; asking the other
+# path for them is output it pays for and drops, and output it can run past its cap on.
+_MEMO_SECTION = """Also write the rest of the one-page memo this student has to hand in:
+- "surprise": the single most surprising thing anyone said, in one sentence, with the verbatim quote it rests on and whose it is.
+- "answer_options": at least 3 closed-ended survey options, each one phrased in a participant's own words — copy the wording from an answer rather than writing your own.
+
+Every quote and every answer option is checked against the transcript the same way, character for character, from a single answer by the persona you name.
+
+"""
+_MEMO_SHAPE = """  "surprise": {"summary": "one sentence", "quote": "<verbatim>", "quote_persona_id": "..."},
+  "answer_options": [
+    {"text": "<verbatim participant wording>", "quote_persona_id": "..."},
+    ...
+  ]
+"""
+
+
+def _insights_system_prompt(brief_context: str = "", memo: bool = True) -> str:
+    memo_section = _MEMO_SECTION if memo else ""
+    memo_shape = _MEMO_SHAPE if memo else ""
     return f"""\
 You are a qualitative research analyst. Your task is to extract recurring themes from a corpus of \
 synthetic depth-interview transcripts.{brief_context}
@@ -386,13 +405,7 @@ The quote is checked against the transcript, and the whole response is rejected 
 
 "count" is how many of the interviews below mention the theme. It is a whole number and cannot exceed the number of interviews.
 
-Also write the rest of the one-page memo this student has to hand in:
-- "surprise": the single most surprising thing anyone said, in one sentence, with the verbatim quote it rests on and whose it is.
-- "answer_options": at least 3 closed-ended survey options, each one phrased in a participant's own words — copy the wording from an answer rather than writing your own.
-
-Every quote and every answer option is checked against the transcript the same way, character for character, from a single answer by the persona you name.
-
-Return ONLY a JSON object:
+{memo_section}Return ONLY a JSON object:
 {{
   "themes": [
     {{
@@ -405,12 +418,7 @@ Return ONLY a JSON object:
     }},
     ...
   ],
-  "surprise": {{"summary": "one sentence", "quote": "<verbatim>", "quote_persona_id": "..."}},
-  "answer_options": [
-    {{"text": "<verbatim participant wording>", "quote_persona_id": "..."}},
-    ...
-  ]
-}}"""
+{memo_shape}}}"""
 
 
 def _strip_json_fence(raw: str) -> str:
@@ -439,10 +447,10 @@ def rendered_pairs(pairs, max_pairs: int = 30):
             for p, answers in shown if answers][:max_pairs]
 
 
-def _extract_insight_themes(pairs, brief_context, call):
+def _extract_insight_themes(pairs, brief_context, call, memo: bool = True):
     """Shared extraction protocol; callers own authorization, usage and caching."""
     pairs = rendered_pairs(pairs)
-    raw = call(system_prompt=_insights_system_prompt(brief_context),
+    raw = call(system_prompt=_insights_system_prompt(brief_context, memo),
                user_prompt=f"There are {len(pairs)} interviews.\n\nINTERVIEW TRANSCRIPTS:\n"
                            f"{_build_transcript_corpus(pairs)}")
     # The whole memo, not just its themes: the surprise and the answer options are
@@ -503,10 +511,11 @@ def get_interview_insights(
             brief_context = f"\nRESEARCH QUESTION: {primary_q}\n"
 
     try:
-        # This legacy path only ever surfaced themes; the memo fields ride the same
-        # response and are simply not read here.
+        # This legacy path only ever surfaced themes, so it does not ask for the memo:
+        # tokens it drops are still billed, and still eat the response cap.
         themes = _extract_insight_themes(pairs, brief_context, lambda **prompts: _call_openrouter_json(
-            api_key=api_key, model="openai/gpt-4o-mini", timeout=90, **prompts)).get("themes") or []
+            api_key=api_key, model="openai/gpt-4o-mini", timeout=90, **prompts),
+            memo=False).get("themes") or []
     except Exception as exc:
         return {
             "available": False,
@@ -1530,10 +1539,7 @@ def _call_openrouter_json(
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.3,
-        # The memo is themes + a surprise + 3+ grounded options, all carrying verbatim
-        # quotes. Truncation here is unparseable JSON that is billed and saves nothing,
-        # and unused headroom costs nothing — only emitted tokens are charged.
-        "max_tokens": 4000,
+        "max_tokens": 2000,
     }
     if model.startswith("openai/"):
         body["response_format"] = {"type": "json_object"}
@@ -1559,6 +1565,7 @@ def _call_openrouter_messages(
     messages: list[dict[str, str]],
     timeout: int = 90,
     max_attempts: int = _MAX_RETRIES,
+    max_tokens: int = 2000,
 ) -> OpenRouterChatResult:
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -1571,7 +1578,8 @@ def _call_openrouter_messages(
         # ponytail: reasoning tokens count against max_tokens, so a reasoning model
         # (qwen3.7-plus) burns the whole budget thinking and returns empty content.
         # Cap the thinking, leave room for the answer. Inert on non-reasoning models.
-        "max_tokens": 2000,
+        # A persona answer is one paragraph; only the memo extraction raises this.
+        "max_tokens": max_tokens,
         "reasoning": {"max_tokens": 400},
     }
 

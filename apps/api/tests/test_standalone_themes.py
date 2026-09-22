@@ -600,3 +600,43 @@ def test_standalone_themes_rejects_a_too_short_answer_option(completed):
     saved = client.post(url, json=payload).json()['data']['insights']['saved']
     assert saved['themes'] is None
     assert saved['reason'] == 'Answer option 2 is shorter than 3 words, which is not a survey option'
+
+
+def test_standalone_themes_asks_for_room_the_memo_needs(completed):
+    """The cap that matters is the one on the call the memo is actually made by."""
+    client, url, batch, calls, themes, payload, memo = completed
+    client.post(url, json=payload)
+    assert calls[0]['max_tokens'] == 4000
+
+
+def test_interview_insights_prompt_omits_the_memo_it_discards():
+    """The legacy path reads only themes, so it must not pay for a surprise or options."""
+    from src.services.interview_service import _insights_system_prompt
+    classroom = _insights_system_prompt()
+    legacy = _insights_system_prompt(memo=False)
+    assert 'answer_options' in classroom and 'surprise' in classroom
+    assert 'answer_options' not in legacy and 'surprise' not in legacy
+    assert 'Return ONLY a JSON object' in legacy
+
+
+def test_standalone_themes_reask_recovers_a_rejected_surprise(completed):
+    """A rejected surprise routes through the same one re-ask, which must name it."""
+    client, url, batch, calls, themes, payload, memo = completed
+    good = memo['surprise']['quote']
+    memo['surprise']['quote'] = 'a surprise nobody voiced'
+
+    provider = insights_module._call_openrouter_messages
+    def fix_on_retry(**kw):
+        if 'previous response was rejected' in kw['messages'][1]['content']:
+            assert 'surprise quote' in kw['messages'][1]['content']
+            memo['surprise']['quote'] = good
+        return provider(**kw)
+    insights_module._call_openrouter_messages = fix_on_retry
+    try:
+        saved = client.post(url, json=payload).json()['data']['insights']
+    finally:
+        insights_module._call_openrouter_messages = provider
+
+    assert saved['available'], saved.get('saved', {}).get('message')
+    assert len(calls) == 2
+    assert saved['saved']['surprise']['quote'] == good

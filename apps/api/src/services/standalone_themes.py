@@ -295,7 +295,13 @@ def standalone_themes(session, settings, study, job_id, payload=None):
             result = insights._call_openrouter_messages(api_key=settings.openrouter_api_key, model=MODEL,
                 messages=[{"role": "system", "content": prompts["system_prompt"]},
                           {"role": "user", "content": prompts["user_prompt"]}],
-                timeout=max(10, int(deadline - time.monotonic())), max_attempts=1)
+                timeout=max(10, int(deadline - time.monotonic())), max_attempts=1,
+                # A persona answer is a paragraph; this response is 3-6 themes with
+                # verbatim quotes plus a surprise plus 3+ grounded options. At the
+                # shared 2000 default it can stop mid-object, and an unparseable
+                # response is billed, is not a rule the re-ask can fix, and saves
+                # nothing. Unused headroom is free: only emitted tokens are charged.
+                max_tokens=4000)
         except TransientProviderError as exc:
             # The provider charged for this call even though its content is unusable.
             # Record the spend before failing, or the next budget check undercounts
@@ -327,9 +333,10 @@ def standalone_themes(session, settings, study, job_id, payload=None):
             if correction:
                 prompts["user_prompt"] += (
                     f"\n\nYour previous response was rejected: {correction}\n"
-                    "Return the whole JSON object again with that fixed. Copy every "
-                    "representative_quote character for character from an answer by the "
-                    "persona you name in quote_persona_id.")
+                    "Return the whole JSON object again with that fixed. Every quoted "
+                    "string \u2014 each representative_quote, the surprise quote, and every "
+                    "answer_options text \u2014 must be copied character for character from "
+                    "an answer by the persona you name in its quote_persona_id.")
             return call(**prompts)
         return insights._extract_insight_themes(pairs, "", guided)
 
