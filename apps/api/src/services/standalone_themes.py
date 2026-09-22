@@ -16,6 +16,9 @@ from src.services.model_catalog import list_interview_model_catalog
 from src.services.standalone_interview import owned_job, serialized_local, usage
 
 MODEL = "openai/gpt-4o-mini"
+# One extraction plus at most one guided re-ask. Every estimate, consent figure and
+# preflight is sized for this many calls, because that is what one authorization buys.
+MAX_PROVIDER_CALLS = 2
 logger = logging.getLogger(__name__)
 
 
@@ -109,13 +112,15 @@ def status(job):
         len(pairs) == job.payload_json.get("persona_count") and
         all(len(p["model_a"]["answers"]) >= job.payload_json.get("turn_limit", 8) for p in pairs))
     # Conservative planning estimate: at most one token per UTF-8 byte plus the
-    # provider's 2,000 output-token cap, at this model's catalog rates. Estimated over
-    # the corpus actually sent, which is the narrowed one.
+    # provider's 2,000 output-token cap, at this model's catalog rates, times the most
+    # calls one authorization can make. Estimated over the corpus actually sent, which
+    # is the narrowed one. The student confirms the ceiling, never a best case.
     prompt = (insights._insights_system_prompt()
               + insights._build_transcript_corpus(insights.rendered_pairs(pairs)))
     model = next(m for m in list_interview_model_catalog()["models"] if m["id"] == MODEL)
-    estimate = (Decimal(len(prompt.encode()) + 100) * Decimal(str(model["prompt_price_per_million"])) +
-                Decimal(2000) * Decimal(str(model["completion_price_per_million"]))) / Decimal(1000000)
+    estimate = MAX_PROVIDER_CALLS * (
+        (Decimal(len(prompt.encode()) + 100) * Decimal(str(model["prompt_price_per_million"])) +
+         Decimal(2000) * Decimal(str(model["completion_price_per_million"]))) / Decimal(1000000))
     return {"from_run_id": job.public_id, "revision": revision, "eligible": complete,
         "available": bool(saved and saved.get("themes")), "stale": bool(saved and saved["revision"] != revision),
         "message": "Generate themes to compare with your hand-coding." if complete else
@@ -160,6 +165,7 @@ def standalone_themes(session, settings, study, job_id, payload=None):
         # An empty corpus can only come back rejected, and the student pays either way.
         raise ConflictApiError("These transcripts hold no answers to extract themes from.")
     result = None
+    spent = Decimal(0)
     def record_charge(measured):
         # Empty text keeps the accounting row out of the student transcript corpus.
         session.add(InterviewTurn(study_id=study.id, session_id=job_id,
@@ -185,8 +191,12 @@ def standalone_themes(session, settings, study, job_id, payload=None):
                 record_charge(exc.measured_usage)
             raise
         record_charge(result)
+        nonlocal spent
+        spent += result.cost_usd
         try:
-            enforce_measured_cost(snapshot, cost_usd=result.cost_usd)
+            # The snapshot is frozen at its pre-call reading, so a per-call check would
+            # let two calls that each fit the remaining allowance exceed it together.
+            enforce_measured_cost(snapshot, cost_usd=spent)
         except QuotaExceededApiError as exc:
             record["budget_stop"] = exc.message
         return result.text
@@ -213,7 +223,12 @@ def standalone_themes(session, settings, study, job_id, payload=None):
             # for it is the failure they actually experience. One extra call, then the
             # reason is theirs. Raise this only if the second call is also missing.
             record["retried_reason"] = reason[:200]
-            themes = extract(reason)
+            # Feed back the truncated reason: it is built from model-controlled fields,
+            # and an oversized one would inflate the second prompt without limit.
+            # A second call that never parses did not break a rule, so say so.
+            validated = False
+            themes = extract(record["retried_reason"])
+            validated = True
             reason = validate(themes, pairs)
         if not reason:
             record["themes"] = themes

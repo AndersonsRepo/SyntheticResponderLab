@@ -328,3 +328,64 @@ def test_standalone_themes_reports_batch_emotion_for_free(completed):
     themes[0]['representative_quote'] = 'a quote nobody said'
     rejected = client.post(url, json=payload).json()['data']['insights']
     assert not rejected['available'] and rejected['emotion']['counts'] == emotion['counts']
+
+
+def test_standalone_themes_estimate_covers_the_re_ask(completed, monkeypatch):
+    """One authorization can make two calls, so the figure the student confirms covers two."""
+    from src.services import standalone_themes as themes_module
+    client, url, _, calls, _, _ = completed
+    shown = Decimal(client.get(url).json()['data']['insights']['estimated_cost_usd'])
+    monkeypatch.setattr(themes_module, 'MAX_PROVIDER_CALLS', 1)
+    one_call = Decimal(client.get(url).json()['data']['insights']['estimated_cost_usd'])
+    assert one_call > 0 and shown == one_call * 2
+    assert calls == []
+
+
+def test_standalone_themes_re_ask_prompt_is_bounded(completed):
+    """The rejection reason quotes model-controlled text, so the re-ask cannot carry it whole."""
+    client, url, _, calls, themes, payload = completed
+    themes[0]['quote_persona_id'] = 'P' * 50_000
+    client.post(url, json=payload)
+    assert len(calls) == 2
+    first, retry = (len(c['messages'][1]['content']) for c in calls)
+    assert retry - first < 1_000, 'a 50KB persona id must not ride into the second prompt'
+
+
+def test_standalone_themes_re_ask_spend_is_cumulative(completed, monkeypatch):
+    """The snapshot is frozen, so the measured-cost stop has to see the running total.
+
+    Checking each call alone lets two calls that each fit the remaining allowance
+    exceed it together — the whole point of a hard cap the class shares.
+    """
+    from src.services import standalone_themes as themes_module
+    client, url, _, calls, themes, payload = completed
+    themes[0]['representative_quote'] = 'a quote nobody said'
+    seen = []
+    real = themes_module.enforce_measured_cost
+    monkeypatch.setattr(themes_module, 'enforce_measured_cost',
+        lambda snapshot, *, cost_usd: (seen.append(Decimal(cost_usd)), real(snapshot, cost_usd=cost_usd))[1])
+    client.post(url, json=payload)
+    assert len(calls) == 2
+    assert seen == [Decimal('.002'), Decimal('.004')], 'second check must carry the first call'
+
+
+def test_standalone_themes_unparseable_re_ask_is_not_called_a_broken_rule(completed):
+    """A second call that never parsed did not break a rule — say which failure it was."""
+    client, url, _, calls, themes, payload = completed
+    themes[0]['representative_quote'] = 'a quote nobody said'
+    provider = insights_module._call_openrouter_messages
+
+    def broken_on_retry(**kw):
+        calls.append(kw)
+        if 'previous response was rejected' in kw['messages'][1]['content']:
+            return InterviewAnswer(text='broken json', model=kw['model'],
+                tokens_in=10, tokens_out=1, cost_usd=Decimal('.002'))
+        return provider(**kw)
+    insights_module._call_openrouter_messages = broken_on_retry
+    try:
+        saved = client.post(url, json=payload).json()['data']['insights']['saved']
+    finally:
+        insights_module._call_openrouter_messages = provider
+    assert len(calls) == 3  # the stub records the first call twice: its own and the fixture's
+    assert 'produced no usable response' in saved['message']
+    assert 'broke a rule' not in saved['message']
