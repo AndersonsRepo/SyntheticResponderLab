@@ -51,7 +51,7 @@ type Themes = {
   emotion?: { scored: number; interviewed: number; answers: number; label: string;
     counts: Record<string, number>;
     personas: { persona_id: string | null; fit_tier: string; answers: number;
-      positive: number; neutral: number; negative: number }[] };
+      classified: number; positive: number; neutral: number; negative: number }[] };
 };
 
 type Turn = { role: "student" | "persona"; text: string; answerId?: string; version?: number };
@@ -561,7 +561,9 @@ function InterviewPageContent() {
               <ul className="mt-2 text-sm">
                 {themes.emotion.personas.map((entry, index) => <li key={`${entry.persona_id ?? "?"}-${index}`}>
                   {entry.persona_id ?? "unidentified"}: {entry.positive} positive · {entry.neutral} neutral · {entry.negative} negative
-                  {" "}of {entry.answers} answers · fit {entry.fit_tier}
+                  {" "}of {entry.classified === entry.answers
+                    ? `${entry.answers} answers`
+                    : `${entry.classified} of ${entry.answers} answers read`} · fit {entry.fit_tier}
                 </li>)}
               </ul>
               <p className="mt-2 text-sm text-app-muted">

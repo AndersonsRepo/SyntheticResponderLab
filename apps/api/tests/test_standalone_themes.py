@@ -523,3 +523,17 @@ def test_standalone_themes_emotion_ignores_the_interviewer(completed, db_session
     entry = next(p for p in client.get(url).json()['data']['insights']['emotion']['personas']
                  if p['persona_id'] == transcripts[0]['persona_id'])
     assert entry['answers'] == 1 and entry['negative'] == 0
+
+
+def test_standalone_themes_emotion_distribution_and_header_come_from_one_path(completed, db_session):
+    """Answers given and answers read are two numbers, and both must describe the same room."""
+    from src.persistence.models import Job
+    client, url, batch, _, _, _ = completed
+    job = db_session.scalars(select(Job).where(Job.public_id == batch['job_id'])).one()
+    emotion = client.get(url).json()['data']['insights']['emotion']
+    assert emotion['answers'] == sum(p['classified'] for p in emotion['personas']), (
+        'the room distribution is written by the same personas the header counts')
+    assert all(p['answers'] >= p['classified'] for p in emotion['personas'])
+    assert all(sum(p[n] for n in ('positive', 'neutral', 'negative')) == p['classified']
+               for p in emotion['personas'])
+    assert job.result_json['transcripts']

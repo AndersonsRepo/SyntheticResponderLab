@@ -85,7 +85,21 @@ def corpus(job):
 SENTIMENTS = ("positive", "neutral", "negative")
 
 
-def _answer_labels(transcript):
+def _answers(transcript):
+    """The interviewee's own turns — the unit the classifier was built for.
+
+    The classifier filters role == "assistant" itself (interview_scoring.py:114-119) and
+    raises on a turn holding no answer, so an interviewer question was already skipped.
+    Doing it here too puts the rule where the next reader sees it: the interviewer's
+    phrasing reaching a distribution labelled "the room" is the bug below in another form.
+    """
+    return [turn for turn in (transcript.get("messages") or [])
+            if isinstance(turn, dict)
+            and str(turn.get("role") or "").strip() == "assistant"
+            and str(turn.get("content") or turn.get("text") or "").strip()]
+
+
+def _answer_labels(answers):
     """Classify each answer on its own, because that is the unit the classifier was built for.
 
     Run over a whole transcript it is systematically wrong here. Its negative vocabulary
@@ -95,14 +109,7 @@ def _answer_labels(transcript):
     that I'm serious about my business" scores zero positive; "I worry about it becoming an
     oven" scores negative. So a keen buyer reads negative the longer you talk to them.
     """
-    for turn in transcript.get("messages") or []:
-        # Only the interviewee's own words. The classifier filters by role itself
-        # (interview_scoring.py:117) and raises on a turn with no answer in it, so an
-        # interviewer question is already skipped — but leaving that to a caught
-        # exception hides the intent, and the interviewer's phrasing reaching a
-        # distribution labelled "the room" is exactly the bug above in another form.
-        if not isinstance(turn, dict) or str(turn.get("role") or "").strip() != "assistant":
-            continue
+    for turn in answers:
         try:
             label = classify_interview_transcript([turn])["emotional_classification"]
         except Exception:
@@ -123,22 +130,25 @@ def emotion(job):
     transcripts = (job.result_json or {}).get("transcripts", [])
     counts = {name: 0 for name in SENTIMENTS}
     for transcript in transcripts:
-        labels = list(_answer_labels(transcript))
+        answers = _answers(transcript)
+        labels = list(_answer_labels(answers))
         if not labels:
             # An interviewee who never answered has no language to classify; leaving them
             # out is honest, counting them as neutral is not.
             continue
-        for label in labels:
-            if label in counts:
-                counts[label] += 1
         try:
             fit_tier = classify_interview_transcript(transcript["messages"])["fit_tier"]
         except Exception:
-            # Unreachable while labels is non-empty, and if it ever is reached, a persona
-            # whose fit was never established does not belong in a count called "scored".
+            # A persona whose fit was never established does not belong in a count called
+            # "scored" — and its answers must not reach the distribution either, or the
+            # header would describe a room the numbers were not drawn from.
             continue
+        for label in labels:
+            counts[label] += 1
         personas.append({"persona_id": transcript.get("persona_id"), "fit_tier": fit_tier,
-            "answers": len(labels),
+            # Answers GIVEN and answers the classifier could read are two numbers. Folding
+            # them into one is the same silent shrinkage `interviewed` exists to prevent.
+            "answers": len(answers), "classified": len(labels),
             **{name: sum(label == name for label in labels) for name in SENTIMENTS}})
     # Carry the batch's own size: a skipped interviewee otherwise silently shrinks the
     # room, and the student reads a distribution as if it covered everyone.
