@@ -487,12 +487,19 @@ test("a recruited room is the personas the student ticked, in the order they tic
   const ui = harness(); await ui.settle();
   // Nobody recruited: the run is still the slider's first N, with no ids sent.
   assert.match(ui.text(), /No one picked/);
+  ui.nodes().find(n => n.props.id === "ai-interview-persona-count")!.props.onChange({ target: { value: "7" } });
+  ui.render();
+  const sliderPrice = ui.text().match(/This run will cost about (.*?)For 7 personas/)![1];
   for (const id of ["neo-003", "neo-001", "neo-002"]) {
     ui.nodes().find(n => n.props["aria-label"] === `Recruit ${id}`)!.props.onChange();
     ui.render();
   }
   assert.match(ui.text(), /Interviewing the 3 you picked: neo-003, neo-001, neo-002/);
   assert.match(ui.text(), /Run AI-to-AI batch \(3 personas\)/);
+  // The quote and the sentence under it have to describe the same room, or the
+  // student authorizes the slider's price for a room they did not pick.
+  const roomPrice = ui.text().match(/This run will cost about (.*?)For 3 personas/)![1];
+  assert.notEqual(roomPrice, sliderPrice);
   ui.setTransport(async () => ({ batch: { ...batch, status: "completed", persona_count: 3 } }));
   await ui.button("Run AI-to-AI batch").props.onClick(); ui.render();
   assert.deepEqual(ui.calls[0].payload.persona_ids, ["neo-003", "neo-001", "neo-002"]);

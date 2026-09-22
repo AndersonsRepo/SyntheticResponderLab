@@ -162,7 +162,7 @@ function InterviewPageContent() {
   const intervieweeModelEntry = models.find((entry) => entry.id === intervieweeModel);
   const preflightCostEstimate =
     interviewerModelEntry && intervieweeModelEntry
-      ? estimateInterviewRunCost(personaCount, interviewerModelEntry, intervieweeModelEntry)
+      ? estimateInterviewRunCost(roomSize, interviewerModelEntry, intervieweeModelEntry)
       : null;
   const modelsLocked = turns.length > 0 || busy;
 
