@@ -32,6 +32,7 @@ function harness(savedBatches: any[] = [], comparisonFetcher?: Parameters<typeof
   let transport: (path: string, payload: any) => Promise<any> = async () => { throw new Error("unexpected request"); };
   let exportsPayload: any;
   const exportedMemos: any[] = [];
+  const exportedStudentMemos: any[] = [];
   const api = {
     getInterviewPersonas: async () => ({ personas, source: "database" }),
     getInterviewModelCatalog: async () => ({ models, defaultModelId: "cheap-a", pricingAsOf: "test", personaCount: { minimum: 3, maximum: 30, default: 3 }, costEstimate: null }),
@@ -62,8 +63,8 @@ function harness(savedBatches: any[] = [], comparisonFetcher?: Parameters<typeof
     react,
     "framer-motion": { AnimatePresence: "presence", motion: { div: "div" } },
     "@/lib/api": api,
-    "@/lib/interview-batch-export": { batchExport: (target: any, format: any, memo?: any) => {
-      exportedMemos.push(memo); return batchExport(target, format, memo);
+    "@/lib/interview-batch-export": { batchExport: (...args: Parameters<typeof batchExport>) => {
+      exportedMemos.push(args[2]); exportedStudentMemos.push(args[3]); return batchExport(...args);
     } },
     "@/lib/interview-models": modelHelpers,
     "@/lib/interview-comparison": { ...comparisonHelpers, runInterviewComparison: comparisonFetcher
@@ -113,7 +114,7 @@ function harness(savedBatches: any[] = [], comparisonFetcher?: Parameters<typeof
     return String(node);
   }
   return {
-    calls, chatCalls, memory, api, confirmations, exportedMemos,
+    calls, chatCalls, memory, api, confirmations, exportedMemos, exportedStudentMemos,
     dismissConfirmation() { confirmResult = false; },
     get exportedTranscript() { return exportsPayload; },
     setTransport(fn: typeof transport) { transport = fn; },
@@ -584,24 +585,53 @@ test("a rejected extraction shows no surprise and no options on the page", async
   assert.doesNotMatch(ui.text(), /an option/);
 });
 
-test("the memo a student is part way through survives a reload", async () => {
+test("the memo a student is part way through survives a reload, and stays with its batch", async () => {
   const ui = harness([{ ...batch, status: "completed" }]); await ui.settle();
+  ui.nodes().find(n => n.props["aria-label"] === "Saved batches")!.props.onChange({ target: { value: "batch_1" } });
   ui.button("3. Themes").props.onClick(); ui.render();
   ui.nodes().find(n => n.props["aria-label"] === "Your themes")!
     .props.onChange({ target: { value: "People want quiet" } });
   ui.nodes().find(n => n.props["aria-label"] === "Your answer option 1")!
     .props.onChange({ target: { value: "a door I can close" } });
   ui.render();
-  assert.equal(JSON.parse(ui.memory.get("interview-memo")!).themes, "People want quiet");
+  assert.equal(JSON.parse(ui.memory.get("interview-memos")!).batch_1.themes, "People want quiet");
 
   // A fresh mount is what a reload is: the writing has to still be in the fields.
   const reloaded = harness([{ ...batch, status: "completed" }], undefined, ui.memory);
   await reloaded.settle();
+  reloaded.nodes().find(n => n.props["aria-label"] === "Saved batches")!.props.onChange({ target: { value: "batch_1" } });
   reloaded.button("3. Themes").props.onClick(); reloaded.render();
   assert.equal(reloaded.nodes().find(n => n.props["aria-label"] === "Your themes")!.props.value,
     "People want quiet");
   assert.equal(reloaded.nodes().find(n => n.props["aria-label"] === "Your answer option 1")!.props.value,
     "a door I can close");
+  // And the export carries it, which the mock can only see if the page passes it.
+  await reloaded.button("Export transcript + memo").props.onClick();
+  assert.equal(reloaded.exportedStudentMemos[0].themes, "People want quiet");
+
+  // A different batch is a different analysis: it starts blank and exports nothing.
+  const other = harness([{ ...batch, job_id: "batch_2", status: "completed" }], undefined, ui.memory);
+  await other.settle();
+  other.nodes().find(n => n.props["aria-label"] === "Saved batches")!.props.onChange({ target: { value: "batch_2" } });
+  other.button("3. Themes").props.onClick(); other.render();
+  assert.equal(other.nodes().find(n => n.props["aria-label"] === "Your themes")!.props.value, "");
+  await other.button("Export transcript + memo").props.onClick();
+  assert.equal(other.exportedStudentMemos[0], undefined);
+});
+
+test("a stored memo of the wrong shape is dropped, not exported", async () => {
+  // The store is reachable by an older build, another tab and the devtools, so a
+  // non-string option must not reach the export and throw there.
+  const poisoned = new Map<string, string>([["interview-memos", JSON.stringify({
+    batch_1: { themes: "kept", surprise: "", options: ["fine"] },
+    batch_2: { themes: "dropped", surprise: "", options: [7] },
+  })]]);
+  const ui = harness([{ ...batch, status: "completed" }, { ...batch, job_id: "batch_2", status: "completed" }],
+    undefined, poisoned);
+  await ui.settle();
+  ui.nodes().find(n => n.props["aria-label"] === "Saved batches")!.props.onChange({ target: { value: "batch_2" } });
+  ui.button("3. Themes").props.onClick(); ui.render();
+  assert.equal(ui.nodes().find(n => n.props["aria-label"] === "Your themes")!.props.value, "");
 });
 
 test("classroom switching saved runs rejects late themes", async () => {

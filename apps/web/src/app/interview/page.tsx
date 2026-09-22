@@ -65,6 +65,20 @@ const SUGGESTED = [
   "Who else in your household would have a say?",
 ];
 
+const MEMO_STORE = "interview-memos";
+const EMPTY_MEMO: StudentMemo = { themes: "", surprise: "", options: ["", "", ""] };
+
+/** Anything in the store was written by an older build, another tab or a hand edit. */
+function readMemos(raw: string | null): Record<string, StudentMemo> {
+  const parsed = raw ? JSON.parse(raw) : null;
+  if (!parsed || typeof parsed !== "object") return {};
+  return Object.fromEntries(Object.entries(parsed as Record<string, unknown>).filter(([, memo]) => {
+    const candidate = memo as Partial<StudentMemo>;
+    return !!memo && typeof candidate.themes === "string" && typeof candidate.surprise === "string"
+      && Array.isArray(candidate.options) && candidate.options.every((option) => typeof option === "string");
+  })) as Record<string, StudentMemo>;
+}
+
 export default function InterviewPage() {
   return (
     <ThemeProvider>
@@ -83,23 +97,13 @@ function InterviewPageContent() {
   const [recruited, setRecruited] = useState<string[]>([]);
   // PA3.5 grades the student's own memo. Ours is the thing they check it against,
   // so theirs is what the export leads with and the only one they write.
-  // Kept in localStorage: a reload in the middle of writing must not cost the
-  // student the memo they are graded on.
-  const [myMemo, setMyMemo] = useState<StudentMemo>(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem("interview-memo") || "null");
-      if (saved && typeof saved.themes === "string" && typeof saved.surprise === "string"
-          && Array.isArray(saved.options)) return saved as StudentMemo;
-    } catch { /* a corrupt or blocked store is an empty form, never a crash */ }
-    return { themes: "", surprise: "", options: ["", "", ""] };
-  });
-  // Updater form, never a snapshot: two fields edited in one batch would otherwise
-  // write the second one on top of a memo that had already lost the first.
-  const editMemo = (update: (prev: StudentMemo) => StudentMemo) => setMyMemo((prev) => {
-    const next = update(prev);
-    try { localStorage.setItem("interview-memo", JSON.stringify(next)); } catch { /* ignore */ }
-    return next;
-  });
+  // One memo per batch, because a memo is an analysis OF a transcript: carried onto
+  // another batch it would claim to be an analysis of interviews it never saw.
+  // Restored in the mount effect, never during a render — reading localStorage while
+  // rendering makes the prerendered HTML disagree with the client, and React does not
+  // re-sync an input's value after hydration, so the student would watch their
+  // writing vanish from fields that state still holds.
+  const [memos, setMemos] = useState<Record<string, StudentMemo>>({});
   const [source, setSource] = useState("");
   const [selectedId, setSelectedId] = useState<string>("");
   const [models, setModels] = useState<InterviewModelCatalogEntry[]>([]);
@@ -177,6 +181,18 @@ function InterviewPageContent() {
 
   const persona = personas.find((entry) => entry.persona_id === selectedId);
   const roomSize = recruited.length || personaCount;
+  const memoKey = batch?.job_id ?? "";
+  const myMemo = memos[memoKey] ?? EMPTY_MEMO;
+  // Updater form, never a snapshot: two fields edited in one batch would otherwise
+  // write the second one on top of a memo that had already lost the first.
+  const editMemo = (update: (prev: StudentMemo) => StudentMemo) => {
+    if (!memoKey) return;
+    setMemos((prev) => {
+      const next = { ...prev, [memoKey]: update(prev[memoKey] ?? EMPTY_MEMO) };
+      try { localStorage.setItem(MEMO_STORE, JSON.stringify(next)); } catch { /* ignore */ }
+      return next;
+    });
+  };
   const interviewerModelEntry = models.find((entry) => entry.id === interviewerModel);
   const intervieweeModelEntry = models.find((entry) => entry.id === intervieweeModel);
   const preflightCostEstimate =
@@ -344,6 +360,7 @@ function InterviewPageContent() {
 
   useEffect(() => {
     if (!studyId) return;
+    try { setMemos(readMemos(localStorage.getItem(MEMO_STORE))); } catch { /* ignore */ }
     const saved = localStorage.getItem(`interview-batch:${studyId}`);
     const savedRequest = localStorage.getItem(`interview-batch-request:${studyId}`);
     if (savedRequest) {
@@ -893,7 +910,7 @@ function InterviewPageContent() {
                 <p>Measured cost: ${Number(batch.session_usage.cost_usd).toFixed(6)} · Estimate at start: ${Number(batch.estimated_cost_usd).toFixed(4)}</p>
                 <p className="text-xs text-app-muted">Interviewer: {batch.interviewer_model} · Interviewee: {batch.interviewee_model}</p>
                 <div className="flex gap-2">{(["csv", "md"] as const).map(format => <Button key={format} variant="secondary" onClick={() => {
-                  const exported = batchExport(batch, format, themes?.stale ? undefined : themes?.saved, myMemo);
+                  const exported = batchExport(batch, format, themes?.stale ? undefined : themes?.saved, memos[batch.job_id]);
                   const url = URL.createObjectURL(exported.blob);
                   const link = document.createElement("a");
                   link.href = url; link.download = exported.filename;
