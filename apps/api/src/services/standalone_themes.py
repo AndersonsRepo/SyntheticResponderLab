@@ -20,6 +20,8 @@ MODEL = "openai/gpt-4o-mini"
 # One extraction plus at most one guided re-ask. Every estimate, consent figure and
 # preflight is sized for this many calls, because that is what one authorization buys.
 MAX_PROVIDER_CALLS = 2
+# PA3.5's memo shape, the same floors the focus group's memo uses.
+MEMO_MIN_ANSWER_OPTIONS = 3
 # One authorization's whole provider budget, shared across those calls. The class
 # budget lock is held for the entire request, so two serial 90s calls would double
 # how long every other student waits behind it.
@@ -45,8 +47,25 @@ def _comparable(text: str) -> str:
     return folded.casefold()
 
 
-def validate(themes, pairs):
-    """Return why this response is unusable, or None when it is usable."""
+def _grounded(text, persona_id, answers):
+    """Did this persona actually say this? Verbatim, once the rendering is folded away."""
+    persona_answers = answers.get(persona_id)
+    if persona_answers is None:
+        return False
+    folded = _comparable(text)
+    return bool(folded) and any(folded in _comparable(answer) for answer in persona_answers)
+
+
+def validate(memo, pairs):
+    """Return why this response is unusable, or None when it is usable.
+
+    The memo is themes + exactly one surprise + at least three closed-ended answer
+    options, which is what PA3.5 asks a student to hand in. Every quote and every
+    option has to be the participant's own words, or the memo is evidence of nothing.
+    """
+    if not isinstance(memo, dict):
+        return "Response was not a memo object"
+    themes = memo.get("themes")
     if not isinstance(themes, list):
         return "Response held no theme list"
     if not 3 <= len(themes) <= 6:
@@ -64,12 +83,36 @@ def validate(themes, pairs):
             return f"Theme {index} has sentiment {theme.get('sentiment')!r}"
         if type(theme.get("count")) is not int or not 1 <= theme["count"] <= len(pairs):
             return f"Theme {index} count {theme.get('count')!r} is not 1-{len(pairs)}"
-        persona_answers = answers.get(theme["quote_persona_id"])
-        if persona_answers is None:
+        if theme["quote_persona_id"] not in answers:
             return f"Theme {index} quotes unknown persona {theme['quote_persona_id']!r}"
-        quote = _comparable(theme["representative_quote"])
-        if not quote or not any(quote in _comparable(answer) for answer in persona_answers):
+        if not _grounded(theme["representative_quote"], theme["quote_persona_id"], answers):
             return (f"Theme {index} quote is not in {theme['quote_persona_id']}'s answers")
+
+    surprise = memo.get("surprise")
+    if not isinstance(surprise, dict):
+        return "Memo is missing its surprise"
+    for key in ("summary", "quote", "quote_persona_id"):
+        if not isinstance(surprise.get(key), str) or not surprise[key].strip():
+            return f"Surprise is missing {key}"
+    if surprise["quote_persona_id"] not in answers:
+        return f"Surprise quotes unknown persona {surprise['quote_persona_id']!r}"
+    if not _grounded(surprise["quote"], surprise["quote_persona_id"], answers):
+        return f"Surprise quote is not in {surprise['quote_persona_id']}'s answers"
+
+    options = memo.get("answer_options")
+    if not isinstance(options, list) or len(options) < MEMO_MIN_ANSWER_OPTIONS:
+        return (f"Expected at least {MEMO_MIN_ANSWER_OPTIONS} answer options, got "
+                f"{len(options) if isinstance(options, list) else 0}")
+    for index, option in enumerate(options, 1):
+        if not isinstance(option, dict):
+            return f"Answer option {index} is not an object"
+        for key in ("text", "quote_persona_id"):
+            if not isinstance(option.get(key), str) or not option[key].strip():
+                return f"Answer option {index} is missing {key}"
+        if option["quote_persona_id"] not in answers:
+            return f"Answer option {index} quotes unknown persona {option['quote_persona_id']!r}"
+        if not _grounded(option["text"], option["quote_persona_id"], answers):
+            return (f"Answer option {index} is not in {option['quote_persona_id']}'s answers")
     return None
 
 
@@ -280,9 +323,9 @@ def standalone_themes(session, settings, study, job_id, payload=None):
 
     reason, validated = None, False
     try:
-        themes = extract()
+        memo = extract()
         validated = True
-        reason = validate(themes, pairs)
+        reason = validate(memo, pairs)
         if reason and not record.get("budget_stop"):
             # ponytail: one guided re-ask. A rejected response is usually a formatting
             # slip the student cannot see or fix, and making them pay to press Retry
@@ -293,11 +336,15 @@ def standalone_themes(session, settings, study, job_id, payload=None):
             # and an oversized one would inflate the second prompt without limit.
             # A second call that never parses did not break a rule, so say so.
             validated = False
-            themes = extract(record["retried_reason"])
+            memo = extract(record["retried_reason"])
             validated = True
-            reason = validate(themes, pairs)
+            reason = validate(memo, pairs)
         if not reason:
-            record["themes"] = themes
+            record["themes"] = memo["themes"]
+            # The surprise and the options are the rest of what PA3.5 grades; a page
+            # that only shows themes hands the student two thirds of a memo.
+            record["surprise"] = memo["surprise"]
+            record["answer_options"] = memo["answer_options"]
     except Exception as exc:
         # A provider exception can carry transcript or credential text, so only its class
         # is shown. Validation reasons are ours, and quote only the response's own field.

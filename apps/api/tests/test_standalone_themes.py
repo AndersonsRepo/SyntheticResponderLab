@@ -23,17 +23,22 @@ def completed(classroom, monkeypatch):
     themes = [{'label': f'Theme {i}', 'count': 1, 'synthesis': 'An interest in the option.',
         'representative_quote': batch['transcripts'][0]['messages'][1]['content'],
         'quote_persona_id': batch['transcripts'][0]['persona_id'], 'sentiment': 'positive'} for i in range(3)]
+    said = batch['transcripts'][0]['messages'][1]['content']
+    memo = {'surprise': {'summary': 'They cared more about noise than price.',
+                         'quote': said, 'quote_persona_id': batch['transcripts'][0]['persona_id']},
+            'answer_options': [{'text': said, 'quote_persona_id': batch['transcripts'][0]['persona_id']}
+                               for _ in range(3)]}
     def provider(**kw):
         extra.append(kw)
-        return InterviewAnswer(text=json.dumps({'themes': themes}), model=kw['model'],
+        return InterviewAnswer(text=json.dumps({'themes': themes, **memo}), model=kw['model'],
             tokens_in=10, tokens_out=10, cost_usd=Decimal('.002'))
     monkeypatch.setattr('src.services.interview_service._call_openrouter_messages', provider)
     revision = client.get(url).json()['data']['insights']['revision']
-    return client, url, batch, extra, themes, {'revision': revision, 'authorize_charge': True}
+    return client, url, batch, extra, themes, {'revision': revision, 'authorize_charge': True}, memo
 
 
 def test_standalone_themes_scoped_cached(completed):
-    client, url, batch, calls, themes, payload = completed
+    client, url, batch, calls, themes, payload, memo = completed
     assert not client.get(url).json()['data']['insights']['available']
     assert calls == []
     result = client.post(url, json=payload).json()['data']['insights']
@@ -48,7 +53,7 @@ def test_standalone_themes_scoped_cached(completed):
 
 
 def test_standalone_themes_explicit_authorization(completed):
-    client, url, _, calls, _, payload = completed
+    client, url, _, calls, _, payload, memo = completed
     assert client.post(url, json={'revision': payload['revision']}).status_code == 400
     assert client.post(url, json={**payload, 'revision': 'old'}).status_code == 409
     assert calls == []
@@ -56,7 +61,7 @@ def test_standalone_themes_explicit_authorization(completed):
 
 @pytest.mark.parametrize('mode', ['replay_only', 'zero', 'run', 'class'])
 def test_standalone_themes_budgets(completed, mode, db_session):
-    client, url, _, calls, _, payload = completed
+    client, url, _, calls, _, payload, memo = completed
     if mode == 'replay_only':
         client.app.state.settings.cache_mode = mode
     else:
@@ -71,7 +76,7 @@ def test_standalone_themes_budgets(completed, mode, db_session):
 
 
 def test_standalone_themes_concurrent(completed):
-    client, url, _, calls, _, payload = completed
+    client, url, _, calls, _, payload, memo = completed
     with ThreadPoolExecutor(max_workers=3) as pool:
         responses = list(pool.map(lambda _: client.post(url, json=payload), range(3)))
     assert all(r.status_code == 200 for r in responses)
@@ -79,7 +84,7 @@ def test_standalone_themes_concurrent(completed):
 
 
 def test_standalone_themes_timeout_retry_and_safe_diagnostics(completed, monkeypatch, caplog):
-    client, url, batch, calls, _, payload = completed
+    client, url, batch, calls, _, payload, memo = completed
     def fail(**kw):
         calls.append(kw)
         raise RuntimeError('secret transcript credential')
@@ -104,7 +109,7 @@ def test_standalone_themes_timeout_retry_and_safe_diagnostics(completed, monkeyp
 
 @pytest.mark.parametrize('invalid', ['quote', 'empty', 'json'])
 def test_standalone_themes_malformed_preserves_cost(completed, invalid, monkeypatch):
-    client, url, batch, calls, themes, payload = completed
+    client, url, batch, calls, themes, payload, memo = completed
     if invalid == 'quote': themes[0]['representative_quote'] = 'fabricated quote'
     if invalid == 'empty': themes.clear()
     if invalid == 'json':
@@ -121,7 +126,7 @@ def test_standalone_themes_malformed_preserves_cost(completed, invalid, monkeypa
 
 @pytest.mark.parametrize('state', ['running', 'failed', 'budget_stopped', 'empty', 'partial'])
 def test_standalone_themes_availability(completed, db_session, state):
-    client, url, batch, calls, _, payload = completed
+    client, url, batch, calls, _, payload, memo = completed
     job = db_session.scalar(select(Job).where(Job.public_id == batch['job_id']))
     if state == 'empty': job.result_json = {**job.result_json, 'transcripts': []}
     elif state == 'partial': job.result_json = {**job.result_json, 'transcripts': job.result_json['transcripts'][:1]}
@@ -132,7 +137,7 @@ def test_standalone_themes_availability(completed, db_session, state):
 
 
 def test_standalone_themes_revision(completed, db_session):
-    client, url, batch, calls, _, payload = completed
+    client, url, batch, calls, _, payload, memo = completed
     client.post(url, json=payload)
     job = db_session.scalar(select(Job).where(Job.public_id == batch['job_id']))
     transcripts = json.loads(json.dumps(job.result_json['transcripts']))
@@ -153,7 +158,7 @@ def test_standalone_themes_unusable_content_records_measured_cost(completed, mon
     `_call_openrouter_messages`, so the real parser runs and really raises —
     mocking the helper would skip the exact code path under test.
     """
-    client, url, batch, calls, _, payload = completed
+    client, url, batch, calls, _, payload, memo = completed
     message = {} if content is None else {'content': content}
 
     class Response:
@@ -190,7 +195,7 @@ def test_standalone_themes_accepts_a_rerendered_quote(completed, rendering):
     Every one of these is the same sentence from the same persona; rejecting them costs
     the student another charge for a response that was never wrong.
     """
-    client, url, batch, calls, themes, payload = completed
+    client, url, batch, calls, themes, payload, memo = completed
     themes[0]['representative_quote'] = rendering.format(quote=themes[0]['representative_quote'])
     result = client.post(url, json=payload).json()['data']['insights']
     assert result['available'], result.get('saved', {}).get('message')
@@ -198,7 +203,7 @@ def test_standalone_themes_accepts_a_rerendered_quote(completed, rendering):
 
 def test_standalone_themes_failure_names_the_rule_it_broke(completed):
     """The student pays per retry, so a rejection has to say what was wrong."""
-    client, url, batch, calls, themes, payload = completed
+    client, url, batch, calls, themes, payload, memo = completed
     themes[0]['representative_quote'] = 'a quote nobody said'
     saved = client.post(url, json=payload).json()['data']['insights']['saved']
     assert saved['reason'] == "Theme 1 quote is not in %s's answers" % themes[0]['quote_persona_id']
@@ -208,7 +213,7 @@ def test_standalone_themes_failure_names_the_rule_it_broke(completed):
 
 def test_standalone_themes_reads_a_fenced_json_answer(completed, monkeypatch):
     """A fenced block is still a JSON answer; only an unparseable one is a failure."""
-    client, url, batch, calls, themes, payload = completed
+    client, url, batch, calls, themes, payload, memo = completed
     real = insights_module._call_openrouter_messages
     def fenced(**kw):
         answer = real(**kw)
@@ -239,7 +244,7 @@ def test_extract_themes_counts_only_the_interviews_it_renders():
 
 def test_standalone_themes_refuses_an_unreadable_corpus(completed, db_session):
     """Every answer is one the corpus skips, so the call could only come back rejected."""
-    client, url, batch, calls, _, payload = completed
+    client, url, batch, calls, _, payload, memo = completed
     job = db_session.scalar(select(Job).where(Job.public_id == batch['job_id']))
     result = dict(job.result_json)
     result['transcripts'] = [{**t, 'messages': [
@@ -256,7 +261,7 @@ def test_standalone_themes_refuses_an_unreadable_corpus(completed, db_session):
 
 def test_standalone_themes_accepts_a_quote_from_a_repeated_persona(completed, db_session):
     """Two transcripts can share a persona_id; the prompt carries both, so the check must too."""
-    client, url, batch, calls, themes, payload = completed
+    client, url, batch, calls, themes, payload, memo = completed
     job = db_session.scalar(select(Job).where(Job.public_id == batch['job_id']))
     result = dict(job.result_json)
     first = result['transcripts'][0]['persona_id']
@@ -270,7 +275,7 @@ def test_standalone_themes_accepts_a_quote_from_a_repeated_persona(completed, db
 
 def test_standalone_themes_one_placeholder_answer_stays_eligible(completed, db_session):
     """One unusable answer must not quietly take the whole batch out of eligibility."""
-    client, url, batch, calls, themes, payload = completed
+    client, url, batch, calls, themes, payload, memo = completed
     job = db_session.scalar(select(Job).where(Job.public_id == batch['job_id']))
     result = dict(job.result_json)
     first = result['transcripts'][0]
@@ -290,7 +295,7 @@ def test_standalone_themes_re_asks_once_before_charging_the_student(completed):
     First call returns an ungrounded quote, second returns a real one. The student must
     get themes, not a Retry button, and must be told both calls' cost.
     """
-    client, url, batch, calls, themes, payload = completed
+    client, url, batch, calls, themes, payload, memo = completed
     good = themes[0]['representative_quote']
     themes[0]['representative_quote'] = 'a quote nobody said'
 
@@ -313,7 +318,7 @@ def test_standalone_themes_re_asks_once_before_charging_the_student(completed):
 
 def test_standalone_themes_reports_batch_emotion_for_free(completed):
     """Emotion is lexical, so it is on the page before any charge and after a rejection."""
-    client, url, batch, calls, themes, payload = completed
+    client, url, batch, calls, themes, payload, memo = completed
     free = client.get(url).json()['data']['insights']
     assert calls == []
     emotion = free['emotion']
@@ -336,7 +341,7 @@ def test_standalone_themes_reports_batch_emotion_for_free(completed):
 def test_standalone_themes_estimate_covers_the_re_ask(completed, monkeypatch):
     """One authorization can make two calls, so the figure the student confirms covers two."""
     from src.services import standalone_themes as themes_module
-    client, url, _, calls, _, _ = completed
+    client, url, _, calls, _, _, memo = completed
     shown = Decimal(client.get(url).json()['data']['insights']['estimated_cost_usd'])
     monkeypatch.setattr(themes_module, 'MAX_PROVIDER_CALLS', 1)
     one_call = Decimal(client.get(url).json()['data']['insights']['estimated_cost_usd'])
@@ -346,7 +351,7 @@ def test_standalone_themes_estimate_covers_the_re_ask(completed, monkeypatch):
 
 def test_standalone_themes_re_ask_prompt_is_bounded(completed):
     """The rejection reason quotes model-controlled text, so the re-ask cannot carry it whole."""
-    client, url, _, calls, themes, payload = completed
+    client, url, _, calls, themes, payload, memo = completed
     themes[0]['quote_persona_id'] = 'P' * 50_000
     client.post(url, json=payload)
     assert len(calls) == 2
@@ -361,7 +366,7 @@ def test_standalone_themes_re_ask_spend_is_cumulative(completed, monkeypatch):
     exceed it together — the whole point of a hard cap the class shares.
     """
     from src.services import standalone_themes as themes_module
-    client, url, _, calls, themes, payload = completed
+    client, url, _, calls, themes, payload, memo = completed
     themes[0]['representative_quote'] = 'a quote nobody said'
     seen = []
     real = themes_module.enforce_measured_cost
@@ -374,7 +379,7 @@ def test_standalone_themes_re_ask_spend_is_cumulative(completed, monkeypatch):
 
 def test_standalone_themes_unparseable_re_ask_is_not_called_a_broken_rule(completed):
     """A second call that never parsed did not break a rule — say which failure it was."""
-    client, url, _, calls, themes, payload = completed
+    client, url, _, calls, themes, payload, memo = completed
     themes[0]['representative_quote'] = 'a quote nobody said'
     provider = insights_module._call_openrouter_messages
 
@@ -397,7 +402,7 @@ def test_standalone_themes_unparseable_re_ask_is_not_called_a_broken_rule(comple
 def test_standalone_themes_emotion_says_how_much_of_the_room_it_scored(completed, db_session):
     """A skipped interviewee must not silently shrink the room the distribution covers."""
     from src.persistence.models import Job
-    client, url, batch, calls, _, _ = completed
+    client, url, batch, calls, _, _, memo = completed
     job = db_session.scalars(select(Job).where(Job.public_id == batch['job_id'])).one()
     result = dict(job.result_json)
     transcripts = [dict(t) for t in result['transcripts']]
@@ -412,7 +417,7 @@ def test_standalone_themes_emotion_says_how_much_of_the_room_it_scored(completed
 
 def test_standalone_themes_re_ask_that_vanishes_is_not_reported_as_a_known_charge(completed):
     """One call billed cleanly, one vanished — the student is not told the ledger is complete."""
-    client, url, _, calls, themes, payload = completed
+    client, url, _, calls, themes, payload, memo = completed
     themes[0]['representative_quote'] = 'a quote nobody said'
     provider = insights_module._call_openrouter_messages
 
@@ -437,7 +442,7 @@ def test_standalone_themes_re_ask_that_vanishes_is_not_reported_as_a_known_charg
 def test_standalone_themes_emotion_survives_a_malformed_transcript(completed, db_session, messages):
     """emotion() rides the free view and the post-charge response; it cannot 500 either."""
     from src.persistence.models import Job
-    client, url, batch, _, _, _ = completed
+    client, url, batch, _, _, _, memo = completed
     job = db_session.scalars(select(Job).where(Job.public_id == batch['job_id'])).one()
     result = dict(job.result_json)
     transcripts = [dict(t) for t in result['transcripts']]
@@ -458,7 +463,7 @@ def test_standalone_themes_never_exceeds_its_authorized_call_budget(completed):
     """
     import time as _time
     from src.services import standalone_themes as themes_module
-    client, url, _, calls, themes, payload = completed
+    client, url, _, calls, themes, payload, memo = completed
     themes[0]['representative_quote'] = 'a quote no re-ask will ever ground'
     provider = insights_module._call_openrouter_messages
     insights_module._call_openrouter_messages = lambda **kw: (_time.sleep(1), provider(**kw))[1]
@@ -491,7 +496,7 @@ def test_standalone_themes_emotion_does_not_label_a_keen_interviewee_negative(co
     assert classify_interview_transcript(messages)['emotional_classification'] == 'negative', (
         'the whole-transcript reading this design exists to avoid')
 
-    client, url, batch, _, _, _ = completed
+    client, url, batch, _, _, _, memo = completed
     job = db_session.scalars(select(Job).where(Job.public_id == batch['job_id'])).one()
     result = dict(job.result_json)
     transcripts = [dict(t) for t in result['transcripts']]
@@ -509,7 +514,7 @@ def test_standalone_themes_emotion_does_not_label_a_keen_interviewee_negative(co
 def test_standalone_themes_emotion_ignores_the_interviewer(completed, db_session):
     """The interviewer asks about objections for a living; their words are not the room's."""
     from src.persistence.models import Job
-    client, url, batch, _, _, _ = completed
+    client, url, batch, _, _, _, memo = completed
     job = db_session.scalars(select(Job).where(Job.public_id == batch['job_id'])).one()
     result = dict(job.result_json)
     transcripts = [dict(t) for t in result['transcripts']]
@@ -528,7 +533,7 @@ def test_standalone_themes_emotion_ignores_the_interviewer(completed, db_session
 def test_standalone_themes_emotion_distribution_and_header_come_from_one_path(completed, db_session):
     """Answers given and answers read are two numbers, and both must describe the same room."""
     from src.persistence.models import Job
-    client, url, batch, _, _, _ = completed
+    client, url, batch, _, _, _, memo = completed
     job = db_session.scalars(select(Job).where(Job.public_id == batch['job_id'])).one()
     emotion = client.get(url).json()['data']['insights']['emotion']
     assert emotion['answers'] == sum(p['classified'] for p in emotion['personas']), (
@@ -537,3 +542,40 @@ def test_standalone_themes_emotion_distribution_and_header_come_from_one_path(co
     assert all(sum(p[n] for n in ('positive', 'neutral', 'negative')) == p['classified']
                for p in emotion['personas'])
     assert job.result_json['transcripts']
+
+
+def test_standalone_themes_saves_the_whole_memo(completed):
+    """Themes alone are two thirds of what PA3.5 asks a student to hand in."""
+    client, url, batch, calls, themes, payload, memo = completed
+    saved = client.post(url, json=payload).json()['data']['insights']['saved']
+    assert saved['themes'] == themes
+    assert saved['surprise'] == memo['surprise']
+    assert saved['answer_options'] == memo['answer_options']
+    assert len(saved['answer_options']) >= 3
+
+
+def test_standalone_themes_rejects_a_fabricated_surprise_quote(completed):
+    """A surprise nobody said is the student's evidence, not the model's opinion."""
+    client, url, batch, calls, themes, payload, memo = completed
+    memo['surprise']['quote'] = 'a surprise nobody voiced'
+    saved = client.post(url, json=payload).json()['data']['insights']['saved']
+    assert saved['themes'] is None
+    assert saved['reason'] == "Surprise quote is not in %s's answers" % memo['surprise']['quote_persona_id']
+
+
+def test_standalone_themes_rejects_a_fabricated_answer_option(completed):
+    """Closed-ended options must be in participant language, which means participants' words."""
+    client, url, batch, calls, themes, payload, memo = completed
+    memo['answer_options'][1]['text'] = 'wording the moderator invented'
+    saved = client.post(url, json=payload).json()['data']['insights']['saved']
+    assert saved['themes'] is None
+    assert saved['reason'] == "Answer option 2 is not in %s's answers" % memo['answer_options'][1]['quote_persona_id']
+
+
+def test_standalone_themes_requires_three_answer_options(completed):
+    """PA3.5's floor is three; two is a memo that cannot be handed in."""
+    client, url, batch, calls, themes, payload, memo = completed
+    memo['answer_options'] = memo['answer_options'][:2]
+    saved = client.post(url, json=payload).json()['data']['insights']['saved']
+    assert saved['themes'] is None
+    assert saved['reason'] == 'Expected at least 3 answer options, got 2'

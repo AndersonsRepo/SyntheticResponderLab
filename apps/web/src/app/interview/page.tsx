@@ -47,7 +47,9 @@ type Themes = {
   from_run_id: string; revision: string; eligible: boolean; available: boolean; stale: boolean;
   estimated_cost_usd: string; model: string; message: string; session_usage?: { cost_usd: string };
   saved: { revision: string; attempt: number; message?: string; budget_stop?: string;
-    themes: { label: string; synthesis: string; representative_quote: string; quote_persona_id: string; sentiment: string }[] | null } | null;
+    themes: { label: string; synthesis: string; representative_quote: string; quote_persona_id: string; sentiment: string }[] | null;
+    surprise?: { summary: string; quote: string; quote_persona_id: string } | null;
+    answer_options?: { text: string; quote_persona_id: string }[] | null } | null;
   emotion?: { scored: number; interviewed: number; answers: number; label: string;
     counts: Record<string, number>;
     personas: { persona_id: string | null; fit_tier: string; answers: number;
@@ -571,6 +573,7 @@ function InterviewPageContent() {
                 Use the per-theme sentiment above for the considered read.
               </p>
             </section> : null}
+            {themes.saved?.themes?.length ? <p className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-app-muted">Memo</p> : null}
             {themes.saved?.themes?.map((theme, index) => <article className="my-4" key={index}>
               <h3 className="font-semibold">{theme.label} · {theme.sentiment}</h3><p>{theme.synthesis}</p>
               <blockquote>“{theme.representative_quote}”</blockquote>
@@ -579,6 +582,25 @@ function InterviewPageContent() {
                 transcript?.setAttribute("open", "");
               }}>{theme.quote_persona_id} — locate interviewee quote</a>
             </article>)}
+            {themes.saved?.surprise ? <article className="my-4">
+              <h3 className="font-semibold">One surprise</h3>
+              <p>{themes.saved.surprise.summary}</p>
+              <blockquote>“{themes.saved.surprise.quote}”</blockquote>
+              <a className="underline" href={`#transcript-${themes.saved.surprise.quote_persona_id}`} onClick={() => {
+                document.getElementById(`transcript-${themes.saved!.surprise!.quote_persona_id}`)?.setAttribute("open", "");
+              }}>{themes.saved.surprise.quote_persona_id} — locate interviewee quote</a>
+            </article> : null}
+            {themes.saved?.answer_options?.length ? <article className="my-4">
+              <h3 className="font-semibold">Closed-ended answer options</h3>
+              <p className="text-sm text-app-muted">Each one is a participant's own wording, copied from an answer.</p>
+              <ul className="mt-2 list-disc pl-5">
+                {themes.saved.answer_options.map((option, index) => <li key={index}>
+                  “{option.text}” — <a className="underline" href={`#transcript-${option.quote_persona_id}`} onClick={() => {
+                    document.getElementById(`transcript-${option.quote_persona_id}`)?.setAttribute("open", "");
+                  }}>{option.quote_persona_id}</a>
+                </li>)}
+              </ul>
+            </article> : null}
           </div> : null}
         </GlassPanel> : null}
         {regenerationCost ? <p className="mt-3 text-sm" role="status">Measured session cost after regeneration: ${Number(regenerationCost).toFixed(6)}</p> : null}
@@ -770,12 +792,12 @@ function InterviewPageContent() {
                 <p>Measured cost: ${Number(batch.session_usage.cost_usd).toFixed(6)} · Estimate at start: ${Number(batch.estimated_cost_usd).toFixed(4)}</p>
                 <p className="text-xs text-app-muted">Interviewer: {batch.interviewer_model} · Interviewee: {batch.interviewee_model}</p>
                 <div className="flex gap-2">{(["csv", "md"] as const).map(format => <Button key={format} variant="secondary" onClick={() => {
-                  const exported = batchExport(batch, format);
+                  const exported = batchExport(batch, format, themes?.saved);
                   const url = URL.createObjectURL(exported.blob);
                   const link = document.createElement("a");
                   link.href = url; link.download = exported.filename;
                   document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
-                }}>Download batch {format === "csv" ? "CSV" : "Markdown"}</Button>)}</div>
+                }}>{format === "csv" ? "Download batch CSV" : "Export transcript + memo"}</Button>)}</div>
                 {batch.error ? <p role="alert">{batch.error.details?.scope ? `${batch.error.details.scope} cap: ` : ""}{batch.error.message}</p> : null}
                 {batch.transcripts.map(transcript => <details id={`transcript-${transcript.persona_id}`} key={transcript.persona_id} className="rounded-xl border border-app-border p-3">
                   <summary>{transcript.persona_id} · {Math.floor(transcript.messages.length / 2)}/{batch.turn_limit} answers</summary>

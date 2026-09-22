@@ -403,7 +403,9 @@ for (const status of ["completed", "budget_stopped"] as const) {
     ui.nodes().find(n => n.props["aria-label"] === "Saved batches")!.props.onChange({ target: { value: saved.job_id } });
     ui.render();
     await ui.button("Download batch CSV").props.onClick();
-    await ui.button("Download batch Markdown").props.onClick();
+    // Renamed to match the focus group: the Markdown now carries the memo, not just
+    // the transcript, which is what a student actually hands in.
+    await ui.button("Export transcript + memo").props.onClick();
     const csv = await batchExport(saved, "csv").blob.text();
     assert.match(csv, /"neo-001","cheap-a","cheap-b","1","Question","Why, ""this""\?\nNext line"/);
     assert.match(csv, /"2","Question","Unanswered question"/);
@@ -412,6 +414,8 @@ for (const status of ["completed", "budget_stopped"] as const) {
     assert.match(md, /Interviewer: cheap-a · Interviewee: cheap-b/);
     assert.match(md, /My answer/);
     assert.match(md, /Unanswered question/);
+    // No memo saved yet: a transcript-only export, with no empty Memo heading dangling.
+    assert.doesNotMatch(md, /# Memo/);
   });
 }
 
@@ -525,7 +529,8 @@ test("classroom dismissing theme charge preserves transcripts without a POST", a
   await ui.button("Generate themes").props.onClick(); ui.render();
   assert.equal(ui.calls.length, 1);
   assert.equal(ui.calls[0].payload, undefined);
-  assert.match(ui.text(), /Download batch/);
+  assert.match(ui.text(), /Download batch CSV/);
+  assert.match(ui.text(), /Export transcript \+ memo/);
 });
 
 test("the interview step picks which persona is being interviewed, and keeps the run's models", async () => {

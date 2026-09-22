@@ -386,6 +386,12 @@ The quote is checked against the transcript, and the whole response is rejected 
 
 "count" is how many of the interviews below mention the theme. It is a whole number and cannot exceed the number of interviews.
 
+Also write the rest of the one-page memo this student has to hand in:
+- "surprise": the single most surprising thing anyone said, in one sentence, with the verbatim quote it rests on and whose it is.
+- "answer_options": at least 3 closed-ended survey options, each one phrased in a participant's own words — copy the wording from an answer rather than writing your own.
+
+Every quote and every answer option is checked against the transcript the same way, character for character, from a single answer by the persona you name.
+
 Return ONLY a JSON object:
 {{
   "themes": [
@@ -397,6 +403,11 @@ Return ONLY a JSON object:
       "quote_persona_id": "...",
       "sentiment": "positive" | "neutral" | "negative"
     }},
+    ...
+  ],
+  "surprise": {{"summary": "one sentence", "quote": "<verbatim>", "quote_persona_id": "..."}},
+  "answer_options": [
+    {{"text": "<verbatim participant wording>", "quote_persona_id": "..."}},
     ...
   ]
 }}"""
@@ -434,7 +445,10 @@ def _extract_insight_themes(pairs, brief_context, call):
     raw = call(system_prompt=_insights_system_prompt(brief_context),
                user_prompt=f"There are {len(pairs)} interviews.\n\nINTERVIEW TRANSCRIPTS:\n"
                            f"{_build_transcript_corpus(pairs)}")
-    return json.loads(_strip_json_fence(raw)).get("themes") or []
+    # The whole memo, not just its themes: the surprise and the answer options are
+    # graded parts of PA3.5 and ride the same single call.
+    parsed = json.loads(_strip_json_fence(raw))
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def get_interview_insights(
@@ -489,8 +503,10 @@ def get_interview_insights(
             brief_context = f"\nRESEARCH QUESTION: {primary_q}\n"
 
     try:
+        # This legacy path only ever surfaced themes; the memo fields ride the same
+        # response and are simply not read here.
         themes = _extract_insight_themes(pairs, brief_context, lambda **prompts: _call_openrouter_json(
-            api_key=api_key, model="openai/gpt-4o-mini", timeout=90, **prompts))
+            api_key=api_key, model="openai/gpt-4o-mini", timeout=90, **prompts)).get("themes") or []
     except Exception as exc:
         return {
             "available": False,
