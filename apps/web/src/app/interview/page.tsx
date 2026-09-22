@@ -79,6 +79,8 @@ export default function InterviewPage() {
 function InterviewPageContent() {
   const { studyId, studyBootstrapError } = useStudy();
   const [personas, setPersonas] = useState<InterviewPersona[]>([]);
+  // Empty means "the first N by the slider", which is every batch run so far.
+  const [recruited, setRecruited] = useState<string[]>([]);
   const [source, setSource] = useState("");
   const [selectedId, setSelectedId] = useState<string>("");
   const [models, setModels] = useState<InterviewModelCatalogEntry[]>([]);
@@ -120,7 +122,7 @@ function InterviewPageContent() {
   const activity = useRef(false);
   const pauseBatch = useRef(false);
   const generation = useRef(0);
-  const batchRequest = useRef<{ request_id: string; persona_count: number; interviewer_model: string; interviewee_model: string; allow_expensive_models: boolean } | null>(null);
+  const batchRequest = useRef<{ request_id: string; persona_count: number; interviewer_model: string; interviewee_model: string; allow_expensive_models: boolean; persona_ids?: string[] } | null>(null);
   const [step, setStep] = useState(0);
   const [themes, setThemes] = useState<Themes | null>(null);
   const [themesLoading, setThemesLoading] = useState(false);
@@ -155,6 +157,7 @@ function InterviewPageContent() {
   }, [turns, loading]);
 
   const persona = personas.find((entry) => entry.persona_id === selectedId);
+  const roomSize = recruited.length || personaCount;
   const interviewerModelEntry = models.find((entry) => entry.id === interviewerModel);
   const intervieweeModelEntry = models.find((entry) => entry.id === intervieweeModel);
   const preflightCostEstimate =
@@ -344,7 +347,7 @@ function InterviewPageContent() {
   async function runBatch(resume = false, recoverRequest = false) {
     if (!studyId || activity.current || !interviewerModel || !intervieweeModel) return;
     const settings = resume && batch ? batch : recoverRequest ? batchRequest.current : {
-      persona_count: personaCount, interviewer_model: interviewerModel, interviewee_model: intervieweeModel,
+      persona_count: roomSize, interviewer_model: interviewerModel, interviewee_model: intervieweeModel,
       allow_expensive_models: expensiveOptIn,
     };
     if (!settings) return;
@@ -366,9 +369,11 @@ function InterviewPageContent() {
         current = (await interviewOperation<{ batch: Batch }>(studyId, `batches/${batch.job_id}`)).batch;
       } else {
         const request = (recoverRequest ? batchRequest.current : null) ?? {
-          request_id: crypto.randomUUID(), persona_count: personaCount,
+          request_id: crypto.randomUUID(), persona_count: roomSize,
           interviewer_model: interviewerModel, interviewee_model: intervieweeModel,
           allow_expensive_models: expensiveOptIn,
+          // Only a hand-picked room sends ids; the server keeps its first-N default.
+          ...(recruited.length ? { persona_ids: recruited } : {}),
         };
         batchRequest.current = request;
         localStorage.setItem(`interview-batch-request:${studyId}`, JSON.stringify(request));
@@ -713,7 +718,7 @@ function InterviewPageContent() {
                     AI-to-AI batch size
                   </label>
                   <span className="text-sm font-semibold tabular-nums text-app-text">
-                    {personaCount} personas
+                    {roomSize} personas
                   </span>
                 </div>
                 <input
@@ -733,6 +738,51 @@ function InterviewPageContent() {
                   <span>{personaCountRange.maximum} maximum</span>
                 </div>
 
+                <div className="mt-5 border-t border-app-border pt-5">
+                  <div className="flex items-center justify-between gap-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-app-muted">
+                      Recruit the room
+                    </p>
+                    {recruited.length ? <button type="button" className="text-xs underline"
+                      onClick={() => setRecruited([])} disabled={modelsLocked}>
+                      Clear ({recruited.length})
+                    </button> : null}
+                  </div>
+                  <p className="mt-2 text-xs leading-5 text-app-muted">
+                    {recruited.length
+                      ? `Interviewing the ${recruited.length} you picked: ${recruited.join(", ")}.`
+                      : `No one picked, so the run takes the first ${personaCount} on the roster. Tick anyone to recruit them instead.`}
+                  </p>
+                  <div aria-label="Recruit the room" className="fine-scrollbar mt-3 flex max-h-[14rem] flex-col gap-1 overflow-y-auto pr-1">
+                    {personas.map((entry) => (
+                      <label key={entry.persona_id} className="flex items-start gap-2 text-xs leading-5">
+                        <input
+                          type="checkbox"
+                          aria-label={`Recruit ${entry.persona_id}`}
+                          checked={recruited.includes(entry.persona_id)}
+                          disabled={modelsLocked}
+                          onChange={() => setRecruited(recruited.includes(entry.persona_id)
+                            ? recruited.filter((id) => id !== entry.persona_id)
+                            // Appended, so the room runs in the order it was recruited.
+                            : [...recruited, entry.persona_id])}
+                          className="mt-1 size-4 accent-[var(--color-gold)] disabled:cursor-not-allowed"
+                        />
+                        <span>
+                          <span className="font-semibold text-app-text">{entry.persona_id}</span>
+                          <span className="block text-app-muted">
+                            {entry.census_profile.split(".").slice(0, 2).join(".") || "\u2014"}
+                          </span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  {recruited.length && recruited.length < personaCountRange.minimum ? (
+                    <p role="alert" className="mt-2 text-xs text-app-muted">
+                      A room needs at least {personaCountRange.minimum} people. Pick {personaCountRange.minimum - recruited.length} more.
+                    </p>
+                  ) : null}
+                </div>
+
                 <div className="mt-4 rounded-xl border border-app-border px-4 py-3">
                   <p className="text-xs font-semibold uppercase tracking-[0.14em] text-app-muted">
                     Pre-flight estimate
@@ -743,7 +793,7 @@ function InterviewPageContent() {
                       : `This run will cost about ${formatInterviewRunCostEstimate(preflightCostEstimate)}`}
                   </p>
                   <p className="mt-1 text-xs leading-5 text-app-muted">
-                    For {personaCount} personas with both selected models
+                    For {roomSize} personas with both selected models
                     {costEstimateAssumptions
                       ? `, allowing ${costEstimateAssumptions.prompt_tokens_per_model_persona.toLocaleString()} input and ${costEstimateAssumptions.completion_tokens_per_model_persona.toLocaleString()} output tokens per model/persona.`
                       : "."}
@@ -757,8 +807,8 @@ function InterviewPageContent() {
 
             <GlassPanel hidden={step === 0} style={{ display: step === 0 ? "none" : undefined }} className="p-5" aria-label="AI-to-AI batch results">
               <div className="flex flex-wrap gap-2">
-                <Button disabled={busy || !studyId || !interviewerModel || !intervieweeModel} onClick={() => runBatch()}>
-                  Run AI-to-AI batch ({personaCount} personas)
+                <Button disabled={busy || !studyId || !interviewerModel || !intervieweeModel || (recruited.length > 0 && recruited.length < personaCountRange.minimum)} onClick={() => runBatch()}>
+                  Run AI-to-AI batch ({roomSize} personas)
                 </Button>
                 {batchRequest.current ? (
                   <Button variant="secondary" disabled={busy} onClick={() => runBatch(false, true)}>

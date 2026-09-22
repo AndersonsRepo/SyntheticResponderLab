@@ -633,3 +633,42 @@ def test_reasoning_only_response_records_measured_cost(classroom, monkeypatch, d
     if activity == 'regenerate':
         monkeypatch.setattr('src.services.interview_service._call_openrouter_messages', successful_provider)
         assert regen(client, study_id, original['answer_id'], version=1, retry=True).status_code == 200
+
+
+def _roster(client):
+    return [row['persona_id'] for row in client.get('/api/v1/personas').json()['data']['personas']]
+
+
+def test_start_batch_runs_the_hand_picked_room_in_the_order_it_was_built(classroom):
+    """A recruited room is the personas the student named, not the first N rows."""
+    client, study_id, calls = classroom
+    roster = _roster(client)
+    picked = [roster[7], roster[2], roster[19]]
+    batch = start(client, study_id, persona_ids=picked).json()['data']['batch']
+    assert batch['persona_ids'] == picked
+    assert batch['persona_count'] == 3
+
+
+def test_start_batch_rejects_a_room_naming_a_persona_that_does_not_exist(classroom):
+    client, study_id, calls = classroom
+    roster = _roster(client)
+    response = start(client, study_id, persona_ids=[roster[0], roster[1], 'neo-999'])
+    assert response.status_code == 400
+    assert 'neo-999' in response.json()['error']['message']
+
+
+def test_start_batch_rejects_a_room_that_lists_one_persona_twice(classroom):
+    """Two copies of one persona is one voice billed twice, not a room of two."""
+    client, study_id, calls = classroom
+    first = _roster(client)[0]
+    response = start(client, study_id, persona_ids=[first, first, _roster(client)[1]])
+    assert response.status_code == 400
+    assert 'repeat' in response.json()['error']['message']
+
+
+def test_start_batch_holds_a_hand_picked_room_to_the_same_size_bounds(classroom):
+    """Picking by hand must not slip past the floor the slider enforces."""
+    client, study_id, calls = classroom
+    response = start(client, study_id, persona_ids=_roster(client)[:2])
+    assert response.status_code == 400
+    assert 'persona_count must be between' in response.json()['error']['message']

@@ -227,14 +227,32 @@ def list_batches(session, settings, study):
 @serialized_local
 def start_batch(session, settings, study, payload):
     from src.services.interview_service import utcnow
-    count = payload.get("persona_count")
+    # A hand-picked room names its personas; without one the room is still the first
+    # N by row_index, which is what every saved batch so far was run with.
+    requested_ids = payload.get("persona_ids")
+    if requested_ids is not None:
+        if not isinstance(requested_ids, list) or not all(
+                isinstance(persona_id, str) and persona_id.strip() for persona_id in requested_ids):
+            raise ValidationApiError("persona_ids must be a list of persona_id strings.")
+        if len(set(requested_ids)) != len(requested_ids):
+            raise ValidationApiError("persona_ids must not repeat a persona.")
+    count = len(requested_ids) if requested_ids is not None else payload.get("persona_count")
     interviewer, interviewee = payload.get("interviewer_model"), payload.get("interviewee_model")
     validate_models([interviewer, interviewee], payload.get("allow_expensive_models"))
     try:
         plan = derive_interviewer_turn_plan(persona_count=count, interviewer_model=interviewer, interviewee_model=interviewee)
     except ValueError as exc:
         raise ValidationApiError(str(exc)) from exc
-    personas = session.scalars(select(Persona).order_by(Persona.row_index).limit(count)).all()
+    if requested_ids is not None:
+        found = {p.persona_id: p for p in session.scalars(
+            select(Persona).where(Persona.persona_id.in_(requested_ids))).all()}
+        missing = [persona_id for persona_id in requested_ids if persona_id not in found]
+        if missing:
+            raise ValidationApiError(f"Unknown personas: {', '.join(sorted(missing))}.")
+        # The student's order is the running order, so the room reads as they built it.
+        personas = [found[persona_id] for persona_id in requested_ids]
+    else:
+        personas = session.scalars(select(Persona).order_by(Persona.row_index).limit(count)).all()
     if len(personas) != count:
         raise ValidationApiError("The requested fixed personas are unavailable.")
     # Client supplies a stable request ID so a lost creation response is recoverable.

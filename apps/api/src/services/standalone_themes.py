@@ -26,6 +26,9 @@ MEMO_MIN_ANSWER_OPTIONS = 3
 # near-vacuous without a floor: a single letter is a substring of almost any answer.
 # Three words is the shortest thing that reads as an option ("too far away").
 MEMO_MIN_OPTION_WORDS = 3
+# The completion ceiling for one extraction. The quoted price and the call itself both
+# read it, so a student can never confirm a ceiling the call is allowed to exceed.
+MEMO_MAX_COMPLETION_TOKENS = 4000
 # One authorization's whole provider budget, shared across those calls. The class
 # budget lock is held for the entire request, so two serial 90s calls would double
 # how long every other student waits behind it.
@@ -223,7 +226,7 @@ def status(job):
         len(pairs) == job.payload_json.get("persona_count") and
         all(len(p["model_a"]["answers"]) >= job.payload_json.get("turn_limit", 8) for p in pairs))
     # Conservative planning estimate: at most one token per UTF-8 byte plus the
-    # provider's 2,000 output-token cap, at this model's catalog rates, times the most
+    # provider's output-token cap, at this model's catalog rates, times the most
     # calls one authorization can make. Estimated over the corpus actually sent, which
     # is the narrowed one. The student confirms the ceiling, never a best case.
     prompt = (insights._insights_system_prompt()
@@ -231,7 +234,8 @@ def status(job):
     model = next(m for m in list_interview_model_catalog()["models"] if m["id"] == MODEL)
     estimate = MAX_PROVIDER_CALLS * (
         (Decimal(len(prompt.encode()) + 100) * Decimal(str(model["prompt_price_per_million"])) +
-         Decimal(2000) * Decimal(str(model["completion_price_per_million"]))) / Decimal(1000000))
+         Decimal(MEMO_MAX_COMPLETION_TOKENS) *
+         Decimal(str(model["completion_price_per_million"]))) / Decimal(1000000))
     return {"from_run_id": job.public_id, "revision": revision, "eligible": complete,
         "available": bool(saved and saved.get("themes")), "stale": bool(saved and saved["revision"] != revision),
         "message": "Generate themes to compare with your hand-coding." if complete else
@@ -298,10 +302,9 @@ def standalone_themes(session, settings, study, job_id, payload=None):
                 timeout=max(10, int(deadline - time.monotonic())), max_attempts=1,
                 # A persona answer is a paragraph; this response is 3-6 themes with
                 # verbatim quotes plus a surprise plus 3+ grounded options. At the
-                # shared 2000 default it can stop mid-object, and an unparseable
-                # response is billed, is not a rule the re-ask can fix, and saves
-                # nothing. Unused headroom is free: only emitted tokens are charged.
-                max_tokens=4000)
+                # shared default it can stop mid-object, and an unusable response is
+                # billed, is not a rule the re-ask can fix, and saves nothing.
+                max_tokens=MEMO_MAX_COMPLETION_TOKENS)
         except TransientProviderError as exc:
             # The provider charged for this call even though its content is unusable.
             # Record the spend before failing, or the next budget check undercounts

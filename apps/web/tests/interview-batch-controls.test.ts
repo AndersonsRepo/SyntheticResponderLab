@@ -483,6 +483,34 @@ const themeView = {
   estimated_cost_usd: ".002", model: "openai/gpt-4o-mini", message: "Ready", saved: null,
 };
 
+test("a recruited room is the personas the student ticked, in the order they ticked them", async () => {
+  const ui = harness(); await ui.settle();
+  // Nobody recruited: the run is still the slider's first N, with no ids sent.
+  assert.match(ui.text(), /No one picked/);
+  for (const id of ["neo-003", "neo-001", "neo-002"]) {
+    ui.nodes().find(n => n.props["aria-label"] === `Recruit ${id}`)!.props.onChange();
+    ui.render();
+  }
+  assert.match(ui.text(), /Interviewing the 3 you picked: neo-003, neo-001, neo-002/);
+  assert.match(ui.text(), /Run AI-to-AI batch \(3 personas\)/);
+  ui.setTransport(async () => ({ batch: { ...batch, status: "completed", persona_count: 3 } }));
+  await ui.button("Run AI-to-AI batch").props.onClick(); ui.render();
+  assert.deepEqual(ui.calls[0].payload.persona_ids, ["neo-003", "neo-001", "neo-002"]);
+  assert.equal(ui.calls[0].payload.persona_count, 3);
+});
+
+test("a room smaller than the minimum cannot be run", async () => {
+  const ui = harness(); await ui.settle();
+  ui.nodes().find(n => n.props["aria-label"] === "Recruit neo-001")!.props.onChange();
+  ui.render();
+  assert.match(ui.text(), /Pick 2 more/);
+  assert.equal(ui.button("Run AI-to-AI batch").props.disabled, true);
+  // Unticking puts the slider's room back, so the student is never stuck.
+  ui.nodes().find(n => n.props["aria-label"] === "Recruit neo-001")!.props.onChange();
+  ui.render();
+  assert.equal(ui.button("Run AI-to-AI batch").props.disabled, false);
+});
+
 test("classroom themes require separate charge confirmation and navigation never generates", async () => {
   const ui = harness([{ ...batch, status: "completed" }]); await ui.settle();
   ui.nodes().find(n => n.props["aria-label"] === "Saved batches")!.props.onChange({ target: { value: "batch_1" } });

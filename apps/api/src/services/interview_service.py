@@ -379,12 +379,12 @@ _MEMO_SECTION = """Also write the rest of the one-page memo this student has to 
 Every quote and every answer option is checked against the transcript the same way, character for character, from a single answer by the persona you name.
 
 """
-_MEMO_SHAPE = """  "surprise": {"summary": "one sentence", "quote": "<verbatim>", "quote_persona_id": "..."},
+_MEMO_SHAPE = """,
+  "surprise": {"summary": "one sentence", "quote": "<verbatim>", "quote_persona_id": "..."},
   "answer_options": [
     {"text": "<verbatim participant wording>", "quote_persona_id": "..."},
     ...
-  ]
-"""
+  ]"""
 
 
 def _insights_system_prompt(brief_context: str = "", memo: bool = True) -> str:
@@ -417,8 +417,8 @@ The quote is checked against the transcript, and the whole response is rejected 
       "sentiment": "positive" | "neutral" | "negative"
     }},
     ...
-  ],
-{memo_shape}}}"""
+  ]{memo_shape}
+}}"""
 
 
 def _strip_json_fence(raw: str) -> str:

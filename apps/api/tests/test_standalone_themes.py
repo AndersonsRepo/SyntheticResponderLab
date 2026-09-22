@@ -605,8 +605,9 @@ def test_standalone_themes_rejects_a_too_short_answer_option(completed):
 def test_standalone_themes_asks_for_room_the_memo_needs(completed):
     """The cap that matters is the one on the call the memo is actually made by."""
     client, url, batch, calls, themes, payload, memo = completed
+    from src.services.standalone_themes import MEMO_MAX_COMPLETION_TOKENS
     client.post(url, json=payload)
-    assert calls[0]['max_tokens'] == 4000
+    assert calls[0]['max_tokens'] == MEMO_MAX_COMPLETION_TOKENS
 
 
 def test_interview_insights_prompt_omits_the_memo_it_discards():
@@ -640,3 +641,25 @@ def test_standalone_themes_reask_recovers_a_rejected_surprise(completed):
     assert saved['available'], saved.get('saved', {}).get('message')
     assert len(calls) == 2
     assert saved['saved']['surprise']['quote'] == good
+
+
+def test_standalone_themes_quotes_the_ceiling_the_call_is_allowed_to_reach(completed):
+    """The confirmed price has to cover the cap the call actually runs with."""
+    from decimal import Decimal
+    from src.services.model_catalog import list_interview_model_catalog
+    from src.services.standalone_themes import (MAX_PROVIDER_CALLS, MEMO_MAX_COMPLETION_TOKENS,
+                                                MODEL)
+    client, url, batch, calls, themes, payload, memo = completed
+    quoted = Decimal(client.get(url).json()['data']['insights']['estimated_cost_usd'])
+    model = next(m for m in list_interview_model_catalog()['models'] if m['id'] == MODEL)
+    completion = (MAX_PROVIDER_CALLS * Decimal(MEMO_MAX_COMPLETION_TOKENS)
+                  * Decimal(str(model['completion_price_per_million'])) / Decimal(1000000))
+    assert quoted >= completion
+
+
+def test_interview_insights_prompt_shows_valid_json_either_way():
+    """A trailing comma in the example is a shape the model will happily copy."""
+    from src.services.interview_service import _insights_system_prompt
+    for prompt in (_insights_system_prompt(), _insights_system_prompt(memo=False)):
+        assert '],\n}' not in prompt
+        assert prompt.rstrip().endswith('}')
