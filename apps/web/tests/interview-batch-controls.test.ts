@@ -13,7 +13,7 @@ import { isClassroomInterviewApiRequest } from "../src/lib/classroom-access";
 // Render the actual page with deterministic hooks and transport. This exercises its
 // event handlers and rendered controls without a browser or a paid provider.
 type Element = { type: unknown; props: Record<string, any> };
-function harness(savedBatches: any[] = [], comparisonFetcher?: Parameters<typeof comparisonHelpers.runInterviewComparison>[1]) {
+function harness(savedBatches: any[] = [], comparisonFetcher?: Parameters<typeof comparisonHelpers.runInterviewComparison>[1], carried?: Map<string, string>) {
   let confirmResult = true;
   const confirmations: string[] = [];
   const states: any[] = [];
@@ -28,7 +28,7 @@ function harness(savedBatches: any[] = [], comparisonFetcher?: Parameters<typeof
     { id: "expensive-a", name: "Expensive A", tier: "expensive", prompt_price_per_million: 3, completion_price_per_million: 15, estimated_cost_per_persona_usd: .05 },
   ];
   const personas = ["neo-001", "neo-002", "neo-003"].map(persona_id => ({ persona_id, lifestyle_tags: [], census_profile: "Household" }));
-  const memory = new Map<string, string>();
+  const memory = carried ?? new Map<string, string>();
   let transport: (path: string, payload: any) => Promise<any> = async () => { throw new Error("unexpected request"); };
   let exportsPayload: any;
   const exportedMemos: any[] = [];
@@ -582,6 +582,26 @@ test("a rejected extraction shows no surprise and no options on the page", async
   assert.doesNotMatch(ui.text(), /What the model found/);
   assert.doesNotMatch(ui.text(), /A surprise/);
   assert.doesNotMatch(ui.text(), /an option/);
+});
+
+test("the memo a student is part way through survives a reload", async () => {
+  const ui = harness([{ ...batch, status: "completed" }]); await ui.settle();
+  ui.button("3. Themes").props.onClick(); ui.render();
+  ui.nodes().find(n => n.props["aria-label"] === "Your themes")!
+    .props.onChange({ target: { value: "People want quiet" } });
+  ui.nodes().find(n => n.props["aria-label"] === "Your answer option 1")!
+    .props.onChange({ target: { value: "a door I can close" } });
+  ui.render();
+  assert.equal(JSON.parse(ui.memory.get("interview-memo")!).themes, "People want quiet");
+
+  // A fresh mount is what a reload is: the writing has to still be in the fields.
+  const reloaded = harness([{ ...batch, status: "completed" }], undefined, ui.memory);
+  await reloaded.settle();
+  reloaded.button("3. Themes").props.onClick(); reloaded.render();
+  assert.equal(reloaded.nodes().find(n => n.props["aria-label"] === "Your themes")!.props.value,
+    "People want quiet");
+  assert.equal(reloaded.nodes().find(n => n.props["aria-label"] === "Your answer option 1")!.props.value,
+    "a door I can close");
 });
 
 test("classroom switching saved runs rejects late themes", async () => {

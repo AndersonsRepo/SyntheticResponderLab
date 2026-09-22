@@ -83,7 +83,23 @@ function InterviewPageContent() {
   const [recruited, setRecruited] = useState<string[]>([]);
   // PA3.5 grades the student's own memo. Ours is the thing they check it against,
   // so theirs is what the export leads with and the only one they write.
-  const [myMemo, setMyMemo] = useState<StudentMemo>({ themes: "", surprise: "", options: ["", "", ""] });
+  // Kept in localStorage: a reload in the middle of writing must not cost the
+  // student the memo they are graded on.
+  const [myMemo, setMyMemo] = useState<StudentMemo>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("interview-memo") || "null");
+      if (saved && typeof saved.themes === "string" && typeof saved.surprise === "string"
+          && Array.isArray(saved.options)) return saved as StudentMemo;
+    } catch { /* a corrupt or blocked store is an empty form, never a crash */ }
+    return { themes: "", surprise: "", options: ["", "", ""] };
+  });
+  // Updater form, never a snapshot: two fields edited in one batch would otherwise
+  // write the second one on top of a memo that had already lost the first.
+  const editMemo = (update: (prev: StudentMemo) => StudentMemo) => setMyMemo((prev) => {
+    const next = update(prev);
+    try { localStorage.setItem("interview-memo", JSON.stringify(next)); } catch { /* ignore */ }
+    return next;
+  });
   const [source, setSource] = useState("");
   const [selectedId, setSelectedId] = useState<string>("");
   const [models, setModels] = useState<InterviewModelCatalogEntry[]>([]);
@@ -558,6 +574,33 @@ function InterviewPageContent() {
           <p>Themes are available for completed batches. Single-question explorations remain in the Interview step.</p>
           <Button disabled={!batch || busy} onClick={() => loadThemes()}>Check saved themes (free)</Button>
           {themesLoading ? <p role="status">Loading themes…</p> : null}
+          <section className="my-5 border-t border-app-border pt-5">
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-app-muted">Your memo</p>
+            <p className="mt-2 text-xs leading-5 text-app-muted">
+              This is the one you hand in. Write it from the transcripts; what the model
+              found is below, to check yourself against, and it is labelled that way in
+              the download.
+            </p>
+            <label className="mt-3 block text-sm">Themes you heard
+              <textarea aria-label="Your themes" rows={4} value={myMemo.themes}
+                onChange={(event) => editMemo((prev) => ({ ...prev, themes: event.target.value }))}
+                className="mt-1 w-full rounded-xl border border-app-border bg-transparent p-2 text-sm" />
+            </label>
+            <label className="mt-3 block text-sm">One surprise
+              <textarea aria-label="Your surprise" rows={2} value={myMemo.surprise}
+                onChange={(event) => editMemo((prev) => ({ ...prev, surprise: event.target.value }))}
+                className="mt-1 w-full rounded-xl border border-app-border bg-transparent p-2 text-sm" />
+            </label>
+            <p className="mt-3 text-sm">Closed-ended answer options, in participants&rsquo; words</p>
+            {myMemo.options.map((option, index) => <input key={index} aria-label={`Your answer option ${index + 1}`}
+              value={option} onChange={(event) => editMemo((prev) => ({ ...prev,
+                options: prev.options.map((existing, at) => at === index ? event.target.value : existing) }))}
+              className="mt-2 w-full rounded-xl border border-app-border bg-transparent p-2 text-sm" />)}
+            <button type="button" className="mt-2 text-xs underline"
+              onClick={() => editMemo((prev) => ({ ...prev, options: [...prev.options, ""] }))}>
+              Add another option
+            </button>
+          </section>
           {themes && themes.from_run_id === batch?.job_id ? <div aria-live="polite">
             <p>{themes.message}</p>
             {themes.stale ? <p>These themes belong to an earlier transcript version. Generate again to compare the current version.</p> : null}
@@ -586,33 +629,6 @@ function InterviewPageContent() {
                 Use the per-theme sentiment above for the considered read.
               </p>
             </section> : null}
-            <section className="my-5 border-t border-app-border pt-5">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-app-muted">Your memo</p>
-              <p className="mt-2 text-xs leading-5 text-app-muted">
-                This is the one you hand in. Write it from the transcripts; what the model
-                found is below, to check yourself against, and it is labelled that way in
-                the download.
-              </p>
-              <label className="mt-3 block text-sm">Themes you heard
-                <textarea aria-label="Your themes" rows={4} value={myMemo.themes}
-                  onChange={(event) => setMyMemo({ ...myMemo, themes: event.target.value })}
-                  className="mt-1 w-full rounded-xl border border-app-border bg-transparent p-2 text-sm" />
-              </label>
-              <label className="mt-3 block text-sm">One surprise
-                <textarea aria-label="Your surprise" rows={2} value={myMemo.surprise}
-                  onChange={(event) => setMyMemo({ ...myMemo, surprise: event.target.value })}
-                  className="mt-1 w-full rounded-xl border border-app-border bg-transparent p-2 text-sm" />
-              </label>
-              <p className="mt-3 text-sm">Closed-ended answer options, in participants&rsquo; words</p>
-              {myMemo.options.map((option, index) => <input key={index} aria-label={`Your answer option ${index + 1}`}
-                value={option} onChange={(event) => setMyMemo({ ...myMemo,
-                  options: myMemo.options.map((existing, at) => at === index ? event.target.value : existing) })}
-                className="mt-2 w-full rounded-xl border border-app-border bg-transparent p-2 text-sm" />)}
-              <button type="button" className="mt-2 text-xs underline"
-                onClick={() => setMyMemo({ ...myMemo, options: [...myMemo.options, ""] })}>
-                Add another option
-              </button>
-            </section>
             {themes.saved?.themes?.length ? <p className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-app-muted">What the model found — for comparison, not for submission</p> : null}
             {themes.saved?.themes?.map((theme, index) => <article className="my-4" key={index}>
               <h3 className="font-semibold">{theme.label} · {theme.sentiment}</h3><p>{theme.synthesis}</p>
