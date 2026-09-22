@@ -40,7 +40,7 @@ import { WorkflowNav } from "@/components/ui/workflow-nav";
 import { StudyProvider, useStudy } from "@/providers/study-provider";
 import { ThemeProvider } from "@/providers/theme-provider";
 
-import { batchExport } from "@/lib/interview-batch-export";
+import { batchExport, type StudentMemo } from "@/lib/interview-batch-export";
 import { InterviewOperationError, interviewOperation, type Batch, type RegeneratedAnswer } from "@/lib/standalone-interview";
 
 type Themes = {
@@ -81,6 +81,9 @@ function InterviewPageContent() {
   const [personas, setPersonas] = useState<InterviewPersona[]>([]);
   // Empty means "the first N by the slider", which is every batch run so far.
   const [recruited, setRecruited] = useState<string[]>([]);
+  // PA3.5 grades the student's own memo. Ours is the thing they check it against,
+  // so theirs is what the export leads with and the only one they write.
+  const [myMemo, setMyMemo] = useState<StudentMemo>({ themes: "", surprise: "", options: ["", "", ""] });
   const [source, setSource] = useState("");
   const [selectedId, setSelectedId] = useState<string>("");
   const [models, setModels] = useState<InterviewModelCatalogEntry[]>([]);
@@ -583,7 +586,34 @@ function InterviewPageContent() {
                 Use the per-theme sentiment above for the considered read.
               </p>
             </section> : null}
-            {themes.saved?.themes?.length ? <p className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-app-muted">Memo</p> : null}
+            <section className="my-5 border-t border-app-border pt-5">
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-app-muted">Your memo</p>
+              <p className="mt-2 text-xs leading-5 text-app-muted">
+                This is the one you hand in. Write it from the transcripts; what the model
+                found is below, to check yourself against, and it is labelled that way in
+                the download.
+              </p>
+              <label className="mt-3 block text-sm">Themes you heard
+                <textarea aria-label="Your themes" rows={4} value={myMemo.themes}
+                  onChange={(event) => setMyMemo({ ...myMemo, themes: event.target.value })}
+                  className="mt-1 w-full rounded-xl border border-app-border bg-transparent p-2 text-sm" />
+              </label>
+              <label className="mt-3 block text-sm">One surprise
+                <textarea aria-label="Your surprise" rows={2} value={myMemo.surprise}
+                  onChange={(event) => setMyMemo({ ...myMemo, surprise: event.target.value })}
+                  className="mt-1 w-full rounded-xl border border-app-border bg-transparent p-2 text-sm" />
+              </label>
+              <p className="mt-3 text-sm">Closed-ended answer options, in participants&rsquo; words</p>
+              {myMemo.options.map((option, index) => <input key={index} aria-label={`Your answer option ${index + 1}`}
+                value={option} onChange={(event) => setMyMemo({ ...myMemo,
+                  options: myMemo.options.map((existing, at) => at === index ? event.target.value : existing) })}
+                className="mt-2 w-full rounded-xl border border-app-border bg-transparent p-2 text-sm" />)}
+              <button type="button" className="mt-2 text-xs underline"
+                onClick={() => setMyMemo({ ...myMemo, options: [...myMemo.options, ""] })}>
+                Add another option
+              </button>
+            </section>
+            {themes.saved?.themes?.length ? <p className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-app-muted">What the model found — for comparison, not for submission</p> : null}
             {themes.saved?.themes?.map((theme, index) => <article className="my-4" key={index}>
               <h3 className="font-semibold">{theme.label} · {theme.sentiment}</h3><p>{theme.synthesis}</p>
               <blockquote>“{theme.representative_quote}”</blockquote>
@@ -847,7 +877,7 @@ function InterviewPageContent() {
                 <p>Measured cost: ${Number(batch.session_usage.cost_usd).toFixed(6)} · Estimate at start: ${Number(batch.estimated_cost_usd).toFixed(4)}</p>
                 <p className="text-xs text-app-muted">Interviewer: {batch.interviewer_model} · Interviewee: {batch.interviewee_model}</p>
                 <div className="flex gap-2">{(["csv", "md"] as const).map(format => <Button key={format} variant="secondary" onClick={() => {
-                  const exported = batchExport(batch, format, themes?.stale ? undefined : themes?.saved);
+                  const exported = batchExport(batch, format, themes?.stale ? undefined : themes?.saved, myMemo);
                   const url = URL.createObjectURL(exported.blob);
                   const link = document.createElement("a");
                   link.href = url; link.download = exported.filename;

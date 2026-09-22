@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { batchExport, memoMarkdown } from "../src/lib/interview-batch-export";
+import { batchExport, memoMarkdown, studentMemoMarkdown } from "../src/lib/interview-batch-export";
 
 test("the markdown export carries the memo, not just the transcript", () => {
   // A transcript alone is not what PA3.5 asks a student to hand in.
@@ -42,10 +42,26 @@ test("the markdown export carries the memo, not just the transcript", () => {
       { role: "assistant" as const, content: "I need somewhere quiet" },
     ] }],
   } as unknown as Parameters<typeof batchExport>[0];
-  return batchExport(batch, "md", memo).blob.text().then((md) => {
-    assert.match(md, /# Memo/);
+  const mine = { themes: "People want quiet.", surprise: "Noise beat price for everyone.",
+    options: ["somewhere quiet to think", "", "a door I can close"] };
+  return batchExport(batch, "md", memo, mine).blob.text().then((md) => {
+    // The student's own memo is the submission; ours is labelled as the reference.
+    assert.match(md, /# Memo\n\n## Themes\n\nPeople want quiet\./);
+    assert.match(md, /# AI reference — not the memo you hand in/);
+    assert.equal(md.indexOf("# Memo") < md.indexOf("# AI reference"), true);
     assert.match(md, /Noise beat price\./);
     assert.match(md, /a door I can close — P002/);
+    // An option left blank is not an option; it must not become an empty bullet.
+    assert.doesNotMatch(md, /^- $/m);
   });
   // The no-memo case is covered where it belongs, in interview-batch-controls.test.ts.
+});
+
+
+test("an untouched memo form adds nothing to the download", () => {
+  // A student who has written nothing yet gets a transcript, not empty headings.
+  assert.equal(studentMemoMarkdown(null), "");
+  assert.equal(studentMemoMarkdown({ themes: "", surprise: "", options: ["", "", ""] }), "");
+  assert.match(studentMemoMarkdown({ themes: "", surprise: "", options: ["  a real option  "] }),
+    /- a real option/);
 });

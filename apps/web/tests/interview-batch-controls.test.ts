@@ -577,8 +577,11 @@ test("a rejected extraction shows no surprise and no options on the page", async
   } } }));
   await ui.button("Check saved themes").props.onClick(); ui.render();
   assert.match(ui.text(), /Rejected/);
-  assert.doesNotMatch(ui.text(), /One surprise/);
-  assert.doesNotMatch(ui.text(), /Closed-ended answer options/);
+  // The student's own memo form always renders, so the check is on the model's
+  // section: its heading, its summary text and its quote must all be absent.
+  assert.doesNotMatch(ui.text(), /What the model found/);
+  assert.doesNotMatch(ui.text(), /A surprise/);
+  assert.doesNotMatch(ui.text(), /an option/);
 });
 
 test("classroom switching saved runs rejects late themes", async () => {
