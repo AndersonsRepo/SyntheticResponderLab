@@ -110,8 +110,8 @@ export function WorkflowNav() {
             </div>
           </button>
 
-          <nav className="min-w-0 flex-1 overflow-hidden">
-            <div className="grid w-full grid-flow-col auto-cols-fr items-center rounded-[1.5rem] border px-1 py-1.5 [background:var(--theme-panel-inline-gradient)] [border-color:var(--button-secondary-border)] [box-shadow:inset_0_1px_0_rgba(255,255,255,0.03)] xl:px-2">
+          <nav className="min-w-0 flex-1 overflow-x-auto fine-scrollbar">
+            <div className="flex w-full items-center gap-0.5 rounded-[1.5rem] border px-1 py-1.5 [background:var(--theme-panel-inline-gradient)] [border-color:var(--button-secondary-border)] [box-shadow:inset_0_1px_0_rgba(255,255,255,0.03)] xl:px-2">
               {navSections.map((section) => {
                 const isInterviewGroupTab = section.id === "interview-synthesis";
                 const isActive = isInterviewGroupTab
@@ -127,7 +127,7 @@ export function WorkflowNav() {
                     disabled={navigationLocked}
                     aria-current={isActive ? "page" : undefined}
                     className={cn(
-                      "relative min-w-0 rounded-full px-[clamp(0.25rem,0.6vw,0.85rem)] py-2 font-medium tracking-[0.003em] transition-all duration-200",
+                      "relative shrink-0 rounded-full px-[clamp(0.25rem,0.6vw,0.85rem)] py-2 font-medium tracking-[0.003em] transition-all duration-200",
                       "text-center",
                       navigationLocked && "cursor-not-allowed opacity-55",
                       isActive
@@ -159,7 +159,7 @@ export function WorkflowNav() {
                       : "text-app-muted hover:text-app-text hover:[background:var(--button-secondary-bg-hover)]"
                   )}
                 >
-                  <span className="block whitespace-nowrap text-[clamp(0.68rem,0.82vw,0.98rem)] leading-none">
+                  <span className="block whitespace-nowrap text-[clamp(0.56rem,0.68vw,0.84rem)] leading-none">
                     {link.label}
                   </span>
                 </Link>

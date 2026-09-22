@@ -245,8 +245,9 @@ def test_standalone_themes_refuses_an_unreadable_corpus(completed, db_session):
     job.result_json = result
     db_session.commit()
     view = client.get(url).json()['data']['insights']
-    assert not view['eligible']
-    assert client.post(url, json={**payload, 'revision': view['revision']}).json()['data']['insights'] == view
+    # Eligibility still reflects the batch as run — the refusal is loud, not silent.
+    assert view['eligible']
+    assert client.post(url, json={**payload, 'revision': view['revision']}).status_code == 409
     assert calls == []
 
 
@@ -262,3 +263,19 @@ def test_standalone_themes_accepts_a_quote_from_a_repeated_persona(completed, db
     revision = client.get(url).json()['data']['insights']['revision']
     saved = client.post(url, json={**payload, 'revision': revision}).json()['data']['insights']
     assert saved['available'], saved.get('saved', {}).get('message')
+
+
+def test_standalone_themes_one_placeholder_answer_stays_eligible(completed, db_session):
+    """One unusable answer must not quietly take the whole batch out of eligibility."""
+    client, url, batch, calls, themes, payload = completed
+    job = db_session.scalar(select(Job).where(Job.public_id == batch['job_id']))
+    result = dict(job.result_json)
+    first = result['transcripts'][0]
+    messages = list(first['messages'])
+    last = max(i for i, m in enumerate(messages) if m['role'] == 'assistant')
+    messages[last] = {**messages[last], 'content': '[no answer]'}
+    result['transcripts'] = [{**first, 'messages': messages}, *result['transcripts'][1:]]
+    job.result_json = result
+    db_session.commit()
+    view = client.get(url).json()['data']['insights']
+    assert view['eligible'], view['message']

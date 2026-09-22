@@ -75,16 +75,19 @@ def corpus(job):
 
 def status(job):
     revision, pairs = corpus(job)
-    # The corpus the model would be shown — so "eligible", the cost estimate and the
-    # extraction itself all agree instead of inviting a charge the rules must reject.
-    pairs = insights.rendered_pairs(pairs)
     saved = (job.result_json or {}).get("insights")
+    # Eligibility reads the batch as RUN, not as rendered: a single placeholder answer
+    # must not silently take the whole batch out of eligibility, which is how a student
+    # would experience the button simply doing nothing. A corpus the renderer cannot use
+    # is refused loudly at extraction time instead.
     complete = (job.status == "completed" and bool(pairs) and
         len(pairs) == job.payload_json.get("persona_count") and
         all(len(p["model_a"]["answers"]) >= job.payload_json.get("turn_limit", 8) for p in pairs))
     # Conservative planning estimate: at most one token per UTF-8 byte plus the
-    # provider's 2,000 output-token cap, at this model's catalog rates.
-    prompt = insights._insights_system_prompt() + insights._build_transcript_corpus(pairs)
+    # provider's 2,000 output-token cap, at this model's catalog rates. Estimated over
+    # the corpus actually sent, which is the narrowed one.
+    prompt = (insights._insights_system_prompt()
+              + insights._build_transcript_corpus(insights.rendered_pairs(pairs)))
     model = next(m for m in list_interview_model_catalog()["models"] if m["id"] == MODEL)
     estimate = (Decimal(len(prompt.encode()) + 100) * Decimal(str(model["prompt_price_per_million"])) +
                 Decimal(2000) * Decimal(str(model["completion_price_per_million"]))) / Decimal(1000000)
@@ -127,6 +130,9 @@ def standalone_themes(session, settings, study, job_id, payload=None):
     record = {"revision": view["revision"], "attempt": attempt, "outcome": "unknown", "themes": None}
     _, pairs = corpus(job)
     pairs = insights.rendered_pairs(pairs)
+    if not pairs:
+        # An empty corpus can only come back rejected, and the student pays either way.
+        raise ConflictApiError("These transcripts hold no answers to extract themes from.")
     result = None
     def record_charge(measured):
         # Empty text keeps the accounting row out of the student transcript corpus.
