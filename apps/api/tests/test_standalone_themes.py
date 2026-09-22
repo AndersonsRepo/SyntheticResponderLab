@@ -663,3 +663,12 @@ def test_interview_insights_prompt_shows_valid_json_either_way():
     for prompt in (_insights_system_prompt(), _insights_system_prompt(memo=False)):
         assert '],\n}' not in prompt
         assert prompt.rstrip().endswith('}')
+
+
+def test_insights_prompt_states_the_option_rules_the_validator_enforces():
+    """A paid call must not be rejected for a rule the model was never given."""
+    from src.services.interview_service import _insights_system_prompt
+    from src.services.standalone_themes import MEMO_MIN_OPTION_WORDS
+    prompt = _insights_system_prompt()
+    assert 'three words' in prompt and MEMO_MIN_OPTION_WORDS == 3
+    assert 'same wording' in prompt

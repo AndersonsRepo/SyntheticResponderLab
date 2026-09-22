@@ -272,7 +272,8 @@ test("ambiguous creation failure retains request identity for recovery", async (
   await ui.button("Run AI-to-AI batch").props.onClick(); await ui.settle();
   assert.ok(ui.memory.has("interview-batch-request:std_1"));
   ui.setTransport(async () => ({ batch: { ...batch, status: "completed" } }));
-  assert.match(ui.text(), /Recover earlier request: 3 personas · interviewer cheap-a · interviewee cheap-a · expensive models disabled/);
+  // The room is part of the settings being re-authorized, so the label names it.
+  assert.match(ui.text(), /Recover earlier request: 3 personas \(first 3\) · interviewer cheap-a · interviewee cheap-a · expensive models disabled/);
   await ui.button("Recover earlier request").props.onClick(); await ui.settle();
   assert.deepEqual(ui.calls[1].payload, ui.calls[0].payload);
 });
@@ -563,6 +564,21 @@ test("a stale memo is left out of the export instead of riding a newer transcrip
   await fresh.button("Check saved themes").props.onClick(); fresh.render();
   await fresh.button("Export transcript + memo").props.onClick();
   assert.equal(fresh.exportedMemos[0], saved);
+});
+
+test("a rejected extraction shows no surprise and no options on the page", async () => {
+  const ui = harness([{ ...batch, status: "completed" }]); await ui.settle();
+  ui.nodes().find(n => n.props["aria-label"] === "Saved batches")!.props.onChange({ target: { value: "batch_1" } });
+  ui.button("3. Themes").props.onClick(); ui.render();
+  ui.setTransport(async () => ({ insights: { ...themeView, available: false, saved: {
+    revision: "rev1", attempt: 1, themes: null, message: "Rejected",
+    surprise: { summary: "A surprise", quote: "q", quote_persona_id: "neo-001" },
+    answer_options: [{ text: "an option", quote_persona_id: "neo-001" }],
+  } } }));
+  await ui.button("Check saved themes").props.onClick(); ui.render();
+  assert.match(ui.text(), /Rejected/);
+  assert.doesNotMatch(ui.text(), /One surprise/);
+  assert.doesNotMatch(ui.text(), /Closed-ended answer options/);
 });
 
 test("classroom switching saved runs rejects late themes", async () => {

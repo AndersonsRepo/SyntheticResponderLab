@@ -355,7 +355,12 @@ function InterviewPageContent() {
     const interviewee = models.find(model => model.id === settings.interviewee_model);
     if (!interviewer || !interviewee) return;
     const estimate = estimateInterviewRunCost(settings.persona_count, interviewer, interviewee);
-    if (!window.confirm(`${resume ? "Resume" : recoverRequest ? "Recover" : "Start"} batch: ${settings.persona_count} personas\nInterviewer: ${settings.interviewer_model}\nInterviewee: ${settings.interviewee_model}\nEstimated full-run cost: ${formatInterviewRunCostEstimate(estimate)} (actual cost may differ).${resume && batch?.status === "failed" ? "\nThe previous provider outcome may be unknown. Retrying may add another charge." : ""}\nAuthorize this run?`)) return;
+    // Name the room in the dialog: a recovered request can carry one that no longer
+    // matches the checkboxes on screen, and that is what the student is authorizing.
+    const room = ("persona_ids" in settings && settings.persona_ids?.length
+      ? settings.persona_ids.join(", ") : recruited.length && !resume && !recoverRequest
+        ? recruited.join(", ") : `first ${settings.persona_count}`);
+    if (!window.confirm(`${resume ? "Resume" : recoverRequest ? "Recover" : "Start"} batch: ${settings.persona_count} personas (${room})\nInterviewer: ${settings.interviewer_model}\nInterviewee: ${settings.interviewee_model}\nEstimated full-run cost: ${formatInterviewRunCostEstimate(estimate)} (actual cost may differ).${resume && batch?.status === "failed" ? "\nThe previous provider outcome may be unknown. Retrying may add another charge." : ""}\nAuthorize this run?`)) return;
     themeRequest.current += 1;
     setThemes(null);
     activity.current = true;
@@ -587,7 +592,7 @@ function InterviewPageContent() {
                 transcript?.setAttribute("open", "");
               }}>{theme.quote_persona_id} — locate interviewee quote</a>
             </article>)}
-            {themes.saved?.surprise ? <article className="my-4">
+            {themes.saved?.themes?.length && themes.saved.surprise ? <article className="my-4">
               <h3 className="font-semibold">One surprise</h3>
               <p>{themes.saved.surprise.summary}</p>
               <blockquote>“{themes.saved.surprise.quote}”</blockquote>
@@ -595,7 +600,7 @@ function InterviewPageContent() {
                 document.getElementById(`transcript-${themes.saved!.surprise!.quote_persona_id}`)?.setAttribute("open", "");
               }}>{themes.saved.surprise.quote_persona_id} — locate interviewee quote</a>
             </article> : null}
-            {themes.saved?.answer_options?.length ? <article className="my-4">
+            {themes.saved?.themes?.length && themes.saved.answer_options?.length ? <article className="my-4">
               <h3 className="font-semibold">Closed-ended answer options</h3>
               <p className="text-sm text-app-muted">Each one is a participant&rsquo;s own wording, copied from an answer.</p>
               <ul className="mt-2 list-disc pl-5">
@@ -812,7 +817,7 @@ function InterviewPageContent() {
                 </Button>
                 {batchRequest.current ? (
                   <Button variant="secondary" disabled={busy} onClick={() => runBatch(false, true)}>
-                    Recover earlier request: {batchRequest.current.persona_count} personas · interviewer {batchRequest.current.interviewer_model} · interviewee {batchRequest.current.interviewee_model} · expensive models {batchRequest.current.allow_expensive_models ? "enabled" : "disabled"} (re-submit and run)
+                    Recover earlier request: {batchRequest.current.persona_count} personas ({batchRequest.current.persona_ids?.length ? batchRequest.current.persona_ids.join(", ") : `first ${batchRequest.current.persona_count}`}) · interviewer {batchRequest.current.interviewer_model} · interviewee {batchRequest.current.interviewee_model} · expensive models {batchRequest.current.allow_expensive_models ? "enabled" : "disabled"} (re-submit and run)
                   </Button>
                 ) : null}
                 {batch && (batch.status === "running" || batch.status === "failed") ? (

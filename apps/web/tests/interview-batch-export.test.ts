@@ -25,6 +25,11 @@ test("the markdown export carries the memo, not just the transcript", () => {
   // No memo yet is a transcript-only export, not a heading with nothing under it.
   assert.equal(memoMarkdown(null), "");
   assert.equal(memoMarkdown({ themes: [] }), "");
+  // A rejected extraction saves themes: null. Its surprise is evidence for a memo
+  // that does not exist, so nothing from it reaches the handed-in file.
+  assert.equal(memoMarkdown({ themes: null, surprise: {
+    summary: "s", quote: "q", quote_persona_id: "neo-001",
+  }, answer_options: [{ text: "an option", quote_persona_id: "neo-001" }] }), "");
 
   // And it has to actually reach the downloaded file — testing the helper alone lets
   // someone drop the call from batchExport with nothing failing.

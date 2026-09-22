@@ -374,7 +374,7 @@ def save_research_brief(
 # path for them is output it pays for and drops, and output it can run past its cap on.
 _MEMO_SECTION = """Also write the rest of the one-page memo this student has to hand in:
 - "surprise": the single most surprising thing anyone said, in one sentence, with the verbatim quote it rests on and whose it is.
-- "answer_options": at least 3 closed-ended survey options, each one phrased in a participant's own words — copy the wording from an answer rather than writing your own.
+- "answer_options": at least 3 closed-ended survey options, each one phrased in a participant's own words — copy the wording from an answer rather than writing your own. Each option must be at least three words long and must differ from the others; a one-word option is rejected, and so are two options with the same wording.
 
 Every quote and every answer option is checked against the transcript the same way, character for character, from a single answer by the persona you name.
 
