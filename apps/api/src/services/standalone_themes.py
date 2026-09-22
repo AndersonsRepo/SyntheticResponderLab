@@ -88,7 +88,8 @@ def emotion(job):
     student can hand-code against even with no themes on the page.
     """
     personas = []
-    for transcript in (job.result_json or {}).get("transcripts", []):
+    transcripts = (job.result_json or {}).get("transcripts", [])
+    for transcript in transcripts:
         try:
             score = classify_interview_transcript(transcript["messages"])
         except (KeyError, TypeError, ValueError):
@@ -97,8 +98,10 @@ def emotion(job):
             continue
         personas.append({"persona_id": transcript.get("persona_id"), **score})
     counts = {name: sum(p["emotional_classification"] == name for p in personas) for name in SENTIMENTS}
+    # Carry the batch's own size: a skipped interviewee otherwise silently shrinks the
+    # room, and the student reads a distribution as if it covered everyone.
     return {"personas": personas, "counts": counts, "scored": len(personas),
-            "label": POST_INTERVIEW_SCORE_LABEL}
+            "interviewed": len(transcripts), "label": POST_INTERVIEW_SCORE_LABEL}
 
 
 def status(job):

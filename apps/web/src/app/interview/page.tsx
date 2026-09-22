@@ -48,8 +48,8 @@ type Themes = {
   estimated_cost_usd: string; model: string; message: string; session_usage?: { cost_usd: string };
   saved: { revision: string; attempt: number; message?: string; budget_stop?: string;
     themes: { label: string; synthesis: string; representative_quote: string; quote_persona_id: string; sentiment: string }[] | null } | null;
-  emotion?: { scored: number; label: string; counts: Record<string, number>;
-    personas: { persona_id: string; emotional_classification: string; fit_tier: string }[] };
+  emotion?: { scored: number; interviewed: number; label: string; counts: Record<string, number>;
+    personas: { persona_id: string | null; emotional_classification: string; fit_tier: string }[] };
 };
 
 type Turn = { role: "student" | "persona"; text: string; answerId?: string; version?: number };
@@ -550,13 +550,15 @@ function InterviewPageContent() {
               {themes.saved && !themes.stale ? "Retry extraction" : "Generate themes"} (about ${Number(themes.estimated_cost_usd).toFixed(4)} extra)
             </Button> : null}
             {themes.emotion && themes.emotion.scored > 0 ? <section className="my-4">
-              <h3 className="font-semibold">Emotion across the room ({themes.emotion.scored} interviewed)</h3>
+              <h3 className="font-semibold">Emotion across the room ({themes.emotion.scored === themes.emotion.interviewed
+                ? `${themes.emotion.scored} interviewed`
+                : `${themes.emotion.scored} of ${themes.emotion.interviewed} interviewed scored`})</h3>
               <p className="text-sm text-app-muted">{themes.emotion.label} · no charge</p>
               <p>{["positive", "neutral", "negative"].map((name) =>
                 `${themes.emotion!.counts[name] ?? 0} ${name}`).join(" · ")}</p>
               <ul className="mt-2 text-sm">
-                {themes.emotion.personas.map((entry) => <li key={entry.persona_id}>
-                  {entry.persona_id}: {entry.emotional_classification} · fit {entry.fit_tier}
+                {themes.emotion.personas.map((entry, index) => <li key={`${entry.persona_id ?? "?"}-${index}`}>
+                  {entry.persona_id ?? "unidentified"}: {entry.emotional_classification} · fit {entry.fit_tier}
                 </li>)}
               </ul>
             </section> : null}

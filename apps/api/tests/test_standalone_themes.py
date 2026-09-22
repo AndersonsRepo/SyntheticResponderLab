@@ -389,3 +389,19 @@ def test_standalone_themes_unparseable_re_ask_is_not_called_a_broken_rule(comple
     assert len(calls) == 3  # the stub records the first call twice: its own and the fixture's
     assert 'produced no usable response' in saved['message']
     assert 'broke a rule' not in saved['message']
+
+
+def test_standalone_themes_emotion_says_how_much_of_the_room_it_scored(completed, db_session):
+    """A skipped interviewee must not silently shrink the room the distribution covers."""
+    from src.persistence.models import Job
+    client, url, batch, calls, _, _ = completed
+    job = db_session.scalars(select(Job).where(Job.public_id == batch['job_id'])).one()
+    result = dict(job.result_json)
+    transcripts = [dict(t) for t in result['transcripts']]
+    transcripts[0] = {**transcripts[0], 'messages': []}  # answered nothing
+    job.result_json = {**result, 'transcripts': transcripts}
+    db_session.commit()
+    emotion = client.get(url).json()['data']['insights']['emotion']
+    assert emotion['interviewed'] == len(transcripts)
+    assert emotion['scored'] == len(transcripts) - 1
+    assert sum(emotion['counts'].values()) == emotion['scored']
