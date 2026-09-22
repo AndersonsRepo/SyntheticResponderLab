@@ -92,9 +92,12 @@ def emotion(job):
     for transcript in transcripts:
         try:
             score = classify_interview_transcript(transcript["messages"])
-        except (KeyError, TypeError, ValueError):
+        except Exception:
             # An interviewee who never answered has no language to classify; leaving
-            # them out is honest, counting them as neutral is not.
+            # them out is honest, counting them as neutral is not. Every class is
+            # caught: this runs inside the free view and inside the response returned
+            # after a charge is committed, so a malformed stored transcript must never
+            # turn either into a 500 that loses the themes the student paid for.
             continue
         personas.append({"persona_id": transcript.get("persona_id"), **score})
     counts = {name: sum(p["emotional_classification"] == name for p in personas) for name in SENTIMENTS}
@@ -192,6 +195,14 @@ def standalone_themes(session, settings, study, job_id, payload=None):
             # it and authorises a call the allowance no longer covers.
             if exc.measured_usage is not None:
                 record_charge(exc.measured_usage)
+            else:
+                record["unknown_billing"] = True
+            raise
+        except Exception:
+            # One authorization can make two calls. An earlier call that billed
+            # cleanly must not let a later one that vanished be reported as a known,
+            # recorded charge — the student would be told the ledger is complete.
+            record["unknown_billing"] = True
             raise
         record_charge(result)
         nonlocal spent
@@ -250,7 +261,7 @@ def standalone_themes(session, settings, study, job_id, payload=None):
         record["message"] = ("Theme extraction failed. Your transcripts are preserved. " +
             ("The response broke a rule; " if validated else "The call produced no usable response; ") +
             ("its measured charge is recorded. Retrying adds another charge."
-             if record["outcome"] == "charged" else
+             if record["outcome"] == "charged" and not record.get("unknown_billing") else
              "the provider's billing outcome is unknown. Retrying may incur another charge.") +
             f" ({record['reason']})")
     logger.log(logging.INFO if record["themes"] else logging.WARNING, "interview_themes study=%s run=%s revision=%s attempt=%s outcome=%s valid=%s",

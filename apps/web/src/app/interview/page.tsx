@@ -549,7 +549,7 @@ function InterviewPageContent() {
             {themes.eligible && (!themes.available || themes.stale) ? <Button disabled={busy} onClick={() => loadThemes(true)}>
               {themes.saved && !themes.stale ? "Retry extraction" : "Generate themes"} (about ${Number(themes.estimated_cost_usd).toFixed(4)} extra)
             </Button> : null}
-            {themes.emotion && themes.emotion.scored > 0 ? <section className="my-4">
+            {themes.emotion && themes.emotion.interviewed > 0 ? <section className="my-4">
               <h3 className="font-semibold">Emotion across the room ({themes.emotion.scored === themes.emotion.interviewed
                 ? `${themes.emotion.scored} interviewed`
                 : `${themes.emotion.scored} of ${themes.emotion.interviewed} interviewed scored`})</h3>

@@ -405,3 +405,43 @@ def test_standalone_themes_emotion_says_how_much_of_the_room_it_scored(completed
     assert emotion['interviewed'] == len(transcripts)
     assert emotion['scored'] == len(transcripts) - 1
     assert sum(emotion['counts'].values()) == emotion['scored']
+
+
+def test_standalone_themes_re_ask_that_vanishes_is_not_reported_as_a_known_charge(completed):
+    """One call billed cleanly, one vanished — the student is not told the ledger is complete."""
+    client, url, _, calls, themes, payload = completed
+    themes[0]['representative_quote'] = 'a quote nobody said'
+    provider = insights_module._call_openrouter_messages
+
+    def vanish_on_retry(**kw):
+        if 'previous response was rejected' in kw['messages'][1]['content']:
+            raise RuntimeError('boom')
+        return provider(**kw)
+    insights_module._call_openrouter_messages = vanish_on_retry
+    try:
+        saved = client.post(url, json=payload).json()['data']['insights']['saved']
+    finally:
+        insights_module._call_openrouter_messages = provider
+    assert saved['outcome'] == 'charged' and saved['unknown_billing'] is True
+    assert 'billing outcome is unknown' in saved['message']
+    assert 'measured charge is recorded' not in saved['message']
+
+
+# None, a non-dict turn and a turn with no content also crash corpus() on this and on
+# every earlier revision of this file — a pre-existing fragility this change neither
+# introduced nor fixes. These are the shapes that reach emotion() at all.
+@pytest.mark.parametrize('messages', [[], {}])
+def test_standalone_themes_emotion_survives_a_malformed_transcript(completed, db_session, messages):
+    """emotion() rides the free view and the post-charge response; it cannot 500 either."""
+    from src.persistence.models import Job
+    client, url, batch, _, _, _ = completed
+    job = db_session.scalars(select(Job).where(Job.public_id == batch['job_id'])).one()
+    result = dict(job.result_json)
+    transcripts = [dict(t) for t in result['transcripts']]
+    transcripts[0] = {**transcripts[0], 'messages': messages}
+    job.result_json = {**result, 'transcripts': transcripts}
+    db_session.commit()
+    response = client.get(url)
+    assert response.status_code == 200
+    emotion = response.json()['data']['insights']['emotion']
+    assert emotion['interviewed'] == len(transcripts) and emotion['scored'] == len(transcripts) - 1
