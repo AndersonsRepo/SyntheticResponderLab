@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { batchExport, memoMarkdown, studentMemoMarkdown } from "../src/lib/interview-batch-export";
+import { batchExport, memoMarkdown, studentMemoMarkdown, REFLECTION_PROMPTS } from "../src/lib/interview-batch-export";
 
 test("the markdown export carries the memo, not just the transcript", () => {
   // A transcript alone is not what PA3.5 asks a student to hand in.
@@ -72,4 +72,25 @@ test("an untouched memo form adds nothing to the download", () => {
   assert.equal(studentMemoMarkdown({ themes: "", surprise: "", options: ["", "", ""] }), "");
   assert.match(studentMemoMarkdown({ themes: "", surprise: "", options: ["  a real option  "] }),
     /- a real option/);
+});
+
+
+test("the AI reflection is exported in Dr. Lin's wording, and only where answered", () => {
+  // PA3.5 grades this section on being specific to the assignment, so an unanswered
+  // prompt must not appear as a heading with nothing under it.
+  const md = studentMemoMarkdown({
+    themes: "People want quiet.", surprise: "", options: [],
+    reflection: ["We cut a theme the model invented.", "", "", "Whether price anchoring moved them."],
+  });
+  assert.match(md, /## AI reflection/);
+  assert.match(md, new RegExp(REFLECTION_PROMPTS[0].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(md, /We cut a theme the model invented\./);
+  assert.match(md, /Whether price anchoring moved them\./);
+  assert.doesNotMatch(md, new RegExp(REFLECTION_PROMPTS[1].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  // A reflection with nothing in it is not a section.
+  assert.doesNotMatch(studentMemoMarkdown({
+    themes: "People want quiet.", surprise: "", options: [], reflection: ["", "", "", ""],
+  }), /AI reflection/);
+  assert.equal(studentMemoMarkdown({ themes: "", surprise: "", options: [], reflection: ["", "", "", ""] }), "");
 });

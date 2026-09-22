@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import ts from "typescript";
-import { batchExport } from "../src/lib/interview-batch-export";
+import { batchExport, REFLECTION_PROMPTS } from "../src/lib/interview-batch-export";
 import { InterviewChatApiError, sendInterviewChatMessage } from "../src/lib/api";
 import { InterviewOperationError } from "../src/lib/standalone-interview";
 import * as modelHelpers from "../src/lib/interview-models";
@@ -63,7 +63,7 @@ function harness(savedBatches: any[] = [], comparisonFetcher?: Parameters<typeof
     react,
     "framer-motion": { AnimatePresence: "presence", motion: { div: "div" } },
     "@/lib/api": api,
-    "@/lib/interview-batch-export": { batchExport: (...args: Parameters<typeof batchExport>) => {
+    "@/lib/interview-batch-export": { REFLECTION_PROMPTS, batchExport: (...args: Parameters<typeof batchExport>) => {
       exportedMemos.push(args[2]); exportedStudentMemos.push(args[3]); return batchExport(...args);
     } },
     "@/lib/interview-models": modelHelpers,
@@ -667,6 +667,20 @@ test("a browser that refuses to save the memo says so while the text is still th
   assert.match(ui.text(), /not saving your memo/);
   // And the writing is still on screen, which is the whole point of warning now.
   assert.equal(ui.nodes().find(n => n.props["aria-label"] === "Your themes")!.props.value, "People want quiet");
+});
+
+test("the reflection is typed in the app, saved with its batch and exported", async () => {
+  const ui = harness([{ ...batch, status: "completed" }]); await ui.settle();
+  ui.nodes().find(n => n.props["aria-label"] === "Saved batches")!.props.onChange({ target: { value: "batch_1" } });
+  ui.button("3. Themes").props.onClick(); ui.render();
+  ui.nodes().find(n => n.props["aria-label"] === "AI reflection 3")!
+    .props.onChange({ target: { value: "We rejected its fourth theme." } });
+  ui.render();
+  // Each prompt writes its own slot; the others stay empty rather than shifting.
+  assert.deepEqual(JSON.parse(ui.memory.get("interview-memos")!).batch_1.reflection,
+    ["", "", "We rejected its fourth theme.", ""]);
+  await ui.button("Export transcript + memo").props.onClick();
+  assert.deepEqual(ui.exportedStudentMemos[0].reflection, ["", "", "We rejected its fourth theme.", ""]);
 });
 
 test("classroom switching saved runs rejects late themes", async () => {

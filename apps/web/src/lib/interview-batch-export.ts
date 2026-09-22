@@ -8,12 +8,26 @@ export type BatchMemo = {
 };
 
 /** The memo PA3.5 grades is the student's own writing; ours is what they check it against. */
-export type StudentMemo = { themes: string; surprise: string; options: string[] };
+export type StudentMemo = { themes: string; surprise: string; options: string[]; reflection?: string[] };
+
+/** PA3.5's required AI reflection, in Dr. Lin's wording and his order. */
+export const REFLECTION_PROMPTS = [
+  "The most important change we made after using AI was\u2026",
+  "We accepted this change because\u2026",
+  "We rejected or substantially revised the AI suggestion that\u2026",
+  "One uncertainty or question that remains is\u2026",
+];
 
 export function studentMemoMarkdown(memo?: StudentMemo | null) {
   const options = (memo?.options ?? []).map((option) => option.trim()).filter(Boolean);
   const themes = memo?.themes.trim() ?? "";
   const surprise = memo?.surprise.trim() ?? "";
+  // Only the prompts they answered: an unanswered prompt with a heading reads as a
+  // blank answer, and this section is graded on being specific to THIS assignment.
+  const reflection = REFLECTION_PROMPTS
+    .map((prompt, index) => [prompt, (memo?.reflection?.[index] ?? "").trim()] as const)
+    .filter(([, answer]) => answer)
+    .map(([prompt, answer]) => `**${prompt}**\n\n${answer}\n`);
   // Only the sections they have actually written: a heading with nothing under it
   // reads, to whoever grades this, as an answer left blank rather than not reached.
   const sections = [
@@ -22,6 +36,7 @@ export function studentMemoMarkdown(memo?: StudentMemo | null) {
     options.length && `## Closed-ended answer options (participant language)\n\n${
       options.map((option) => `- ${option}`).join("\n")}\n`,
   ].filter(Boolean);
+  if (reflection.length) sections.push(`## AI reflection\n\n${reflection.join("\n")}`);
   if (!sections.length) return "";
   return `\n# Memo\n\n${sections.join("\n")}\n---\n`;
 }

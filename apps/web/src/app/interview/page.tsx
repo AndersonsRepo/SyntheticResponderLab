@@ -40,7 +40,7 @@ import { WorkflowNav } from "@/components/ui/workflow-nav";
 import { StudyProvider, useStudy } from "@/providers/study-provider";
 import { ThemeProvider } from "@/providers/theme-provider";
 
-import { batchExport, type StudentMemo } from "@/lib/interview-batch-export";
+import { batchExport, REFLECTION_PROMPTS, type StudentMemo } from "@/lib/interview-batch-export";
 import { InterviewOperationError, interviewOperation, type Batch, type RegeneratedAnswer } from "@/lib/standalone-interview";
 
 type Themes = {
@@ -74,8 +74,12 @@ function readMemos(raw: string | null): Record<string, StudentMemo> {
   if (!parsed || typeof parsed !== "object") return {};
   return Object.fromEntries(Object.entries(parsed as Record<string, unknown>).filter(([, memo]) => {
     const candidate = memo as Partial<StudentMemo>;
+    // reflection is absent in memos written before it existed, which are still good.
+    const reflection = candidate.reflection;
     return !!memo && typeof candidate.themes === "string" && typeof candidate.surprise === "string"
-      && Array.isArray(candidate.options) && candidate.options.every((option) => typeof option === "string");
+      && Array.isArray(candidate.options) && candidate.options.every((option) => typeof option === "string")
+      && (reflection === undefined
+        || (Array.isArray(reflection) && reflection.every((answer) => typeof answer === "string")));
   })) as Record<string, StudentMemo>;
 }
 
@@ -629,6 +633,23 @@ function InterviewPageContent() {
               onClick={() => editMemo((prev) => ({ ...prev, options: [...prev.options, ""] }))}>
               Add another option
             </button>
+          </section>
+          <section className="my-5 border-t border-app-border pt-5">
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-app-muted">AI reflection</p>
+            <p className="mt-2 text-xs leading-5 text-app-muted">
+              Required by PA3.5, and answered after you have read what the model found.
+              Two to four sentences each, specific to this session rather than to AI in general.
+            </p>
+            {REFLECTION_PROMPTS.map((prompt, index) => (
+              <label key={index} className="mt-3 block text-sm">{prompt}
+                <textarea aria-label={`AI reflection ${index + 1}`} disabled={!memoKey} rows={2}
+                  value={myMemo.reflection?.[index] ?? ""}
+                  onChange={(event) => editMemo((prev) => ({ ...prev, reflection:
+                    REFLECTION_PROMPTS.map((_, at) => at === index
+                      ? event.target.value : prev.reflection?.[at] ?? "") }))}
+                  className="mt-1 w-full rounded-xl border border-app-border bg-transparent p-2 text-sm" />
+              </label>
+            ))}
           </section>
           {themes && themes.from_run_id === batch?.job_id ? <div aria-live="polite">
             <p>{themes.message}</p>
