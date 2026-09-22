@@ -112,7 +112,10 @@ def test_standalone_themes_malformed_preserves_cost(completed, invalid, monkeypa
             InterviewAnswer(text='broken json', model=kw['model'], tokens_in=10, tokens_out=1, cost_usd=Decimal('.002')))
     result = client.post(url, json=payload).json()['data']['insights']
     assert not result['available'] and result['saved']['outcome'] == 'charged'
-    assert Decimal(result['session_usage']['cost_usd']) == Decimal('.050')
+    # A rule-breaking response is re-asked once, so it bills twice; an unparseable one
+    # never reaches validation and bills once.
+    assert Decimal(result['session_usage']['cost_usd']) == Decimal(
+        '.050' if invalid == 'json' else '.052')
     assert client.get(url.removesuffix('/themes')).json()['data']['batch']['transcripts'] == batch['transcripts']
 
 
@@ -279,3 +282,30 @@ def test_standalone_themes_one_placeholder_answer_stays_eligible(completed, db_s
     db_session.commit()
     view = client.get(url).json()['data']['insights']
     assert view['eligible'], view['message']
+
+
+def test_standalone_themes_re_asks_once_before_charging_the_student(completed):
+    """A rejected response is a slip the student cannot see; the server fixes it itself.
+
+    First call returns an ungrounded quote, second returns a real one. The student must
+    get themes, not a Retry button, and must be told both calls' cost.
+    """
+    client, url, batch, calls, themes, payload = completed
+    good = themes[0]['representative_quote']
+    themes[0]['representative_quote'] = 'a quote nobody said'
+
+    provider = insights_module._call_openrouter_messages
+    def fix_on_retry(**kw):
+        if 'previous response was rejected' in kw['messages'][1]['content']:
+            themes[0]['representative_quote'] = good
+        return provider(**kw)
+    insights_module._call_openrouter_messages = fix_on_retry
+    try:
+        saved = client.post(url, json=payload).json()['data']['insights']
+    finally:
+        insights_module._call_openrouter_messages = provider
+
+    assert saved['available'], saved.get('saved', {}).get('message')
+    assert len(calls) == 2
+    assert saved['saved']['retried_reason'] == "Theme 1 quote is not in %s's answers" % themes[0]['quote_persona_id']
+    assert saved['saved']['cost_usd'] == '0.004'

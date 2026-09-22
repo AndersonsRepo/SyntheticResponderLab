@@ -140,7 +140,10 @@ def standalone_themes(session, settings, study, job_id, payload=None):
             persona_id="__themes__", role="assistant", text="", model=measured.model,
             tokens_in=measured.tokens_in, tokens_out=measured.tokens_out,
             cost_usd=measured.cost_usd, created_at=insights.utcnow()))
-        record.update(outcome="charged", cost_usd=str(measured.cost_usd))
+        # Accumulate: a guided re-ask is a second billed call, and the student is
+        # told a charge was recorded, so that number has to be every call's.
+        record.update(outcome="charged",
+            cost_usd=str(Decimal(record.get("cost_usd", "0")) + measured.cost_usd))
 
     def call(**prompts):
         nonlocal result
@@ -162,11 +165,30 @@ def standalone_themes(session, settings, study, job_id, payload=None):
             record["budget_stop"] = exc.message
         return result.text
 
+    def extract(correction=""):
+        def guided(**prompts):
+            if correction:
+                prompts["user_prompt"] += (
+                    f"\n\nYour previous response was rejected: {correction}\n"
+                    "Return the whole JSON object again with that fixed. Copy every "
+                    "representative_quote character for character from an answer by the "
+                    "persona you name in quote_persona_id.")
+            return call(**prompts)
+        return insights._extract_insight_themes(pairs, "", guided)
+
     reason, validated = None, False
     try:
-        themes = insights._extract_insight_themes(pairs, "", call)
+        themes = extract()
         validated = True
         reason = validate(themes, pairs)
+        if reason and not record.get("budget_stop"):
+            # ponytail: one guided re-ask. A rejected response is usually a formatting
+            # slip the student cannot see or fix, and making them pay to press Retry
+            # for it is the failure they actually experience. One extra call, then the
+            # reason is theirs. Raise this only if the second call is also missing.
+            record["retried_reason"] = reason[:200]
+            themes = extract(reason)
+            reason = validate(themes, pairs)
         if not reason:
             record["themes"] = themes
     except Exception as exc:
