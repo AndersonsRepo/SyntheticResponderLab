@@ -31,6 +31,7 @@ function harness(savedBatches: any[] = [], comparisonFetcher?: Parameters<typeof
   const memory = new Map<string, string>();
   let transport: (path: string, payload: any) => Promise<any> = async () => { throw new Error("unexpected request"); };
   let exportsPayload: any;
+  const exportedMemos: any[] = [];
   const api = {
     getInterviewPersonas: async () => ({ personas, source: "database" }),
     getInterviewModelCatalog: async () => ({ models, defaultModelId: "cheap-a", pricingAsOf: "test", personaCount: { minimum: 3, maximum: 30, default: 3 }, costEstimate: null }),
@@ -61,7 +62,9 @@ function harness(savedBatches: any[] = [], comparisonFetcher?: Parameters<typeof
     react,
     "framer-motion": { AnimatePresence: "presence", motion: { div: "div" } },
     "@/lib/api": api,
-    "@/lib/interview-batch-export": { batchExport },
+    "@/lib/interview-batch-export": { batchExport: (target: any, format: any, memo?: any) => {
+      exportedMemos.push(memo); return batchExport(target, format, memo);
+    } },
     "@/lib/interview-models": modelHelpers,
     "@/lib/interview-comparison": { ...comparisonHelpers, runInterviewComparison: comparisonFetcher
       ? (input: Parameters<typeof comparisonHelpers.runInterviewComparison>[0]) => comparisonHelpers.runInterviewComparison(input, comparisonFetcher)
@@ -110,7 +113,7 @@ function harness(savedBatches: any[] = [], comparisonFetcher?: Parameters<typeof
     return String(node);
   }
   return {
-    calls, chatCalls, memory, api, confirmations,
+    calls, chatCalls, memory, api, confirmations, exportedMemos,
     dismissConfirmation() { confirmResult = false; },
     get exportedTranscript() { return exportsPayload; },
     setTransport(fn: typeof transport) { transport = fn; },
@@ -501,6 +504,30 @@ test("classroom themes require separate charge confirmation and navigation never
   ui.button("3. Themes").props.onClick(); ui.render();
   assert.equal(ui.calls.length, 2);
   assert.match(ui.text(), /More space/);
+});
+
+test("a stale memo is left out of the export instead of riding a newer transcript", async () => {
+  // The on-screen memo is warned about; the handed-in file has no warning to carry, so a
+  // memo validated against an older revision must not be written next to this transcript.
+  const ui = harness([{ ...batch, status: "completed" }]); await ui.settle();
+  ui.nodes().find(n => n.props["aria-label"] === "Saved batches")!.props.onChange({ target: { value: "batch_1" } });
+  ui.button("3. Themes").props.onClick(); ui.render();
+  const saved = { revision: "rev0", attempt: 1, themes: [{
+    label: "Space", synthesis: "Needs space", representative_quote: "More space",
+    quote_persona_id: "neo-001", sentiment: "positive",
+  }] };
+  ui.setTransport(async () => ({ insights: { ...themeView, available: true, stale: true, saved } }));
+  await ui.button("Check saved themes").props.onClick(); ui.render();
+  await ui.button("Export transcript + memo").props.onClick();
+  assert.equal(ui.exportedMemos[0], undefined);
+
+  const fresh = harness([{ ...batch, status: "completed" }]); await fresh.settle();
+  fresh.nodes().find(n => n.props["aria-label"] === "Saved batches")!.props.onChange({ target: { value: "batch_1" } });
+  fresh.button("3. Themes").props.onClick(); fresh.render();
+  fresh.setTransport(async () => ({ insights: { ...themeView, available: true, saved } }));
+  await fresh.button("Check saved themes").props.onClick(); fresh.render();
+  await fresh.button("Export transcript + memo").props.onClick();
+  assert.equal(fresh.exportedMemos[0], saved);
 });
 
 test("classroom switching saved runs rejects late themes", async () => {

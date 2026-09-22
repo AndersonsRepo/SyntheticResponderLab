@@ -1530,7 +1530,10 @@ def _call_openrouter_json(
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.3,
-        "max_tokens": 2000,
+        # The memo is themes + a surprise + 3+ grounded options, all carrying verbatim
+        # quotes. Truncation here is unparseable JSON that is billed and saves nothing,
+        # and unused headroom costs nothing — only emitted tokens are charged.
+        "max_tokens": 4000,
     }
     if model.startswith("openai/"):
         body["response_format"] = {"type": "json_object"}

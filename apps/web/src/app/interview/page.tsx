@@ -592,7 +592,7 @@ function InterviewPageContent() {
             </article> : null}
             {themes.saved?.answer_options?.length ? <article className="my-4">
               <h3 className="font-semibold">Closed-ended answer options</h3>
-              <p className="text-sm text-app-muted">Each one is a participant's own wording, copied from an answer.</p>
+              <p className="text-sm text-app-muted">Each one is a participant&rsquo;s own wording, copied from an answer.</p>
               <ul className="mt-2 list-disc pl-5">
                 {themes.saved.answer_options.map((option, index) => <li key={index}>
                   “{option.text}” — <a className="underline" href={`#transcript-${option.quote_persona_id}`} onClick={() => {
@@ -792,7 +792,7 @@ function InterviewPageContent() {
                 <p>Measured cost: ${Number(batch.session_usage.cost_usd).toFixed(6)} · Estimate at start: ${Number(batch.estimated_cost_usd).toFixed(4)}</p>
                 <p className="text-xs text-app-muted">Interviewer: {batch.interviewer_model} · Interviewee: {batch.interviewee_model}</p>
                 <div className="flex gap-2">{(["csv", "md"] as const).map(format => <Button key={format} variant="secondary" onClick={() => {
-                  const exported = batchExport(batch, format, themes?.saved);
+                  const exported = batchExport(batch, format, themes?.stale ? undefined : themes?.saved);
                   const url = URL.createObjectURL(exported.blob);
                   const link = document.createElement("a");
                   link.href = url; link.download = exported.filename;

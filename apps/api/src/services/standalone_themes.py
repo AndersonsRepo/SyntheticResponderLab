@@ -22,6 +22,10 @@ MODEL = "openai/gpt-4o-mini"
 MAX_PROVIDER_CALLS = 2
 # PA3.5's memo shape, the same floors the focus group's memo uses.
 MEMO_MIN_ANSWER_OPTIONS = 3
+# A survey option is short by design, so the "in a participant's own words" check is
+# near-vacuous without a floor: a single letter is a substring of almost any answer.
+# Three words is the shortest thing that reads as an option ("too far away").
+MEMO_MIN_OPTION_WORDS = 3
 # One authorization's whole provider budget, shared across those calls. The class
 # budget lock is held for the entire request, so two serial 90s calls would double
 # how long every other student waits behind it.
@@ -103,6 +107,7 @@ def validate(memo, pairs):
     if not isinstance(options, list) or len(options) < MEMO_MIN_ANSWER_OPTIONS:
         return (f"Expected at least {MEMO_MIN_ANSWER_OPTIONS} answer options, got "
                 f"{len(options) if isinstance(options, list) else 0}")
+    seen = set()
     for index, option in enumerate(options, 1):
         if not isinstance(option, dict):
             return f"Answer option {index} is not an object"
@@ -113,6 +118,13 @@ def validate(memo, pairs):
             return f"Answer option {index} quotes unknown persona {option['quote_persona_id']!r}"
         if not _grounded(option["text"], option["quote_persona_id"], answers):
             return (f"Answer option {index} is not in {option['quote_persona_id']}'s answers")
+        folded = _comparable(option["text"])
+        if len(folded.split()) < MEMO_MIN_OPTION_WORDS:
+            return (f"Answer option {index} is shorter than {MEMO_MIN_OPTION_WORDS} words, "
+                    f"which is not a survey option")
+        if folded in seen:
+            return f"Answer option {index} repeats an earlier option"
+        seen.add(folded)
     return None
 
 

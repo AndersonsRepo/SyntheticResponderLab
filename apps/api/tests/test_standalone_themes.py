@@ -26,8 +26,11 @@ def completed(classroom, monkeypatch):
     said = batch['transcripts'][0]['messages'][1]['content']
     memo = {'surprise': {'summary': 'They cared more about noise than price.',
                          'quote': said, 'quote_persona_id': batch['transcripts'][0]['persona_id']},
-            'answer_options': [{'text': said, 'quote_persona_id': batch['transcripts'][0]['persona_id']}
-                               for _ in range(3)]}
+            # Three DISTINCT answers: identical options are the degenerate memo
+            # validate() now rejects, so the happy path has to be a real one.
+            'answer_options': [{'text': batch['transcripts'][0]['messages'][i]['content'],
+                                'quote_persona_id': batch['transcripts'][0]['persona_id']}
+                               for i in (1, 3, 5)]}
     def provider(**kw):
         extra.append(kw)
         return InterviewAnswer(text=json.dumps({'themes': themes, **memo}), model=kw['model'],
@@ -579,3 +582,21 @@ def test_standalone_themes_requires_three_answer_options(completed):
     saved = client.post(url, json=payload).json()['data']['insights']['saved']
     assert saved['themes'] is None
     assert saved['reason'] == 'Expected at least 3 answer options, got 2'
+
+
+def test_standalone_themes_rejects_repeated_answer_options(completed):
+    """Three copies of one option is one option, however grounded each copy is."""
+    client, url, batch, calls, themes, payload, memo = completed
+    memo['answer_options'][2]['text'] = memo['answer_options'][0]['text']
+    saved = client.post(url, json=payload).json()['data']['insights']['saved']
+    assert saved['themes'] is None
+    assert saved['reason'] == 'Answer option 3 repeats an earlier option'
+
+
+def test_standalone_themes_rejects_a_too_short_answer_option(completed):
+    """A one-word option is a substring of almost any answer, so grounding proves nothing."""
+    client, url, batch, calls, themes, payload, memo = completed
+    memo['answer_options'][1]['text'] = 'option'
+    saved = client.post(url, json=payload).json()['data']['insights']['saved']
+    assert saved['themes'] is None
+    assert saved['reason'] == 'Answer option 2 is shorter than 3 words, which is not a survey option'
