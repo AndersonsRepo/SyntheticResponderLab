@@ -319,10 +319,13 @@ def test_standalone_themes_reports_batch_emotion_for_free(completed):
     emotion = free['emotion']
     assert emotion['scored'] == len(batch['transcripts'])
     assert set(emotion['counts']) == {'positive', 'neutral', 'negative'}
-    assert sum(emotion['counts'].values()) == emotion['scored']
+    # The distribution is over ANSWERS, not over people: no interviewee carries a verdict.
+    assert sum(emotion['counts'].values()) == emotion['answers'] > emotion['scored']
     assert {p['persona_id'] for p in emotion['personas']} == {
         t['persona_id'] for t in batch['transcripts']}
-    assert all(p['emotional_classification'] in emotion['counts'] for p in emotion['personas'])
+    assert all('emotional_classification' not in p for p in emotion['personas'])
+    assert all(sum(p[name] for name in ('positive', 'neutral', 'negative')) == p['answers']
+               for p in emotion['personas'])
 
     # A rejected extraction must not take the free read off the page with it.
     themes[0]['representative_quote'] = 'a quote nobody said'
@@ -404,7 +407,7 @@ def test_standalone_themes_emotion_says_how_much_of_the_room_it_scored(completed
     emotion = client.get(url).json()['data']['insights']['emotion']
     assert emotion['interviewed'] == len(transcripts)
     assert emotion['scored'] == len(transcripts) - 1
-    assert sum(emotion['counts'].values()) == emotion['scored']
+    assert sum(emotion['counts'].values()) == emotion['answers']
 
 
 def test_standalone_themes_re_ask_that_vanishes_is_not_reported_as_a_known_charge(completed):
@@ -467,3 +470,37 @@ def test_standalone_themes_never_exceeds_its_authorized_call_budget(completed):
     first, retry = (c['timeout'] for c in calls)
     assert first <= themes_module.PROVIDER_DEADLINE_S
     assert retry < first, 'the re-ask spends what is left of the deadline, not a fresh one' 
+
+
+def test_standalone_themes_emotion_does_not_label_a_keen_interviewee_negative(completed, db_session):
+    """The bug this shape exists to prevent: concern language accumulating into a verdict.
+
+    Every answer below is an enthusiastic buyer; two of them voice a concern, which is what
+    a depth interview asks for. Scored as one blob the interviewee comes out "negative".
+    """
+    from src.persistence.models import Job
+    from src.services.interview_scoring import classify_interview_transcript
+    answers = [
+        'A separate quiet studio signals that I am serious about my business.',
+        'I worry about the inside of that little studio becoming an oven.',
+        'If I could see a clear tangible return then I could justify it.',
+        'I am concerned the neighborhood sounds would defeat the purpose.',
+        'Having a separate space means I can step away and get into the zone.',
+    ]
+    messages = [{'role': 'assistant', 'content': a} for a in answers]
+    assert classify_interview_transcript(messages)['emotional_classification'] == 'negative', (
+        'the whole-transcript reading this design exists to avoid')
+
+    client, url, batch, _, _, _ = completed
+    job = db_session.scalars(select(Job).where(Job.public_id == batch['job_id'])).one()
+    result = dict(job.result_json)
+    transcripts = [dict(t) for t in result['transcripts']]
+    transcripts[0] = {**transcripts[0], 'messages': messages}
+    job.result_json = {**result, 'transcripts': transcripts}
+    db_session.commit()
+
+    entry = next(p for p in client.get(url).json()['data']['insights']['emotion']['personas']
+                 if p['persona_id'] == transcripts[0]['persona_id'])
+    assert entry['answers'] == len(answers)
+    assert entry['negative'] == 2 and entry['neutral'] == 3
+    assert entry['negative'] < entry['neutral'], 'two voiced concerns are not a negative person'

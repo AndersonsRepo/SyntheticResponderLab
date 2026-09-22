@@ -48,8 +48,10 @@ type Themes = {
   estimated_cost_usd: string; model: string; message: string; session_usage?: { cost_usd: string };
   saved: { revision: string; attempt: number; message?: string; budget_stop?: string;
     themes: { label: string; synthesis: string; representative_quote: string; quote_persona_id: string; sentiment: string }[] | null } | null;
-  emotion?: { scored: number; interviewed: number; label: string; counts: Record<string, number>;
-    personas: { persona_id: string | null; emotional_classification: string; fit_tier: string }[] };
+  emotion?: { scored: number; interviewed: number; answers: number; label: string;
+    counts: Record<string, number>;
+    personas: { persona_id: string | null; fit_tier: string; answers: number;
+      positive: number; neutral: number; negative: number }[] };
 };
 
 type Turn = { role: "student" | "persona"; text: string; answerId?: string; version?: number };
@@ -552,15 +554,20 @@ function InterviewPageContent() {
             {themes.emotion && themes.emotion.interviewed > 0 ? <section className="my-4">
               <h3 className="font-semibold">Emotion across the room ({themes.emotion.scored === themes.emotion.interviewed
                 ? `${themes.emotion.scored} interviewed`
-                : `${themes.emotion.scored} of ${themes.emotion.interviewed} interviewed scored`})</h3>
-              <p className="text-sm text-app-muted">{themes.emotion.label} · no charge</p>
+                : `${themes.emotion.scored} of ${themes.emotion.interviewed} interviewed scored`}, {themes.emotion.answers} answers)</h3>
+              <p className="text-sm text-app-muted">{themes.emotion.label} · no charge · counted per answer, not per interviewee</p>
               <p>{["positive", "neutral", "negative"].map((name) =>
                 `${themes.emotion!.counts[name] ?? 0} ${name}`).join(" · ")}</p>
               <ul className="mt-2 text-sm">
                 {themes.emotion.personas.map((entry, index) => <li key={`${entry.persona_id ?? "?"}-${index}`}>
-                  {entry.persona_id ?? "unidentified"}: {entry.emotional_classification} · fit {entry.fit_tier}
+                  {entry.persona_id ?? "unidentified"}: {entry.positive} positive · {entry.neutral} neutral · {entry.negative} negative
+                  {" "}of {entry.answers} answers · fit {entry.fit_tier}
                 </li>)}
               </ul>
+              <p className="mt-2 text-sm text-app-muted">
+                Keyword-based, and far better at catching voiced concern than voiced enthusiasm.
+                Use the per-theme sentiment above for the considered read.
+              </p>
             </section> : null}
             {themes.saved?.themes?.map((theme, index) => <article className="my-4" key={index}>
               <h3 className="font-semibold">{theme.label} · {theme.sentiment}</h3><p>{theme.synthesis}</p>

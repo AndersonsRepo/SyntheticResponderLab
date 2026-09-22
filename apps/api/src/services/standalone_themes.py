@@ -85,31 +85,55 @@ def corpus(job):
 SENTIMENTS = ("positive", "neutral", "negative")
 
 
+def _answer_labels(transcript):
+    """Classify each answer on its own, because that is the unit the classifier was built for.
+
+    Run over a whole transcript it is systematically wrong here. Its negative vocabulary
+    is concern language — worried, concerned, nervous, skeptical — which accumulates with
+    every question a depth interview asks, while its positive vocabulary is eight literal
+    feeling words an articulate interviewee may never use. "A separate quiet studio signals
+    that I'm serious about my business" scores zero positive; "I worry about it becoming an
+    oven" scores negative. So a keen buyer reads negative the longer you talk to them.
+    """
+    for turn in transcript.get("messages") or []:
+        try:
+            yield classify_interview_transcript([turn])["emotional_classification"]
+        except Exception:
+            continue
+
+
 def emotion(job):
-    """The batch's emotional read, from the classifier the Interview step already shows.
+    """The batch's emotional read, per ANSWER — never a verdict on a person.
 
     Lexical and deterministic, so it costs nothing and is still there when a paid theme
-    extraction is rejected — an emotional distribution over the room is the thing a
-    student can hand-code against even with no themes on the page.
+    extraction is rejected. It reports how answers distribute, not what an interviewee
+    "is": this lexicon is far better at noticing voiced concern than voiced enthusiasm,
+    and a per-person label built on it mislabels the enthusiastic.
     """
     personas = []
     transcripts = (job.result_json or {}).get("transcripts", [])
+    counts = {name: 0 for name in SENTIMENTS}
     for transcript in transcripts:
-        try:
-            score = classify_interview_transcript(transcript["messages"])
-        except Exception:
-            # An interviewee who never answered has no language to classify; leaving
-            # them out is honest, counting them as neutral is not. Every class is
-            # caught: this runs inside the free view and inside the response returned
-            # after a charge is committed, so a malformed stored transcript must never
-            # turn either into a 500 that loses the themes the student paid for.
+        labels = list(_answer_labels(transcript))
+        if not labels:
+            # An interviewee who never answered has no language to classify; leaving them
+            # out is honest, counting them as neutral is not.
             continue
-        personas.append({"persona_id": transcript.get("persona_id"), **score})
-    counts = {name: sum(p["emotional_classification"] == name for p in personas) for name in SENTIMENTS}
+        for label in labels:
+            if label in counts:
+                counts[label] += 1
+        try:
+            fit_tier = classify_interview_transcript(transcript["messages"])["fit_tier"]
+        except Exception:
+            fit_tier = "unknown"
+        personas.append({"persona_id": transcript.get("persona_id"), "fit_tier": fit_tier,
+            "answers": len(labels),
+            **{name: sum(label == name for label in labels) for name in SENTIMENTS}})
     # Carry the batch's own size: a skipped interviewee otherwise silently shrinks the
     # room, and the student reads a distribution as if it covered everyone.
     return {"personas": personas, "counts": counts, "scored": len(personas),
-            "interviewed": len(transcripts), "label": POST_INTERVIEW_SCORE_LABEL}
+            "answers": sum(counts.values()), "interviewed": len(transcripts),
+            "label": POST_INTERVIEW_SCORE_LABEL}
 
 
 def status(job):
