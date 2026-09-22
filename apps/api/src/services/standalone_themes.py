@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 import unicodedata
 from decimal import Decimal
 
@@ -19,6 +20,10 @@ MODEL = "openai/gpt-4o-mini"
 # One extraction plus at most one guided re-ask. Every estimate, consent figure and
 # preflight is sized for this many calls, because that is what one authorization buys.
 MAX_PROVIDER_CALLS = 2
+# One authorization's whole provider budget, shared across those calls. The class
+# budget lock is held for the entire request, so two serial 90s calls would double
+# how long every other student waits behind it.
+PROVIDER_DEADLINE_S = 90
 logger = logging.getLogger(__name__)
 
 
@@ -172,6 +177,7 @@ def standalone_themes(session, settings, study, job_id, payload=None):
         raise ConflictApiError("These transcripts hold no answers to extract themes from.")
     result = None
     spent = Decimal(0)
+    deadline = time.monotonic() + PROVIDER_DEADLINE_S
     def record_charge(measured):
         # Empty text keeps the accounting row out of the student transcript corpus.
         session.add(InterviewTurn(study_id=study.id, session_id=job_id,
@@ -188,7 +194,8 @@ def standalone_themes(session, settings, study, job_id, payload=None):
         try:
             result = insights._call_openrouter_messages(api_key=settings.openrouter_api_key, model=MODEL,
                 messages=[{"role": "system", "content": prompts["system_prompt"]},
-                          {"role": "user", "content": prompts["user_prompt"]}], timeout=90, max_attempts=1)
+                          {"role": "user", "content": prompts["user_prompt"]}],
+                timeout=max(10, int(deadline - time.monotonic())), max_attempts=1)
         except TransientProviderError as exc:
             # The provider charged for this call even though its content is unusable.
             # Record the spend before failing, or the next budget check undercounts

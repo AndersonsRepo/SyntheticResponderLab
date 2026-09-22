@@ -445,3 +445,25 @@ def test_standalone_themes_emotion_survives_a_malformed_transcript(completed, db
     assert response.status_code == 200
     emotion = response.json()['data']['insights']['emotion']
     assert emotion['interviewed'] == len(transcripts) and emotion['scored'] == len(transcripts) - 1
+
+
+def test_standalone_themes_never_exceeds_its_authorized_call_budget(completed):
+    """The estimate and preflight reserve MAX_PROVIDER_CALLS; the call path must honour it.
+
+    Also bounds provider time: the class budget lock is held for the whole request,
+    so the two calls share one deadline rather than each getting the full timeout.
+    """
+    import time as _time
+    from src.services import standalone_themes as themes_module
+    client, url, _, calls, themes, payload = completed
+    themes[0]['representative_quote'] = 'a quote no re-ask will ever ground'
+    provider = insights_module._call_openrouter_messages
+    insights_module._call_openrouter_messages = lambda **kw: (_time.sleep(1), provider(**kw))[1]
+    try:
+        client.post(url, json=payload)
+    finally:
+        insights_module._call_openrouter_messages = provider
+    assert len(calls) == themes_module.MAX_PROVIDER_CALLS
+    first, retry = (c['timeout'] for c in calls)
+    assert first <= themes_module.PROVIDER_DEADLINE_S
+    assert retry < first, 'the re-ask spends what is left of the deadline, not a fresh one' 
