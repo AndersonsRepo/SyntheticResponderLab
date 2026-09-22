@@ -504,3 +504,22 @@ def test_standalone_themes_emotion_does_not_label_a_keen_interviewee_negative(co
     assert entry['answers'] == len(answers)
     assert entry['negative'] == 2 and entry['neutral'] == 3
     assert entry['negative'] < entry['neutral'], 'two voiced concerns are not a negative person'
+
+
+def test_standalone_themes_emotion_ignores_the_interviewer(completed, db_session):
+    """The interviewer asks about objections for a living; their words are not the room's."""
+    from src.persistence.models import Job
+    client, url, batch, _, _, _ = completed
+    job = db_session.scalars(select(Job).where(Job.public_id == batch['job_id'])).one()
+    result = dict(job.result_json)
+    transcripts = [dict(t) for t in result['transcripts']]
+    transcripts[0] = {**transcripts[0], 'messages': [
+        {'role': 'user', 'content': 'What worries you? Are you concerned or nervous about the noise?'},
+        {'role': 'assistant', 'content': 'It would be useful for my work.'},
+        {'role': 'user', 'content': 'Anything else that makes you anxious or skeptical?'},
+    ]}
+    job.result_json = {**result, 'transcripts': transcripts}
+    db_session.commit()
+    entry = next(p for p in client.get(url).json()['data']['insights']['emotion']['personas']
+                 if p['persona_id'] == transcripts[0]['persona_id'])
+    assert entry['answers'] == 1 and entry['negative'] == 0

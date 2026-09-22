@@ -96,10 +96,19 @@ def _answer_labels(transcript):
     oven" scores negative. So a keen buyer reads negative the longer you talk to them.
     """
     for turn in transcript.get("messages") or []:
+        # Only the interviewee's own words. The classifier filters by role itself
+        # (interview_scoring.py:117) and raises on a turn with no answer in it, so an
+        # interviewer question is already skipped — but leaving that to a caught
+        # exception hides the intent, and the interviewer's phrasing reaching a
+        # distribution labelled "the room" is exactly the bug above in another form.
+        if not isinstance(turn, dict) or str(turn.get("role") or "").strip() != "assistant":
+            continue
         try:
-            yield classify_interview_transcript([turn])["emotional_classification"]
+            label = classify_interview_transcript([turn])["emotional_classification"]
         except Exception:
             continue
+        if label in SENTIMENTS:
+            yield label
 
 
 def emotion(job):
@@ -125,7 +134,9 @@ def emotion(job):
         try:
             fit_tier = classify_interview_transcript(transcript["messages"])["fit_tier"]
         except Exception:
-            fit_tier = "unknown"
+            # Unreachable while labels is non-empty, and if it ever is reached, a persona
+            # whose fit was never established does not belong in a count called "scored".
+            continue
         personas.append({"persona_id": transcript.get("persona_id"), "fit_tier": fit_tier,
             "answers": len(labels),
             **{name: sum(label == name for label in labels) for name in SENTIMENTS}})
