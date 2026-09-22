@@ -309,3 +309,22 @@ def test_standalone_themes_re_asks_once_before_charging_the_student(completed):
     assert len(calls) == 2
     assert saved['saved']['retried_reason'] == "Theme 1 quote is not in %s's answers" % themes[0]['quote_persona_id']
     assert saved['saved']['cost_usd'] == '0.004'
+
+
+def test_standalone_themes_reports_batch_emotion_for_free(completed):
+    """Emotion is lexical, so it is on the page before any charge and after a rejection."""
+    client, url, batch, calls, themes, payload = completed
+    free = client.get(url).json()['data']['insights']
+    assert calls == []
+    emotion = free['emotion']
+    assert emotion['scored'] == len(batch['transcripts'])
+    assert set(emotion['counts']) == {'positive', 'neutral', 'negative'}
+    assert sum(emotion['counts'].values()) == emotion['scored']
+    assert {p['persona_id'] for p in emotion['personas']} == {
+        t['persona_id'] for t in batch['transcripts']}
+    assert all(p['emotional_classification'] in emotion['counts'] for p in emotion['personas'])
+
+    # A rejected extraction must not take the free read off the page with it.
+    themes[0]['representative_quote'] = 'a quote nobody said'
+    rejected = client.post(url, json=payload).json()['data']['insights']
+    assert not rejected['available'] and rejected['emotion']['counts'] == emotion['counts']

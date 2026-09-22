@@ -11,6 +11,7 @@ from src.services import interview_service as insights
 from src.services.exceptions import ConflictApiError, QuotaExceededApiError, TransientProviderError, ValidationApiError
 from src.services.llm_budget import (enforce_budget_open, enforce_measured_cost,
     enforce_run_preflight, load_interview_budget_snapshot, lock_class_budget_for_transaction)
+from src.services.interview_scoring import POST_INTERVIEW_SCORE_LABEL, classify_interview_transcript
 from src.services.model_catalog import list_interview_model_catalog
 from src.services.standalone_interview import owned_job, serialized_local, usage
 
@@ -73,6 +74,30 @@ def corpus(job):
     return revision, pairs
 
 
+SENTIMENTS = ("positive", "neutral", "negative")
+
+
+def emotion(job):
+    """The batch's emotional read, from the classifier the Interview step already shows.
+
+    Lexical and deterministic, so it costs nothing and is still there when a paid theme
+    extraction is rejected — an emotional distribution over the room is the thing a
+    student can hand-code against even with no themes on the page.
+    """
+    personas = []
+    for transcript in (job.result_json or {}).get("transcripts", []):
+        try:
+            score = classify_interview_transcript(transcript["messages"])
+        except (KeyError, TypeError, ValueError):
+            # An interviewee who never answered has no language to classify; leaving
+            # them out is honest, counting them as neutral is not.
+            continue
+        personas.append({"persona_id": transcript.get("persona_id"), **score})
+    counts = {name: sum(p["emotional_classification"] == name for p in personas) for name in SENTIMENTS}
+    return {"personas": personas, "counts": counts, "scored": len(personas),
+            "label": POST_INTERVIEW_SCORE_LABEL}
+
+
 def status(job):
     revision, pairs = corpus(job)
     saved = (job.result_json or {}).get("insights")
@@ -95,7 +120,8 @@ def status(job):
         "available": bool(saved and saved.get("themes")), "stale": bool(saved and saved["revision"] != revision),
         "message": "Generate themes to compare with your hand-coding." if complete else
             f"Themes require a completed, nonempty batch. This run is {job.status}; its transcripts remain available.",
-        "estimated_cost_usd": str(estimate), "model": MODEL, "saved": saved}
+        "estimated_cost_usd": str(estimate), "model": MODEL, "saved": saved,
+        "emotion": emotion(job)}
 
 
 @serialized_local

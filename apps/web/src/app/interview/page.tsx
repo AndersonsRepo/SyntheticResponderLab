@@ -48,6 +48,8 @@ type Themes = {
   estimated_cost_usd: string; model: string; message: string; session_usage?: { cost_usd: string };
   saved: { revision: string; attempt: number; message?: string; budget_stop?: string;
     themes: { label: string; synthesis: string; representative_quote: string; quote_persona_id: string; sentiment: string }[] | null } | null;
+  emotion?: { scored: number; label: string; counts: Record<string, number>;
+    personas: { persona_id: string; emotional_classification: string; fit_tier: string }[] };
 };
 
 type Turn = { role: "student" | "persona"; text: string; answerId?: string; version?: number };
@@ -547,6 +549,17 @@ function InterviewPageContent() {
             {themes.eligible && (!themes.available || themes.stale) ? <Button disabled={busy} onClick={() => loadThemes(true)}>
               {themes.saved && !themes.stale ? "Retry extraction" : "Generate themes"} (about ${Number(themes.estimated_cost_usd).toFixed(4)} extra)
             </Button> : null}
+            {themes.emotion && themes.emotion.scored > 0 ? <section className="my-4">
+              <h3 className="font-semibold">Emotion across the room ({themes.emotion.scored} interviewed)</h3>
+              <p className="text-sm text-app-muted">{themes.emotion.label} · no charge</p>
+              <p>{["positive", "neutral", "negative"].map((name) =>
+                `${themes.emotion!.counts[name] ?? 0} ${name}`).join(" · ")}</p>
+              <ul className="mt-2 text-sm">
+                {themes.emotion.personas.map((entry) => <li key={entry.persona_id}>
+                  {entry.persona_id}: {entry.emotional_classification} · fit {entry.fit_tier}
+                </li>)}
+              </ul>
+            </section> : null}
             {themes.saved?.themes?.map((theme, index) => <article className="my-4" key={index}>
               <h3 className="font-semibold">{theme.label} · {theme.sentiment}</h3><p>{theme.synthesis}</p>
               <blockquote>“{theme.representative_quote}”</blockquote>
