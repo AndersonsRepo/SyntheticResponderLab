@@ -10,7 +10,7 @@ import { RevealOnScroll } from "@/components/ui/reveal-on-scroll";
 import { AppLogoMark } from "@/components/ui/workflow-nav";
 import { useBackendReadiness } from "@/hooks/use-backend-readiness";
 
-export function PublicLandingShell() {
+export function PublicLandingShell({ classroomNoLogin = false }: { classroomNoLogin?: boolean }) {
   const readiness = useBackendReadiness();
 
   return (
@@ -30,7 +30,7 @@ export function PublicLandingShell() {
         />
       </div>
 
-      <PublicTopNav backendReady={readiness.ready} />
+      <PublicTopNav backendReady={readiness.ready} classroomNoLogin={classroomNoLogin} />
 
       <main className="relative mx-auto flex min-h-[calc(100vh-5.5rem)] w-full max-w-[88rem] flex-col px-4 pb-14 pt-8 sm:min-h-[calc(100vh-var(--nav-height))] sm:px-5 sm:pb-16 sm:pt-10 md:px-8 lg:min-h-[calc(100vh-var(--nav-height))] lg:justify-center lg:px-12 lg:pb-10 lg:pt-8 xl:px-16">
         <div className="grid gap-8 lg:min-h-[min(calc(100svh-var(--nav-height)-2rem),46rem)] lg:items-center xl:grid-cols-[minmax(0,0.98fr)_minmax(24rem,0.92fr)] xl:gap-10">
@@ -57,35 +57,40 @@ export function PublicLandingShell() {
             </div>
 
             <p className="mt-4 max-w-xl text-[0.92rem] leading-6 text-app-muted/90">
-              This workspace is currently available by invitation. Sign in with
-              your account, or follow the invite link in your email to get
-              started.
+              {classroomNoLogin
+                ? "Students: go straight to the interview, no account needed. Everything else in this workspace is available by invitation."
+                : "This workspace is currently available by invitation. Sign in with your account, or follow the invite link in your email to get started."}
             </p>
 
             <div className="mt-6 flex flex-col gap-3 sm:mt-7 sm:flex-row sm:flex-wrap sm:items-center">
+              {classroomNoLogin ? (
+                <Link href="/interview" className="w-full sm:w-auto">
+                  <Button className="w-full sm:w-auto">
+                    Start as a student — no login
+                    <ArrowRightIcon />
+                  </Button>
+                </Link>
+              ) : null}
+              {/* One destination, one button. "Log in" and "Accept invite" both pointed
+                  at /sign-in, so the second one only made people wonder which was theirs;
+                  an emailed invite link opens the provider directly, not this page. */}
               {readiness.ready ? (
                 <Link href="/sign-in" className="w-full sm:w-auto">
-                  <Button className="w-full sm:w-auto">
+                  <Button
+                    variant={classroomNoLogin ? "secondary" : undefined}
+                    className="w-full sm:w-auto"
+                  >
                     Log in
                     <ArrowRightIcon />
                   </Button>
                 </Link>
               ) : (
-                <Button disabled className="w-full sm:w-auto">
+                <Button
+                  variant={classroomNoLogin ? "secondary" : undefined}
+                  disabled
+                  className="w-full sm:w-auto"
+                >
                   Log in
-                  <ArrowRightIcon />
-                </Button>
-              )}
-              {readiness.ready ? (
-                <Link href="/sign-in" className="w-full sm:w-auto">
-                  <Button variant="secondary" className="w-full sm:w-auto">
-                    Accept invite
-                    <ArrowRightIcon />
-                  </Button>
-                </Link>
-              ) : (
-                <Button variant="secondary" disabled className="w-full sm:w-auto">
-                  Accept invite
                   <ArrowRightIcon />
                 </Button>
               )}
@@ -116,7 +121,7 @@ export function PublicLandingShell() {
   );
 }
 
-function PublicTopNav({ backendReady }: { backendReady: boolean }) {
+function PublicTopNav({ backendReady, classroomNoLogin }: { backendReady: boolean; classroomNoLogin: boolean }) {
   return (
     <header className="sticky top-0 z-50 border-b [background:var(--nav-bg)] [border-color:var(--nav-border)] backdrop-blur-2xl">
       <div className="mx-auto flex h-[5.5rem] w-full max-w-[92rem] items-center justify-between gap-4 px-4 sm:h-[var(--nav-height)] sm:px-6 lg:px-8">
@@ -141,12 +146,14 @@ function PublicTopNav({ backendReady }: { backendReady: boolean }) {
               >
                 Log in
               </Link>
-              <Link
-                href="/sign-in"
-                className="inline-flex h-10 items-center justify-center rounded-full px-3.5 text-[0.78rem] font-semibold tracking-[0.01em] [background:var(--button-primary-bg)] [color:var(--button-primary-text)] shadow-[var(--button-primary-shadow)] transition hover:-translate-y-0.5 sm:px-4 sm:text-[0.82rem]"
-              >
-                Accept invite
-              </Link>
+              {classroomNoLogin ? (
+                <Link
+                  href="/interview"
+                  className="inline-flex h-10 items-center justify-center rounded-full px-3.5 text-[0.78rem] font-semibold tracking-[0.01em] [background:var(--button-primary-bg)] [color:var(--button-primary-text)] shadow-[var(--button-primary-shadow)] transition hover:-translate-y-0.5 sm:px-4 sm:text-[0.82rem]"
+                >
+                  Student interview
+                </Link>
+              ) : null}
             </>
           ) : (
             <div className="hidden rounded-full border px-3 py-2 text-[0.72rem] font-medium text-app-muted [background:var(--panel-bg-soft)] [border-color:var(--panel-border)] sm:block">

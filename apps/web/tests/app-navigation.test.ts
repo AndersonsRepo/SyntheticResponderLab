@@ -43,3 +43,24 @@ test("the desktop nav sizes its track to what it holds, not to the viewport", ()
   assert.doesNotMatch(track!, /(?<![\w-])w-full\b/);
   assert.match(track!, /\bw-max min-w-full\b/);
 });
+
+test("the landing page offers the student a way in, and never two buttons to one place", () => {
+  // Both CTAs used to point at /sign-in, so "Accept invite" only made a student wonder
+  // which one was theirs. With classroom mode on, the way in has to be on the page they
+  // actually land on — the classroom cookie is only set once they reach /interview.
+  const shell = readFileSync(
+    resolve(__dirname, "../../src/components/ui/public-landing-shell.tsx"),
+    "utf8"
+  );
+  // Match the rendered label on its own line, so the comment explaining the removal
+  // does not keep the test green or red by accident.
+  assert.doesNotMatch(shell, /^\s*Accept invite\s*$/m);
+  // Both the hero CTA and the top nav must reach it; one alone leaves a student
+  // scrolling past a log-in wall on the page they were handed.
+  assert.equal(shell.match(/href="\/interview"/g)?.length, 2);
+  assert.match(shell, /Start as a student/);
+  assert.match(shell, /classroomNoLogin/);
+
+  const home = readFileSync(resolve(__dirname, "../../src/app/page.tsx"), "utf8");
+  assert.match(home, /classroomNoLogin=\{isClassroomNoLoginEnabled\(\)\}/);
+});

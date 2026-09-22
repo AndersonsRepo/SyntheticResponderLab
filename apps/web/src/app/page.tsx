@@ -17,6 +17,7 @@ import { BackendReadinessGate } from "@/components/ui/backend-readiness";
 import { AppShell } from "@/components/ui/app-shell";
 import { PublicLandingShell } from "@/components/ui/public-landing-shell";
 import { AppProviders } from "@/providers/app-providers";
+import { isClassroomNoLoginEnabled } from "@/lib/classroom-access";
 import { isClerkConfigured } from "@/lib/server-env";
 
 function AuthenticatedApp() {
@@ -53,7 +54,7 @@ export default function HomePage() {
   return (
     <>
       <SignedOut>
-        <PublicLandingShell />
+        <PublicLandingShell classroomNoLogin={isClassroomNoLoginEnabled()} />
       </SignedOut>
       <SignedIn>
         <BackendReadinessGate>
