@@ -673,7 +673,7 @@ test("the reflection is typed in the app, saved with its batch and exported", as
   const ui = harness([{ ...batch, status: "completed" }]); await ui.settle();
   ui.nodes().find(n => n.props["aria-label"] === "Saved batches")!.props.onChange({ target: { value: "batch_1" } });
   ui.button("3. Themes").props.onClick(); ui.render();
-  ui.nodes().find(n => n.props["aria-label"] === "AI reflection 3")!
+  ui.nodes().find(n => n.props["aria-label"] === REFLECTION_PROMPTS[2])!
     .props.onChange({ target: { value: "We rejected its fourth theme." } });
   ui.render();
   // Each prompt writes its own slot; the others stay empty rather than shifting.

@@ -642,7 +642,9 @@ function InterviewPageContent() {
             </p>
             {REFLECTION_PROMPTS.map((prompt, index) => (
               <label key={index} className="mt-3 block text-sm">{prompt}
-                <textarea aria-label={`AI reflection ${index + 1}`} disabled={!memoKey} rows={2}
+                {/* The prompt itself is the accessible name: an ordinal would leave the
+                    four fields indistinguishable to a screen reader. */}
+                <textarea aria-label={prompt} disabled={!memoKey} rows={2}
                   value={myMemo.reflection?.[index] ?? ""}
                   onChange={(event) => editMemo((prev) => ({ ...prev, reflection:
                     REFLECTION_PROMPTS.map((_, at) => at === index

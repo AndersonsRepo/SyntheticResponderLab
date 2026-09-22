@@ -10,7 +10,9 @@ export type BatchMemo = {
 /** The memo PA3.5 grades is the student's own writing; ours is what they check it against. */
 export type StudentMemo = { themes: string; surprise: string; options: string[]; reflection?: string[] };
 
-/** PA3.5's required AI reflection, in Dr. Lin's wording and his order. */
+/** PA3.5's required AI reflection, in Dr. Lin's wording and his order.
+ *  A StudentMemo's `reflection` is positional against this list, so reordering or
+ *  inserting a prompt re-binds every answer already saved in a browser. Append only. */
 export const REFLECTION_PROMPTS = [
   "The most important change we made after using AI was\u2026",
   "We accepted this change because\u2026",
