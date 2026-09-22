@@ -58,6 +58,14 @@ test("the markdown export carries the memo, not just the transcript", () => {
 });
 
 
+test("a half-written memo hands in only the sections it has", () => {
+  // An empty heading reads as an answer left blank, not as one not reached yet.
+  const partial = studentMemoMarkdown({ themes: "People want quiet.", surprise: "", options: [] });
+  assert.match(partial, /## Themes/);
+  assert.doesNotMatch(partial, /## One surprise/);
+  assert.doesNotMatch(partial, /Closed-ended answer options/);
+});
+
 test("an untouched memo form adds nothing to the download", () => {
   // A student who has written nothing yet gets a transcript, not empty headings.
   assert.equal(studentMemoMarkdown(null), "");

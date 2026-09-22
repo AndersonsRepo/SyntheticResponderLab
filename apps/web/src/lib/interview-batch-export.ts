@@ -14,9 +14,16 @@ export function studentMemoMarkdown(memo?: StudentMemo | null) {
   const options = (memo?.options ?? []).map((option) => option.trim()).filter(Boolean);
   const themes = memo?.themes.trim() ?? "";
   const surprise = memo?.surprise.trim() ?? "";
-  if (!themes && !surprise && !options.length) return "";
-  return `\n# Memo\n\n## Themes\n\n${themes}\n\n## One surprise\n\n${surprise}\n\n`
-    + `## Closed-ended answer options (participant language)\n\n${options.map((option) => `- ${option}`).join("\n")}\n\n---\n`;
+  // Only the sections they have actually written: a heading with nothing under it
+  // reads, to whoever grades this, as an answer left blank rather than not reached.
+  const sections = [
+    themes && `## Themes\n\n${themes}\n`,
+    surprise && `## One surprise\n\n${surprise}\n`,
+    options.length && `## Closed-ended answer options (participant language)\n\n${
+      options.map((option) => `- ${option}`).join("\n")}\n`,
+  ].filter(Boolean);
+  if (!sections.length) return "";
+  return `\n# Memo\n\n${sections.join("\n")}\n---\n`;
 }
 
 /** The extraction, kept clearly separate: it is the student's check, not their submission. */

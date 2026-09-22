@@ -634,6 +634,41 @@ test("a stored memo of the wrong shape is dropped, not exported", async () => {
   assert.equal(ui.nodes().find(n => n.props["aria-label"] === "Your themes")!.props.value, "");
 });
 
+test("the memo form is inert until a batch is chosen, and says so", async () => {
+  const ui = harness([{ ...batch, status: "completed" }]); await ui.settle();
+  ui.button("3. Themes").props.onClick(); ui.render();
+  // Live-looking fields that discard keystrokes are how a student loses their memo.
+  assert.equal(ui.nodes().find(n => n.props["aria-label"] === "Your themes")!.props.disabled, true);
+  assert.match(ui.text(), /Select a batch first/);
+  ui.nodes().find(n => n.props["aria-label"] === "Saved batches")!.props.onChange({ target: { value: "batch_1" } });
+  ui.render();
+  assert.equal(ui.nodes().find(n => n.props["aria-label"] === "Your themes")!.props.disabled, false);
+  assert.doesNotMatch(ui.text(), /Select a batch first/);
+});
+
+test("a browser that refuses to save the memo says so while the text is still there", async () => {
+  // Safari private browsing throws on setItem; a silent swallow means the student
+  // finds out only after the reload that already destroyed their writing.
+  class Blocked extends Map<string, string> {
+    // Only the memo store is refused, so the test exercises that write and not the
+    // page's unrelated saved-batch bookkeeping.
+    set(key: string, value: string) {
+      if (key === "interview-memos") throw new Error("QuotaExceededError");
+      return super.set(key, value);
+    }
+  }
+  const ui = harness([{ ...batch, status: "completed" }], undefined, new Blocked());
+  await ui.settle();
+  ui.nodes().find(n => n.props["aria-label"] === "Saved batches")!.props.onChange({ target: { value: "batch_1" } });
+  ui.button("3. Themes").props.onClick(); ui.render();
+  ui.nodes().find(n => n.props["aria-label"] === "Your themes")!
+    .props.onChange({ target: { value: "People want quiet" } });
+  ui.render();
+  assert.match(ui.text(), /not saving your memo/);
+  // And the writing is still on screen, which is the whole point of warning now.
+  assert.equal(ui.nodes().find(n => n.props["aria-label"] === "Your themes")!.props.value, "People want quiet");
+});
+
 test("classroom switching saved runs rejects late themes", async () => {
   const ui = harness([{ ...batch, status: "completed" }, { ...batch, job_id: "batch_2", status: "completed" }]); await ui.settle();
   const select = () => ui.nodes().find(n => n.props["aria-label"] === "Saved batches")!;

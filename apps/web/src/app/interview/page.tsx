@@ -104,6 +104,9 @@ function InterviewPageContent() {
   // re-sync an input's value after hydration, so the student would watch their
   // writing vanish from fields that state still holds.
   const [memos, setMemos] = useState<Record<string, StudentMemo>>({});
+  // A blocked or full store (Safari private browsing throws on setItem) must say so
+  // while the text is still on screen, not after the reload that loses it.
+  const [memoUnsaved, setMemoUnsaved] = useState("");
   const [source, setSource] = useState("");
   const [selectedId, setSelectedId] = useState<string>("");
   const [models, setModels] = useState<InterviewModelCatalogEntry[]>([]);
@@ -189,7 +192,12 @@ function InterviewPageContent() {
     if (!memoKey) return;
     setMemos((prev) => {
       const next = { ...prev, [memoKey]: update(prev[memoKey] ?? EMPTY_MEMO) };
-      try { localStorage.setItem(MEMO_STORE, JSON.stringify(next)); } catch { /* ignore */ }
+      try {
+        localStorage.setItem(MEMO_STORE, JSON.stringify(next));
+        setMemoUnsaved("");
+      } catch {
+        setMemoUnsaved("This browser is not saving your memo — copy it somewhere before you reload.");
+      }
       return next;
     });
   };
@@ -598,18 +606,22 @@ function InterviewPageContent() {
               found is below, to check yourself against, and it is labelled that way in
               the download.
             </p>
+            {memoKey ? null : <p role="alert" className="mt-2 text-xs text-app-muted">
+              Select a batch first — a memo is saved against the interviews it is about.
+            </p>}
+            {memoUnsaved ? <p role="alert" className="mt-2 text-xs">{memoUnsaved}</p> : null}
             <label className="mt-3 block text-sm">Themes you heard
-              <textarea aria-label="Your themes" rows={4} value={myMemo.themes}
+              <textarea aria-label="Your themes" disabled={!memoKey} rows={4} value={myMemo.themes}
                 onChange={(event) => editMemo((prev) => ({ ...prev, themes: event.target.value }))}
                 className="mt-1 w-full rounded-xl border border-app-border bg-transparent p-2 text-sm" />
             </label>
             <label className="mt-3 block text-sm">One surprise
-              <textarea aria-label="Your surprise" rows={2} value={myMemo.surprise}
+              <textarea aria-label="Your surprise" disabled={!memoKey} rows={2} value={myMemo.surprise}
                 onChange={(event) => editMemo((prev) => ({ ...prev, surprise: event.target.value }))}
                 className="mt-1 w-full rounded-xl border border-app-border bg-transparent p-2 text-sm" />
             </label>
             <p className="mt-3 text-sm">Closed-ended answer options, in participants&rsquo; words</p>
-            {myMemo.options.map((option, index) => <input key={index} aria-label={`Your answer option ${index + 1}`}
+            {myMemo.options.map((option, index) => <input key={index} aria-label={`Your answer option ${index + 1}`} disabled={!memoKey}
               value={option} onChange={(event) => editMemo((prev) => ({ ...prev,
                 options: prev.options.map((existing, at) => at === index ? event.target.value : existing) }))}
               className="mt-2 w-full rounded-xl border border-app-border bg-transparent p-2 text-sm" />)}
