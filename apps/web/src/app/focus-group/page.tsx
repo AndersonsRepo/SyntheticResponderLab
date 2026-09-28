@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ConceptCardPanel } from "@/components/focus-group/concept-card";
+import { PersonaCardView } from "@/components/focus-group/persona-card";
 import { ManualMemoForm } from "@/components/focus-group/manual-memo-form";
 import { Button } from "@/components/ui/button";
 import { GlassPanel } from "@/components/ui/glass-panel";
@@ -283,7 +284,7 @@ function FocusGroupPageContent() {
   const missing = missingAnswers(room);
 
   return (
-    <main className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-6 py-12">
+    <main className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-6 py-12">
       <header className="flex flex-col gap-2">
         <h1 className="text-3xl font-semibold">Simulated focus group</h1>
         <p role="note" className="text-sm font-semibold" data-testid="rehearsal-label">
@@ -305,23 +306,30 @@ function FocusGroupPageContent() {
       {!room ? (
         <GlassPanel className="flex flex-col gap-5 p-6">
           <h2 className="text-xl font-semibold">Recruit the room</h2>
-          <div className="flex flex-wrap gap-2">
+          <p className="text-sm text-app-muted">
+            Open a card to see who the persona is and how they stand on the PA3.5 screener. Be
+            ready to say why each person you pick meets it — or what you would still need to ask.
+          </p>
+          <ul className="grid gap-2 md:grid-cols-2" aria-label="Personas you can recruit">
             {personas.map((persona) => (
-              <button
-                key={persona.persona_id}
-                type="button"
-                onClick={() => togglePersona(persona.persona_id)}
-                disabled={busy}
-                aria-pressed={selectedPersonaIds.includes(persona.persona_id)}
-                className={cn(
-                  "rounded-full border px-4 py-2 text-xs",
-                  selectedPersonaIds.includes(persona.persona_id) && "border-app-cyan"
-                )}
-              >
-                {persona.persona_id}
-              </button>
+              <li key={persona.persona_id} className="flex flex-col gap-1">
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={selectedPersonaIds.includes(persona.persona_id)}
+                    onChange={() => togglePersona(persona.persona_id)}
+                    disabled={busy}
+                  />
+                  Recruit {persona.persona_id}
+                </label>
+                <PersonaCardView
+                  card={persona.card}
+                  personaId={persona.persona_id}
+                  selected={selectedPersonaIds.includes(persona.persona_id)}
+                />
+              </li>
             ))}
-          </div>
+          </ul>
 
           <label className="flex items-center gap-3 text-sm">
             Questions planned
@@ -398,6 +406,7 @@ function FocusGroupPageContent() {
       ) : null}
 
       {room ? (
+        <div className="grid gap-4 lg:grid-cols-[1fr_18rem]">
         <GlassPanel className="flex flex-col gap-5 p-6">
           <div className="flex flex-wrap items-center gap-2">
             {FOCUS_GROUP_STAGES.map((entry, index) => (
@@ -598,6 +607,17 @@ function FocusGroupPageContent() {
             </div>
           ) : null}
         </GlassPanel>
+        <aside aria-label="Who is in the room" className="flex flex-col gap-2 lg:sticky lg:top-4 lg:self-start">
+          <h2 className="text-lg font-semibold">Who is in the room</h2>
+          {(room.participants ?? []).map((participant) => (
+            <PersonaCardView
+              key={participant.persona_id}
+              card={participant.card}
+              personaId={participant.persona_id}
+            />
+          ))}
+        </aside>
+        </div>
       ) : null}
 
       <GlassPanel className="flex flex-col gap-3 p-6">

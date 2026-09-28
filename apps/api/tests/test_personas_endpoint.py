@@ -75,7 +75,10 @@ def test_personas_endpoint_serves_database_rows_in_seed_order(client, db_session
     assert [persona["persona_id"] for persona in payload["personas"]] == [
         f"P{index:03d}" for index in range(1, EXPECTED_PERSONA_COUNT + 1)
     ]
-    assert payload["personas"][0] == seed_rows[0]["profile_json"]
+    # Lin fix 1 adds a display-only card beside the profile; the profile itself is unchanged.
+    first = dict(payload["personas"][0])
+    assert first.pop("card")["persona_id"] == "P001"
+    assert first == seed_rows[0]["profile_json"]
 
 
 def test_alembic_migration_seeds_personas(tmp_path):

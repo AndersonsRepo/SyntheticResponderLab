@@ -59,6 +59,7 @@ export type FocusGroupRoom = {
     answers: FocusGroupAnswer[];
   }[];
   concept_card?: ConceptCard;
+  participants?: { persona_id: string; card: PersonaCard | null }[];
   shared?: SharedStimulus[];
   memo: { themes: unknown[] | null } | null;
   manual_memo?: ManualMemo | null;
@@ -306,4 +307,39 @@ export function sharedSummary(room: RevealRoom | null) {
     .filter((kind) => !kinds.has(kind))
     .map((kind) => (kind === "concept" ? "Not shown yet: the concept card" : "Not shown yet: the price"));
   return { shown, withheld };
+}
+
+// --- persona cards (Fix 1) ----------------------------------------------------
+
+export type CardSource = "census" | "fictional" | "unknown";
+export type PersonaCard = {
+  persona_id: string;
+  name: string;
+  origin: "source_grounded_roster" | "student_created";
+  origin_label: string;
+  attributes: { key: string; label: string; value: string; source: CardSource }[];
+  screener: { criterion: string; verdict: "meets" | "does_not_meet" | "unknown"; why: string; source: CardSource }[];
+  source_note: string;
+  version?: number;
+  based_on?: string | null;
+};
+
+export const CARD_SOURCE_LABELS: Record<CardSource, string> = {
+  census: "Source-backed (ACS)",
+  fictional: "Fictional",
+  unknown: "Unknown",
+};
+
+export const SCREENER_VERDICT_LABELS = {
+  meets: "Meets",
+  does_not_meet: "Does not meet",
+  unknown: "Can't tell from the profile",
+} as const;
+
+/** The one line a closed card shows: who, and where they stand on the screener. */
+export function cardHeadline(card: PersonaCard) {
+  const counts = { meets: 0, does_not_meet: 0, unknown: 0 };
+  for (const entry of card.screener) counts[entry.verdict] += 1;
+  const who = card.name ? `${card.persona_id} · ${card.name}` : card.persona_id;
+  return `${who} — screener: ${counts.meets} meet, ${counts.does_not_meet} do not, ${counts.unknown} unknown`;
 }

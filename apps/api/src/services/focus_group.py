@@ -251,6 +251,11 @@ def estimate_room_cost_usd(*, persona_count: int, rounds: int, model_id: str) ->
     return (per_turn * persona_count * rounds) / _TOKENS_PER_MILLION
 
 
+def participant_card(config, persona_id):
+    from src.persistence.persona_seed import persona_cards
+    return persona_cards().get(persona_id)
+
+
 def owned_room(session, study, room_id, *, lock=False):
     query = select(Job).where(Job.public_id == room_id, Job.study_id == study.id, Job.job_type == JOB_TYPE)
     if lock:
@@ -296,6 +301,9 @@ def room_status(session, settings, study, room_id, room=None):
         # The moderator sees the price; participants do not until it is revealed.
         "concept_card": {**CONCEPT_CARD, "text": CONCEPT_STIMULUS, "price": PRICE},
         "shared": shared_view(state.get("rounds", [])),
+        # The same cards the student recruited from, so they can be reopened mid-discussion.
+        "participants": [{"persona_id": pid, "card": participant_card(room.payload_json, pid)}
+                         for pid in room.payload_json.get("persona_ids", [])],
         "stage": STAGES[state.get("stage_index", 0)],
         "stages": list(STAGES),
         "stage_labels": STAGE_LABELS,

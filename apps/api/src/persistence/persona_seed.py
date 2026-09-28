@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -106,3 +107,101 @@ def load_persona_seed_rows(path: Optional[Path] = None) -> List[dict]:
         }
         for index, profile in enumerate(profiles)
     ]
+
+
+# --- persona cards: what a student sees when choosing who to recruit (Lin fix 1) ---
+
+SOURCE_NOTE = (
+    "Source-backed attributes come from one real household record in the Census Bureau's "
+    "American Community Survey microdata (ACS PUMS, California). The name is invented. In a "
+    "focus group the persona is also given an invented speaking manner and, once the concept "
+    "is shown, an invented stance toward it. Anything the record does not cover is marked "
+    "unknown: the persona may improvise it, and nothing it says is evidence about real customers."
+)
+UNKNOWN = "Unknown"
+
+
+def card_attribute(key: str, label: str, value: str, source: str) -> dict:
+    """source is "census" (from the ACS record), "fictional" (invented), or "unknown"."""
+    value = (value or "").strip()
+    return {"key": key, "label": label, "value": value or UNKNOWN,
+            "source": source if value else "unknown"}
+
+
+def screener(tenure: str, outdoor: str, willing: str, tenure_source: str, other_source: str) -> List[dict]:
+    """The PA3.5 screener — homeowner/landowner, usable outdoor space, open to more space —
+    answered only as far as the profile actually says."""
+    def verdict(criterion, meets, why_meets, why_not, why_unknown, source):
+        if meets is None:
+            return {"criterion": criterion, "verdict": "unknown", "why": why_unknown, "source": "unknown"}
+        return {"criterion": criterion, "verdict": "meets" if meets else "does_not_meet",
+                "why": why_meets if meets else why_not, "source": source}
+
+    lowered = tenure.lower()
+    owns = True if lowered.startswith("own") else False if lowered.startswith("rent") else None
+    has_space = {"yes": True, "no": False}.get(outdoor)
+    open_to = {"yes": True, "maybe": True, "no": False}.get(willing)
+    return [
+        verdict("Homeowner or landowner", owns, f"Tenure: {tenure}.", f"Tenure: {tenure}.",
+                "Tenure is not recorded.", tenure_source),
+        verdict("Has usable outdoor space", has_space, "Profile says yes.", "Profile says no.",
+                "Not recorded. A detached home often has a yard, but that is an assumption to check "
+                "with a screener question, not a fact.", other_source),
+        verdict("Open to adding living or work space", open_to, "Profile says open to it.",
+                "Profile says not interested.",
+                "Not recorded — this is exactly what a screener question has to ask.", other_source),
+    ]
+
+
+def persona_card(row: Dict[str, str]) -> dict:
+    get = lambda key: (row.get(key) or "").strip()  # noqa: E731
+    size, children = get("household_size"), get("children_in_household")
+    household = ", ".join(part for part in (
+        get("household_type"),
+        f"{size} {'person' if size == '1' else 'people'}" if size else "",
+        f"{children} child{'ren' if children != '1' else ''}" if children and children != "0" else "",
+    ) if part)
+    income = get("exact_household_income")
+    commute = get("commute_mode")
+    work = "; ".join(part for part in (
+        get("occupation"), get("employment_status"),
+        f"{get('hours_worked_per_week')} hours/week" if get("hours_worked_per_week") else "",
+        f"commutes by {commute.lower()}, {get('commute_minutes')} min" if commute else "",
+    ) if part)
+    home = ", ".join(part for part in (
+        get("home_type"), f"{get('bedrooms')} bedrooms" if get("bedrooms") not in ("", "0") else "",
+        f"{get('rooms')} rooms" if get("rooms") else "", f"built {get('year_built')}" if get("year_built") else "",
+    ) if part)
+    tenure = get("tenure_detail") or get("ownership")
+    return {
+        "persona_id": get("persona_id"),
+        "name": get("name"),
+        "origin": "source_grounded_roster",
+        "origin_label": "Roster persona grounded in one ACS household record",
+        "attributes": [
+            card_attribute("name", "Name", get("name"), "fictional"),
+            card_attribute("household", "Household", household, "census"),
+            card_attribute("tenure", "Homeowner or renter", tenure, "census"),
+            card_attribute("outdoor_space", "Usable outdoor space", "", "unknown"),
+            card_attribute("willing_more_space", "Willing to consider more living/work space", "", "unknown"),
+            card_attribute("current_space_use", "How they use their space today", "", "unknown"),
+            card_attribute("age", "Age", ", ".join(p for p in (get("exact_age"), get("sex").lower()) if p), "census"),
+            card_attribute("county", "Lives in", f"{get('county')} County, California" if get("county") else "", "census"),
+            card_attribute("home", "Home", home, "census"),
+            card_attribute("moved_in", "Lived there", get("moved_in"), "census"),
+            card_attribute("income", "Household income", f"${int(income):,} a year" if income.isdigit() else "", "census"),
+            card_attribute("housing_cost", "Housing cost share of income",
+                           f"{get('housing_cost_pct_of_income')}%" if get("housing_cost_pct_of_income") else "", "census"),
+            card_attribute("work", "Work", work, "census"),
+        ],
+        "screener": screener(tenure, "", "", "census", "unknown"),
+        "source_note": SOURCE_NOTE,
+    }
+
+
+@lru_cache(maxsize=1)
+def persona_cards() -> Dict[str, dict]:
+    """Cards read straight off the seed file. They are for the student's eyes only: the
+    model still gets the profile_json description it always had."""
+    with PERSONA_SEED_PATH.open(newline="", encoding="utf-8-sig") as handle:
+        return {card["persona_id"]: card for card in map(persona_card, csv.DictReader(handle))}

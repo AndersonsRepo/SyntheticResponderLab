@@ -157,3 +157,39 @@ test("shared with participants: the panel lists each stimulus with its question,
   assert.deepEqual(some.withheld, ["Not shown yet: the price"]);
   assert.match(conceptCardSource, /Information shared with participants/);
 });
+
+// --- Fix 1 ------------------------------------------------------------------
+
+import { CARD_SOURCE_LABELS, cardHeadline, type PersonaCard } from "../src/lib/focus-group";
+
+const personaCardSource = read("src/components/focus-group/persona-card.tsx");
+const CARD: PersonaCard = {
+  persona_id: "P001",
+  name: "Jorge Beltran",
+  origin: "source_grounded_roster",
+  origin_label: "Roster persona",
+  attributes: [
+    { key: "tenure", label: "Homeowner or renter", value: "Owned free and clear", source: "census" },
+    { key: "outdoor_space", label: "Usable outdoor space", value: "Unknown", source: "unknown" },
+  ],
+  screener: [
+    { criterion: "Homeowner or landowner", verdict: "meets", why: "Owned", source: "census" },
+    { criterion: "Has usable outdoor space", verdict: "unknown", why: "Not recorded", source: "unknown" },
+  ],
+  source_note: "note",
+};
+
+test("persona card: recruitment shows an expandable card per persona, with each attribute's source", () => {
+  assert.match(pageSource, /personas\.map\(\(persona\) => \([\s\S]*?Recruit \{persona\.persona_id\}[\s\S]*?<PersonaCardView\s+card=\{persona\.card\}/);
+  assert.match(personaCardSource, /<details/);
+  assert.match(personaCardSource, /CARD_SOURCE_LABELS\[attribute\.source\]/);
+  assert.match(personaCardSource, /SCREENER_VERDICT_LABELS\[entry\.verdict\]/);
+  assert.deepEqual(CARD_SOURCE_LABELS, { census: "Source-backed (ACS)", fictional: "Fictional", unknown: "Unknown" });
+  assert.equal(cardHeadline(CARD), "P001 · Jorge Beltran — screener: 1 meet, 0 do not, 1 unknown");
+  // The old ID-only chip is gone.
+  assert.doesNotMatch(pageSource, /aria-pressed=\{selectedPersonaIds/);
+});
+
+test("persona card: the seated participants' cards stay beside the discussion", () => {
+  assert.match(pageSource, /<aside aria-label="Who is in the room"[\s\S]*?room\.participants[\s\S]*?<PersonaCardView/);
+});

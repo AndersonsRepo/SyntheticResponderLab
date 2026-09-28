@@ -274,3 +274,64 @@ def test_shared_info_in_export_and_room_names_each_stimulus_and_round(room):
     assert "Stimulus,shown_to_participants" in csv_text and "R5-STIMULUS" in csv_text
     unrevealed = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:2])
     assert "- Price revealed: never" in export(client, study_id, unrevealed)["content"]
+
+
+# --- Fix 1: who is in the room -------------------------------------------------
+
+REQUIRED_CARD_KEYS = ["name", "household", "tenure", "outdoor_space", "willing_more_space"]
+
+
+def test_persona_cards_mark_every_attribute_source_backed_fictional_or_unknown(room):
+    client, _, _, _ = room
+    personas = client.get("/api/v1/personas").json()["data"]["personas"]
+    assert len(personas) == 30
+    for persona in personas:
+        card = persona["card"]
+        keys = [a["key"] for a in card["attributes"]]
+        assert keys[:5] == REQUIRED_CARD_KEYS, keys
+        assert card["persona_id"] == persona["persona_id"] and card["name"]
+        by_key = {a["key"]: a for a in card["attributes"]}
+        assert by_key["name"]["source"] == "fictional"
+        assert by_key["tenure"]["source"] == "census" and by_key["household"]["source"] == "census"
+        for key in ("outdoor_space", "willing_more_space"):
+            assert by_key[key] == {**by_key[key], "value": "Unknown", "source": "unknown"}
+        for attribute in card["attributes"]:
+            assert attribute["source"] in {"census", "fictional", "unknown"}
+            assert attribute["value"], attribute
+            assert (attribute["value"] == "Unknown") == (attribute["source"] == "unknown")
+        assert "ACS" in card["source_note"] and "invented" in card["source_note"]
+
+
+def test_screener_verdicts_say_meets_does_not_or_cannot_tell():
+    from src.persistence.persona_seed import persona_card, persona_cards
+    verdicts = [(s["criterion"], s["verdict"]) for s in persona_cards()["P001"]["screener"]]
+    assert verdicts == [("Homeowner or landowner", "meets"), ("Has usable outdoor space", "unknown"),
+                        ("Open to adding living or work space", "unknown")]
+    renter = persona_card({"persona_id": "PX", "tenure_detail": "Rented"})["screener"][0]
+    assert renter["verdict"] == "does_not_meet" and "Rented" in renter["why"]
+    blank = persona_card({"persona_id": "PY"})
+    assert blank["screener"][0]["verdict"] == "unknown"
+    assert {a["key"]: a["value"] for a in blank["attributes"]}["tenure"] == "Unknown"
+    assert all(s["why"] for s in blank["screener"])
+
+
+def test_room_carries_participant_cards_including_after_reopen(room):
+    client, study_id, _, _ = room
+    started = start(client, study_id).json()["data"]["room"]
+    assert [p["persona_id"] for p in started["participants"]] == THREE
+    assert all(p["card"]["attributes"] for p in started["participants"])
+    reopened = get_room(client, study_id, started)
+    assert reopened["participants"] == started["participants"]
+
+
+def test_cards_do_not_change_prompt_for_a_roster_persona(room, db_session):
+    from src.persistence.models import Persona
+    client, study_id, calls, _ = room
+    ask(client, study_id, start(client, study_id).json()["data"]["room"], stage="icebreaker",
+        question=FUNNEL[0][1])
+    profile = db_session.get(Persona, "P001").profile_json
+    assert "card" not in profile
+    system = next(c for c in calls if "participant P001" in c["messages"][0]["content"])["messages"][0]["content"]
+    assert fg.persona_description(profile) in system
+    for card_only in ("Usable outdoor space", "Source-backed", "ACS", "Unknown", "screener"):
+        assert card_only not in system

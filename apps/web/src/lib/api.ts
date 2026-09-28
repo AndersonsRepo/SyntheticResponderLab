@@ -72,6 +72,8 @@ export type InterviewPersona = {
   lifestyle_tags: string[];
   census_profile: string;
   headline: string;
+  /** Display-only persona card (focus-group recruitment); never sent back to the model. */
+  card?: import("./focus-group").PersonaCard | null;
 };
 
 export type InterviewModelTier = "cheap" | "mid" | "expensive";
