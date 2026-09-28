@@ -66,24 +66,35 @@ MEMO_MIN_ANSWER_OPTIONS = 3
 # Lin: every output says what it is. Plain ASCII so it survives CSV and copy/paste.
 REHEARSAL_LABEL = "Synthetic rehearsal - not PA3.5 live fieldwork"
 
-_CONCEPT_CONTEXT = """PRODUCT BEING DISCUSSED:
-Name: Tahoe Mini by Neo Smart Living
-Description: A compact 117-square-foot factory-built studio that is delivered and installed in a backyard. It is not an ADU and has no kitchen or bathroom.
-Intended for: homeowners with usable outdoor space"""
-_PRICE_CONTEXT = _CONCEPT_CONTEXT + "\nPrice: about $23,000"
-
-# Stage -> what the personas are allowed to know. Anything before `concept` gets no
-# product context at all: a persona who already knows the product cannot give an
-# uncontaminated answer about how they use their space today.
-_STAGE_CONTEXT = {
-    "icebreaker": "",
-    "space_needs": "",
-    "concept": _CONCEPT_CONTEXT,
-    "price_reactions": _PRICE_CONTEXT,
-    "close": _PRICE_CONTEXT,
+# The instructor-approved concept card. The page renders it above the question field,
+# the student can copy it into ChatGPT, and CONCEPT_STIMULUS — its plain-text form — is
+# exactly what participants are given once the moderator introduces it. One source, so
+# "what the student showed" and "what the model was told" cannot drift apart.
+CONCEPT_CARD = {
+    "name": "Tahoe Mini by Neo Smart Living",
+    "description": ("A compact 117-square-foot factory-built studio that is delivered and installed "
+                    "in a backyard. It is not an ADU and has no kitchen or bathroom."),
+    "specs": ["117 square feet", "Factory-built; delivered and installed in your backyard",
+              "Not an ADU: no kitchen, no bathroom"],
+    "intended_for": "homeowners with usable outdoor space",
+    "introduction": ("I'd like to show you an idea. It's called the Tahoe Mini, from Neo Smart Living: "
+                     "a compact 117-square-foot studio, built in a factory, then delivered and installed "
+                     "in your backyard. It isn't an ADU, so there's no kitchen or bathroom. "
+                     "What's your first reaction, and what would you use it for?"),
 }
+CONCEPT_STIMULUS = "\n".join([
+    "PRODUCT CONCEPT SHOWN BY THE MODERATOR:",
+    f"Name: {CONCEPT_CARD['name']}",
+    f"Description: {CONCEPT_CARD['description']}",
+    *(f"- {spec}" for spec in CONCEPT_CARD["specs"]),
+    f"Intended for: {CONCEPT_CARD['intended_for']}",
+])
+# Withheld from every participant prompt until the moderator's explicit Reveal price.
+PRICE = "about $23,000"
+PRICE_STIMULUS = f"PRICE SHOWN BY THE MODERATOR: {PRICE}"
+STIMULI = {"concept": CONCEPT_STIMULUS, "price": PRICE_STIMULUS}
 
-# A moderator question that names a dollar figure before the price stage anchors the
+# A moderator question that names a dollar figure before the price is revealed anchors the
 # room just as surely as the app doing it. Refuse it and say why.
 # A dollar sign, a thousands-grouped figure, or a bare number carrying a money word.
 # A bare four-digit integer alone is a year far more often than a price ("in 2026",
@@ -188,25 +199,42 @@ def persona_description(profile: dict) -> str:
     return build_persona_description(profile)
 
 
-def build_room_system_prompt(profile: dict, stage: str, stance: str = "", manner: str = "") -> str:
-    context = _STAGE_CONTEXT[stage]
-    product = f"\n{context}\n" if context else "\n"
-    # Pre-exposure stages get no stance. Every disposition below is about the product,
-    # and a persona already skeptical of it is a persona who knows it exists — which is
-    # the contamination _STAGE_CONTEXT exists to prevent (refuter FG-STANCE-2). Gate on
-    # the same boundary rather than a second copy of the stage list.
-    stance_block = f"\nYOUR STANCE GOING IN:\n{stance}\n" if stance and context else ""
-    # A manner carries no product awareness, so unlike a stance it is not gated on context.
+def shared_stimuli(rounds, upto_index):
+    """Everything participants have been shown by the time round `upto_index` is asked."""
+    return [r["stimulus"] for r in rounds[:upto_index + 1] if r.get("stimulus")]
+
+
+def build_room_system_prompt(profile: dict, shared=(), stance: str = "", manner: str = "",
+                             description: str | None = None) -> str:
+    """`shared` is the list of stimuli the moderator has released, in order. Nothing
+    about the product reaches a participant any other way."""
+    kinds = {item["kind"] for item in shared}
+    if shared:
+        shown = "\n\n".join(item["text"] for item in shared)
+        product = f"\nWHAT THE MODERATOR HAS SHOWN YOU SO FAR:\n{shown}\n"
+    else:
+        product = ("\nWHAT THE MODERATOR HAS SHOWN YOU SO FAR:\nNothing about any product. You know only "
+                   "what has been said out loud in this room.\n")
+    # Pre-exposure rounds get no stance. Every disposition below is about the product,
+    # and a persona already skeptical of it is a persona who knows it exists
+    # (refuter FG-STANCE-2). The gate is the concept having been shown, not the stage.
+    stance_block = f"\nYOUR STANCE GOING IN:\n{stance}\n" if stance and "concept" in kinds else ""
+    # A manner carries no product awareness, so unlike a stance it is not gated.
     manner_block = f"\nHOW YOU TALK:\n{manner}\n" if manner else ""
+    price_rule = "" if "price" in kinds else (
+        "\n- No price has been shown to you. If asked what it would or should cost, give your own"
+        "\n  guess and say it is a guess; never state a figure as the product's actual price.")
     return f"""You are role-playing as a real person taking part in a moderated focus group with other participants.
 
 You are participant {profile.get('persona_id', 'unknown')} in this room.
 
 YOUR PERSONA:
-{persona_description(profile)}
+{description if description is not None else persona_description(profile)}
 {product}{stance_block}{manner_block}
 INSTRUCTIONS:
 - Stay fully in character. Answer the moderator as this person would, in first person.
+- You know only what is listed above and what was said in the room. Do not invent product
+  details (size, features, amenities, price) you were not shown.{price_rule}
 - This is a group, not an interview. Whenever other participants' answers are shown to you,
   respond to at least one of them BY NAME before or while answering the moderator — agree,
   push back, or add the thing they left out. "P002 said X, but for me..." is the shape.
@@ -265,6 +293,9 @@ def room_status(session, settings, study, room_id, room=None):
         "rounds": _with_turn_ids(state.get("rounds", [])),
         "manual_memo_check": manual_memo_check(state),
         "rehearsal_label": REHEARSAL_LABEL,
+        # The moderator sees the price; participants do not until it is revealed.
+        "concept_card": {**CONCEPT_CARD, "text": CONCEPT_STIMULUS, "price": PRICE},
+        "shared": shared_view(state.get("rounds", [])),
         "stage": STAGES[state.get("stage_index", 0)],
         "stages": list(STAGES),
         "stage_labels": STAGE_LABELS,
@@ -426,18 +457,20 @@ def ask_round(session, settings, study, room_id, payload):
         question = str(payload.get("question") or "").strip()
         if not question:
             raise ValidationApiError("Type the question you want to put to the room.")
-        if STAGES.index(stage) < STAGES.index("price_reactions") and _MONEY.search(question):
+        reveal = payload.get("reveal")
+        _check_reveal(state, stage, reveal)
+        shown = {r["stimulus"]["kind"] for r in state["rounds"] if r.get("stimulus")}
+        if "price" not in shown and reveal != "price" and _MONEY.search(question):
             raise ValidationApiError(
-                "Don't anchor price first — hold dollar figures until the price-reactions stage.")
-        # The stage map blacks out the concept and the price for early stages, but
-        # _prior_messages replays every earlier round, so a round asked at an early stage
-        # AFTER the concept has run still carries both into the prompt. The round is not
-        # refused — going back is something the funnel allows — but it is recorded as what
-        # it is, so the export cannot present it as pre-exposure data (refuter FG-C).
-        post_exposure = (STAGES.index(stage) < STAGES.index("concept")
-                         and furthest >= STAGES.index("concept"))
+                "Don't anchor price first — ask the unaided price question, then use Reveal price "
+                "before naming a dollar figure.")
+        # Going back to an early stage is allowed, but once anything was shown the room
+        # has seen it, so the round is recorded as what it is and the export cannot
+        # present it as pre-exposure data (refuter FG-C).
+        post_exposure = STAGES.index(stage) < STAGES.index("concept") and bool(shown)
         round_ = {"index": len(state["rounds"]), "stage": stage, "question": question,
                   "post_exposure": post_exposure,
+                  **({"stimulus": {"kind": reveal, "text": STIMULI[reveal]}} if reveal else {}),
                   "answers": [{"persona_id": pid, "text": "", "status": "missing", "error": None}
                               for pid in room.payload_json["persona_ids"]]}
         state["rounds"].append(round_)
@@ -455,7 +488,8 @@ def ask_round(session, settings, study, room_id, payload):
         stance = room_stance(seats, answer["persona_id"])
         manner = room_manner(seats, answer["persona_id"])
         prior = [{"role": "system",
-                  "content": build_room_system_prompt(persona.profile_json, stage_, stance, manner)},
+                  "content": build_room_system_prompt(
+                      persona.profile_json, shared_stimuli(state["rounds"], round_["index"]), stance, manner)},
                  *_prior_messages(history, answer["persona_id"])]
         question_text = round_["question"]
         budget_error = None
@@ -555,6 +589,38 @@ def ask_round(session, settings, study, room_id, payload):
     status = room_status(session, settings, study, room_id)
     status["charged_this_round"] = charged_any
     return status
+
+
+def _check_reveal(state, stage, reveal):
+    """A stimulus is released on purpose, once, in funnel order — and the price only after
+    the room has answered an unaided price question."""
+    if reveal is None:
+        return
+    if reveal not in STIMULI:
+        raise ValidationApiError("Only the concept card or the price can be revealed.")
+    rounds = state["rounds"]
+    shown = {r["stimulus"]["kind"] for r in rounds if r.get("stimulus")}
+    if reveal in shown:
+        raise ValidationApiError(f"The {reveal} has already been shown to this room.")
+    if reveal == "concept" and STAGES.index(stage) < STAGES.index("concept"):
+        raise ValidationApiError("Introduce the concept at the concept stage, not before it.")
+    if reveal == "price":
+        if "concept" not in shown:
+            raise ValidationApiError("Introduce the concept before revealing its price.")
+        if STAGES.index(stage) < STAGES.index("price_reactions"):
+            raise ValidationApiError("Reveal the price at the price-reactions stage.")
+        if not any(r["stage"] == "price_reactions" and any(a["status"] == "answered" for a in r["answers"])
+                   for r in rounds):
+            raise ValidationApiError(
+                "Ask the unaided price question first (what would they expect it to cost?), "
+                "then reveal the price.")
+
+
+def shared_view(rounds):
+    """What participants had been shown, and from which round — the student's answer to
+    'what has the room seen?'."""
+    return [{"kind": r["stimulus"]["kind"], "round": r["index"], "turn_id": turn_id(r["index"]),
+             "stage": r["stage"], "text": r["stimulus"]["text"]} for r in rounds if r.get("stimulus")]
 
 
 def _record_usage(session, study, room_id, persona_id, measured):
@@ -976,6 +1042,10 @@ def build_room_export(status, export_format):
         writer.writerow([REHEARSAL_LABEL])
         writer.writerow(["round", "stage", "speaker", "role", "text", "status", "complete", "turn_id"])
         for round_ in status["rounds"]:
+            if round_.get("stimulus"):
+                writer.writerow([round_["index"] + 1, round_["stage"], "Stimulus", "shown_to_participants",
+                                 _as_csv_text(round_["stimulus"]["text"]), round_["stimulus"]["kind"],
+                                 str(not unfinished), f"R{round_['index'] + 1}-STIMULUS"])
             writer.writerow([round_["index"] + 1, round_["stage"], "Moderator", "moderator",
                              _as_csv_text(round_["question"]), "asked", str(not unfinished),
                              turn_id(round_["index"])])
@@ -1025,12 +1095,21 @@ def build_room_export(status, export_format):
                   + (f" Missing answers (round:persona): {', '.join(incomplete)}." if incomplete else ""), ""]
     lines += [f"- Room: `{room_id}`", f"- Model: `{status['model']}`",
               f"- Participants: {', '.join(status['persona_ids'])}",
-              f"- Stages reached: {', '.join(STAGE_LABELS[s] for s in status['stages_reached']) or 'none'}", ""]
+              f"- Stages reached: {', '.join(STAGE_LABELS[s] for s in status['stages_reached']) or 'none'}"]
+    shared = {item["kind"]: item for item in shared_view(status["rounds"])}
+    for kind, label in (("concept", "Concept introduced"), ("price", "Price revealed")):
+        item = shared.get(kind)
+        lines.append(f"- {label}: " + (f"before round {item['round'] + 1} (`{item['turn_id']}`)" if item
+                                       else "never — participants were not shown it"))
+    lines.append("")
     for round_ in status["rounds"]:
         lines += [f"## {round_['index'] + 1}. {STAGE_LABELS[round_['stage']]}"
-                  + (" — asked after the concept and price were shown" if round_.get("post_exposure") else ""),
-                  "",
-                  f"**Moderator:** {round_['question']} `[{turn_id(round_['index'])}]`", ""]
+                  + (" — asked after participants had been shown the concept" if round_.get("post_exposure") else ""),
+                  ""]
+        if round_.get("stimulus"):
+            lines += [f"**Shown to participants with this question ({round_['stimulus']['kind']}):**", "",
+                      *(f"> {line}" for line in round_["stimulus"]["text"].splitlines()), ""]
+        lines += [f"**Moderator:** {round_['question']} `[{turn_id(round_['index'])}]`", ""]
         for answer in round_["answers"]:
             tid = turn_id(round_["index"], answer["persona_id"])
             lines += ([f"**{answer['persona_id']}:** {answer['text']} `[{tid}]`", ""]

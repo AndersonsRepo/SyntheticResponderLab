@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { ConceptCardPanel } from "@/components/focus-group/concept-card";
 import { ManualMemoForm } from "@/components/focus-group/manual-memo-form";
 import { Button } from "@/components/ui/button";
 import { GlassPanel } from "@/components/ui/glass-panel";
@@ -28,10 +29,12 @@ import {
   missingAnswers,
   quotableTurns,
   REHEARSAL_LABEL,
+  revealRefusal,
   selectableStages,
   type FocusGroupMemo,
   type ManualMemo,
   type QuoteTarget,
+  type RevealKind,
   type FocusGroupRoom,
   type FocusGroupStage,
 } from "@/lib/focus-group";
@@ -49,7 +52,8 @@ import { ThemeProvider } from "@/providers/theme-provider";
 const STAGE_PROMPTS: Record<FocusGroupStage, string> = {
   icebreaker: "Let's go around the room — who lives with you, and what does a weekday look like?",
   space_needs: "Where in your home do you run out of room, and what do you do about it today?",
-  concept: "Here's the idea. What's your first reaction, and what would you use it for?",
+  // The introduction itself comes from the concept card (Lin fix 2); this is the follow-up.
+  concept: "What stood out to you about the idea, and what would you use it for?",
   price_reactions: "What would you expect something like this to cost?",
   close: "Anything we should have asked about and didn't?",
 };
@@ -79,6 +83,7 @@ function FocusGroupPageContent() {
   const [rooms, setRooms] = useState<FocusGroupRoom[]>([]);
   const [stage, setStage] = useState<FocusGroupStage>("icebreaker");
   const [question, setQuestion] = useState(STAGE_PROMPTS.icebreaker);
+  const [pendingReveal, setPendingReveal] = useState<RevealKind | null>(null);
   const [memo, setMemo] = useState<FocusGroupMemo | null>(null);
   const [manualMemo, setManualMemo] = useState<ManualMemo>(() => manualMemoFrom(null));
   const [busy, setBusy] = useState(false);
@@ -177,11 +182,18 @@ function FocusGroupPageContent() {
       interviewOperation<{ room: FocusGroupRoom }>(
         studyId,
         focusGroupPath(room.room_id, "ask"),
-        { revision: room.revision, stage, question: question.trim(), ...extra }
+        {
+          revision: room.revision,
+          stage,
+          question: question.trim(),
+          ...(pendingReveal && !extra.retry ? { reveal: pendingReveal } : {}),
+          ...extra,
+        }
       )
     );
     if (result) {
       setRoom(result.room);
+      if (!extra.retry) setPendingReveal(null);
       setMemo(null);
     }
   }
@@ -394,7 +406,12 @@ function FocusGroupPageContent() {
                 type="button"
                 onClick={() => {
                   setStage(entry);
-                  setQuestion(STAGE_PROMPTS[entry]);
+                  // Arriving at the concept stage before it was shown starts from the card's
+                  // read-aloud introduction, so the question names the idea it asks about.
+                  const introduce =
+                    entry === "concept" && room.concept_card && !revealRefusal(room, entry, "concept");
+                  setQuestion(introduce ? room.concept_card!.introduction : STAGE_PROMPTS[entry]);
+                  setPendingReveal(introduce ? "concept" : null);
                 }}
                 disabled={busy || !canAskStage(room, entry)}
                 aria-current={stage === entry ? "step" : undefined}
@@ -413,6 +430,20 @@ function FocusGroupPageContent() {
             {selectableStages(room).length} stage(s) already opened; every answer already collected
             stays in the transcript.
           </p>
+
+          {room.concept_card ? (
+            <ConceptCardPanel
+              card={room.concept_card}
+              room={room}
+              stage={stage}
+              pendingReveal={pendingReveal}
+              onReveal={(kind, text) => {
+                setPendingReveal(kind);
+                if (kind && text) setQuestion(text);
+              }}
+              busy={busy}
+            />
+          ) : null}
 
           <div className="flex gap-2">
             <input

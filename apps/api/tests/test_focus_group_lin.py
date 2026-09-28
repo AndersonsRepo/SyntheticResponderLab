@@ -158,3 +158,119 @@ def test_rehearsal_label_on_every_export(room):
 def test_serialized_new_mutating_entry_points():
     for name in ("save_manual_memo",):
         assert getattr(getattr(fg, name), "__wrapped__", None) is not None, name
+
+
+# --- Fix 2: the concept is shown, and information is released on purpose ---
+
+PRICE_FIGURES = ("23,000", "23000", "$23")
+
+
+def joined(call):
+    return " ".join(m["content"] for m in call["messages"])
+
+
+def test_concept_card_is_the_stimulus_participants_receive(room):
+    client, study_id, calls, _ = room
+    started = start(client, study_id).json()["data"]["room"]
+    card = started["concept_card"]
+    assert card["name"] and card["description"] and card["specs"] and card["introduction"]
+    assert card["text"] == fg.CONCEPT_STIMULUS
+    walked = walk(client, study_id, started, FUNNEL[:3])
+    for call in calls[-3:]:
+        assert card["text"] in call["messages"][0]["content"]
+    assert walked["shared"][0]["text"] == card["text"]
+
+
+def test_concept_withheld_until_introduced_even_at_the_concept_stage(room):
+    client, study_id, calls, _ = room
+    walked = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:2])
+    asked = ask(client, study_id, walked, stage="concept", question="What would you use a backyard studio for?")
+    assert asked.status_code == 200
+    for call in calls:
+        text = joined(call)
+        assert "Tahoe" not in text and "117" not in text and "PRODUCT CONCEPT" not in text
+        assert "YOUR STANCE GOING IN" not in text
+        assert "Nothing about any product" in call["messages"][0]["content"]
+    introduced = ask(client, study_id, asked.json()["data"]["room"], stage="concept",
+                     question=fg.CONCEPT_CARD["introduction"], reveal="concept")
+    assert introduced.status_code == 200
+    assert all("Tahoe Mini" in c["messages"][0]["content"] for c in calls[-3:])
+
+
+def test_price_never_reaches_model_before_reveal_across_all_five_stages(room):
+    import inspect
+    client, study_id, calls, _ = room
+    # The one place the figure lives in the focus-group code is the withheld stimulus.
+    assert inspect.getsource(fg).count("23,000") == 1 and "23,000" in fg.PRICE_STIMULUS
+    walked = walk(client, study_id, start(client, study_id).json()["data"]["room"])
+    assert walked["status"] == "completed" and len(calls) == 15
+    for call in calls:
+        assert not any(figure in joined(call) for figure in PRICE_FIGURES), joined(call)
+        assert "No price has been shown to you" in call["messages"][0]["content"]
+    assert [s["kind"] for s in walked["shared"]] == ["concept"]
+
+
+def test_reveal_price_order_is_concept_then_unaided_question_then_price(room):
+    client, study_id, calls, _ = room
+    started = start(client, study_id).json()["data"]["room"]
+    early = ask(client, study_id, started, stage="icebreaker", question="Hi?", reveal="concept")
+    assert early.status_code == 400 and "concept stage" in early.json()["error"]["message"]
+    walked = walk(client, study_id, started, FUNNEL[:2])
+    no_concept = ask(client, study_id, walked, stage="concept", question="Q?", reveal="price")
+    assert no_concept.status_code == 400 and "concept before" in no_concept.json()["error"]["message"]
+    walked = walk(client, study_id, walked, FUNNEL[2:3])
+    twice = ask(client, study_id, walked, stage="concept", question="Again?", reveal="concept")
+    assert twice.status_code == 400 and "already been shown" in twice.json()["error"]["message"]
+    unaided_first = ask(client, study_id, walked, stage="price_reactions", question="Cost?", reveal="price")
+    assert unaided_first.status_code == 400 and "unaided" in unaided_first.json()["error"]["message"]
+    bogus = ask(client, study_id, walked, stage="concept", question="Q?", reveal="discount")
+    assert bogus.status_code == 400
+    spent = len(calls)
+    walked = walk(client, study_id, walked, FUNNEL[3:4])
+    revealed = ask(client, study_id, walked, stage="price_reactions",
+                   question="It is about $23,000. How does that compare?", reveal="price")
+    assert revealed.status_code == 200, revealed.text
+    assert len(calls) == spent + 6
+    assert all("PRICE SHOWN BY THE MODERATOR: about $23,000" in c["messages"][0]["content"] for c in calls[-3:])
+    closed = walk(client, study_id, revealed.json()["data"]["room"], FUNNEL[4:])
+    assert all("23,000" in c["messages"][0]["content"] for c in calls[-3:])
+    assert closed["status"] == "completed"
+
+
+def test_moderator_price_refused_before_reveal_at_every_stage(room):
+    client, study_id, calls, _ = room
+    walked = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:4])
+    spent = len(calls)
+    for stage in ("concept", "price_reactions", "close"):
+        refused = ask(client, study_id, walked, stage=stage, question="Would $19,999 be fair?")
+        assert refused.status_code == 400 and "Reveal price" in refused.json()["error"]["message"]
+    assert len(calls) == spent
+
+
+def test_unshared_facts_are_unknown_to_participants(room):
+    prompt = fg.build_room_system_prompt({"persona_id": "P001"}, [])
+    assert "Nothing about any product" in prompt and "No price has been shown to you" in prompt
+    assert "never state a figure as the product's actual price" in prompt
+    concept = [{"kind": "concept", "text": fg.CONCEPT_STIMULUS}]
+    assert "No price has been shown to you" in fg.build_room_system_prompt({"persona_id": "P001"}, concept)
+    priced = fg.build_room_system_prompt(
+        {"persona_id": "P001"}, concept + [{"kind": "price", "text": fg.PRICE_STIMULUS}])
+    assert "No price has been shown to you" not in priced and fg.PRICE_STIMULUS in priced
+
+
+def test_shared_info_in_export_and_room_names_each_stimulus_and_round(room):
+    client, study_id, _, _ = room
+    walked = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:4])
+    walked = ask(client, study_id, walked, stage="price_reactions", question="About $23,000 — reactions?",
+                 reveal="price").json()["data"]["room"]
+    assert [(s["kind"], s["round"], s["turn_id"]) for s in walked["shared"]] == [
+        ("concept", 2, "R3-MOD"), ("price", 4, "R5-MOD")]
+    md = export(client, study_id, walked)["content"]
+    assert "- Concept introduced: before round 3 (`R3-MOD`)" in md
+    assert "- Price revealed: before round 5 (`R5-MOD`)" in md
+    assert "> PRICE SHOWN BY THE MODERATOR: about $23,000" in md
+    assert "> Name: Tahoe Mini by Neo Smart Living" in md
+    csv_text = export(client, study_id, walked, "csv")["content"]
+    assert "Stimulus,shown_to_participants" in csv_text and "R5-STIMULUS" in csv_text
+    unrevealed = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:2])
+    assert "- Price revealed: never" in export(client, study_id, unrevealed)["content"]

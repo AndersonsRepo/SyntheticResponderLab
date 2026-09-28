@@ -106,3 +106,54 @@ test("classroom allowlist: every new student endpoint is reachable and nothing w
     assert.equal(isClassroomInterviewApiRequest(path, method), false, `${method} ${path}`);
   }
 });
+
+// --- Fix 2 ------------------------------------------------------------------
+
+import { revealRefusal, sharedSummary } from "../src/lib/focus-group";
+
+const conceptCardSource = read("src/components/focus-group/concept-card.tsx");
+
+function roundAt(index: number, stage: FocusGroupStage, stimulus?: "concept" | "price") {
+  return {
+    index,
+    stage,
+    question: "q",
+    ...(stimulus ? { stimulus: { kind: stimulus, text: `${stimulus} text` } } : {}),
+    answers: [{ persona_id: "P001", text: "a", status: "answered" as const, error: null }],
+  };
+}
+
+test("concept card: it sits directly above the question field and can be copied as text", () => {
+  const card = pageSource.indexOf("<ConceptCardPanel");
+  const input = pageSource.indexOf("value={question}");
+  assert.ok(card > 0 && card < input, "the card renders before the question input");
+  assert.equal(pageSource.slice(card, input).includes("<ol"), false, "nothing but the card sits between them");
+  assert.match(conceptCardSource, /navigator\.clipboard\?\.writeText\(card\.text\)/);
+  assert.match(conceptCardSource, /Introduction you read aloud \(edit freely\)/);
+  assert.match(conceptCardSource, /card\.specs\.map/);
+  // The page sends the reveal with the question; nothing is revealed on its own.
+  assert.match(pageSource, /reveal: pendingReveal/);
+});
+
+test("concept card: Reveal price waits for the concept and an unaided price answer", () => {
+  assert.match(String(revealRefusal({ rounds: [] }, "icebreaker", "concept")), /concept stage/);
+  assert.equal(revealRefusal({ rounds: [] }, "concept", "concept"), null);
+  const introduced = { rounds: [roundAt(0, "concept", "concept")] };
+  assert.match(String(revealRefusal(introduced, "concept", "concept")), /already been shown/);
+  assert.match(String(revealRefusal(introduced, "price_reactions", "price")), /unaided price question first/);
+  const unaided = { rounds: [...introduced.rounds, roundAt(1, "price_reactions")] };
+  assert.equal(revealRefusal(unaided, "price_reactions", "price"), null);
+  assert.match(String(revealRefusal({ rounds: [roundAt(0, "price_reactions")] }, "price_reactions", "price")), /concept before/);
+  assert.match(conceptCardSource, /disabled=\{busy \|\| priceRefusal !== null\}[\s\S]*?Reveal price/);
+});
+
+test("shared with participants: the panel lists each stimulus with its question, and what is withheld", () => {
+  const none = sharedSummary({ rounds: [roundAt(0, "icebreaker")] });
+  assert.deepEqual(none.shown, []);
+  assert.deepEqual(none.withheld, ["Not shown yet: the concept card", "Not shown yet: the price"]);
+  const some = sharedSummary({ rounds: [roundAt(0, "icebreaker"), roundAt(1, "concept", "concept")] });
+  assert.equal(some.shown[0].line, "Before question 2 (The Tahoe Mini concept): the concept card");
+  assert.equal(some.shown[0].text, "concept text");
+  assert.deepEqual(some.withheld, ["Not shown yet: the price"]);
+  assert.match(conceptCardSource, /Information shared with participants/);
+});

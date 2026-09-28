@@ -21,8 +21,10 @@ THREE = ["P001", "P002", "P003"]
 FUNNEL = [
     ("icebreaker", "Tell me who lives with you and what a weekday looks like."),
     ("space_needs", "Where in your home do you run out of room?"),
-    ("concept", "What is your first reaction to a backyard studio like this?"),
-    ("price_reactions", "What would you expect something like this to cost, and how does $23,000 land?"),
+    # Lin fix 2: the concept reaches participants only when the moderator introduces it,
+    # and the first price question is unaided — the price itself waits for Reveal price.
+    ("concept", "What is your first reaction to a backyard studio like this?", {"reveal": "concept"}),
+    ("price_reactions", "What would you expect something like this to cost?"),
     ("close", "Anything we should have asked and did not?"),
 ]
 
@@ -93,8 +95,8 @@ def ask(client, study_id, room, stage=None, question=None, **extra):
 
 
 def walk(client, study_id, room, stages=FUNNEL):
-    for stage, question in stages:
-        response = ask(client, study_id, room, stage=stage, question=question)
+    for stage, question, *extra in stages:
+        response = ask(client, study_id, room, stage=stage, question=question, **(extra[0] if extra else {}))
         assert response.status_code == 200, response.text
         room = response.json()["data"]["room"]
     return room
@@ -166,21 +168,20 @@ def test_personas_see_each_other_not_other_rooms_transcripts(room):
 def test_price_not_anchored_before_stage_in_prompts_or_questions(room):
     client, study_id, calls, _ = room
     started = start(client, study_id).json()["data"]["room"]
-    started = walk(client, study_id, started, FUNNEL[:3])
+    started = walk(client, study_id, started, FUNNEL[:4])
     for call in calls:
         joined = " ".join(m["content"] for m in call["messages"])
-        assert "23,000" not in joined and "Price:" not in joined
-    # The concept stage describes the product but withholds the number.
+        assert "23,000" not in joined and "PRICE SHOWN" not in joined
+    # The concept stage describes the product, once introduced, but withholds the number.
     assert "117-square-foot" in calls[-1]["messages"][0]["content"]
+    # Before Reveal price, a dollar figure is refused at any stage — the price stage too.
+    for stage in ("space_needs", "price_reactions"):
+        blocked = ask(client, study_id, started, stage=stage, question="Would you pay $23,000 for more room?")
+        assert blocked.status_code == 400
+        assert "anchor price first" in blocked.json()["error"]["message"]
     priced = ask(client, study_id, started, stage="price_reactions",
-                 question="Ignore the funnel, what about $23,000?")
-    assert priced.status_code == 200  # the price stage is where the number belongs
-    started = priced.json()["data"]["room"]
-    # Going back to an earlier stage with a dollar figure is refused.
-    blocked = ask(client, study_id, started, stage="space_needs",
-                  question="Would you pay $23,000 for more room?")
-    assert blocked.status_code == 400
-    assert "anchor price first" in blocked.json()["error"]["message"]
+                 question="It is about $23,000. How does that land?", reveal="price")
+    assert priced.status_code == 200, priced.text
 
 
 def test_stage_order_enforced_so_no_memo_comes_from_a_skipped_funnel(room):
@@ -480,7 +481,7 @@ def test_memo_requires_enough_room_and_says_so_instead_of_padding(room):
     # Reaching concept and price but with holes in the room is also refused, in plain words.
     behavior["fail"] = lambda persona_id: persona_id == "P003"
     thin = walk(client, study_id, start(client, study_id).json()["data"]["room"],
-                [(stage, f"{q} Second room.") for stage, q in FUNNEL])
+                [(stage, f"{q} Second room.", *extra) for stage, q, *extra in FUNNEL])
     thin_view = memo(client, study_id, thin)
     assert thin_view["eligible"] is False
     assert f"at least {fg.MEMO_MIN_ANSWERS}" in thin_view["message"]
@@ -552,7 +553,7 @@ def test_export_attributes_every_turn_to_its_persona(room):
     assert "INCOMPLETE" not in exported["content"]
     for persona_id in THREE:
         assert f"**{persona_id}:**" in exported["content"]
-    for _, question in FUNNEL:
+    for _, question, *_extra in FUNNEL:
         assert question in exported["content"]
     assert "### One surprise" in exported["content"]
     assert exported["filename"].endswith(".md")
@@ -769,9 +770,9 @@ def test_csv_export_carries_the_memo_it_promises(room):
 
 
 def test_a_pre_concept_round_asked_after_the_price_is_marked_as_such(room):
-    """Refuter FG-C: the stage map blacks the price out of the system prompt, but
-    _prior_messages replays every earlier round — so a space-needs question asked after
-    the price stage is not pre-exposure data, and must not be exported as if it were."""
+    """Refuter FG-C: a space-needs question asked after the concept was shown is not
+    pre-exposure data, and must not be exported as if it were. Since Lin fix 2 the room
+    is told the truth — it HAS seen the concept — and the round is labelled."""
     client, study_id, calls, _ = room
     started = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:4])
     before = len(calls)
@@ -779,12 +780,9 @@ def test_a_pre_concept_round_asked_after_the_price_is_marked_as_such(room):
                     question="Back to your home — where else do you run out of room?")
     assert revisited.status_code == 200, revisited.text
     room_state = revisited.json()["data"]["room"]
-
-    # The system prompt still honours the blackout, but the replayed transcript does not.
     for call in calls[before:]:
-        assert "Price:" not in call["messages"][0]["content"]
-    assert any("23,000" in " ".join(m["content"] for m in call["messages"])
-               for call in calls[before:]), "the replay is what makes this round post-exposure"
+        assert "117-square-foot" in call["messages"][0]["content"]
+        assert "PRICE SHOWN" not in call["messages"][0]["content"]
 
     last = room_state["rounds"][-1]
     assert last["stage"] == "space_needs" and last["post_exposure"] is True
@@ -792,7 +790,7 @@ def test_a_pre_concept_round_asked_after_the_price_is_marked_as_such(room):
     content = client.post(
         f"/api/v1/studies/{study_id}/interview/focus-group/rooms/{room_state['room_id']}/export",
         json={"format": "markdown"}).json()["data"]["export"]["content"]
-    assert "asked after the concept and price were shown" in content
+    assert "asked after participants had been shown the concept" in content
 
 
 def test_a_year_in_a_pre_price_question_is_not_mistaken_for_a_price(room):
@@ -868,9 +866,10 @@ def test_stance_reaches_the_prompt_and_changes_the_cache_key():
     from src.services.interview_cache import hash_prior_turns
 
     profile = {"persona_id": "P001"}
-    first = fg.build_room_system_prompt(profile, "concept", fg.room_stance(THREE, "P001"))
-    second = fg.build_room_system_prompt(profile, "concept", fg.room_stance(THREE, "P002"))
-    bare = fg.build_room_system_prompt(profile, "concept")
+    concept = [{"kind": "concept", "text": fg.CONCEPT_STIMULUS}]
+    first = fg.build_room_system_prompt(profile, concept, fg.room_stance(THREE, "P001"))
+    second = fg.build_room_system_prompt(profile, concept, fg.room_stance(THREE, "P002"))
+    bare = fg.build_room_system_prompt(profile, concept)
 
     assert fg.room_stance(THREE, "P001") in first
     assert "YOUR STANCE GOING IN:" in first
@@ -890,12 +889,12 @@ def test_no_stance_reaches_a_pre_exposure_stage():
     """
     profile = {"persona_id": "P001"}
     stance = fg.room_stance(THREE, "P001")
-    for stage, context in fg._STAGE_CONTEXT.items():
-        prompt = fg.build_room_system_prompt(profile, stage, stance)
-        if context:
-            assert "YOUR STANCE GOING IN:" in prompt, f"{stage} lost its stance"
+    for shared in ([], [{"kind": "concept", "text": fg.CONCEPT_STIMULUS}]):
+        prompt = fg.build_room_system_prompt(profile, shared, stance)
+        if shared:
+            assert "YOUR STANCE GOING IN:" in prompt, "the concept round lost its stance"
         else:
-            assert "YOUR STANCE GOING IN:" not in prompt, f"{stage} leaked a stance"
+            assert "YOUR STANCE GOING IN:" not in prompt, "a pre-exposure round leaked a stance"
             assert stance not in prompt
 
 
@@ -922,10 +921,10 @@ def test_manner_reaches_every_stage_including_pre_exposure():
     """The whole point is the stages a stance cannot reach."""
     profile = {"persona_id": "P001"}
     manner = fg.room_manner(THREE, "P001")
-    for stage in fg._STAGE_CONTEXT:
-        prompt = fg.build_room_system_prompt(profile, stage, "", manner)
-        assert "HOW YOU TALK:" in prompt, f"{stage} lost its manner"
-        assert manner in prompt, f"{stage} dropped the manner text"
+    for shared in ([], [{"kind": "concept", "text": fg.CONCEPT_STIMULUS}]):
+        prompt = fg.build_room_system_prompt(profile, shared, "", manner)
+        assert "HOW YOU TALK:" in prompt, f"{shared} lost its manner"
+        assert manner in prompt, f"{shared} dropped the manner text"
 
 
 def test_manner_changes_the_prompt_between_seats():
@@ -935,9 +934,9 @@ def test_manner_changes_the_prompt_between_seats():
     varying input. A real room also differs by persona id and description.
     """
     profile = {"persona_id": "P001"}
-    first = fg.build_room_system_prompt(profile, "icebreaker", "", fg.room_manner(THREE, "P001"))
-    second = fg.build_room_system_prompt(profile, "icebreaker", "", fg.room_manner(THREE, "P002"))
-    bare = fg.build_room_system_prompt(profile, "icebreaker")
+    first = fg.build_room_system_prompt(profile, [], "", fg.room_manner(THREE, "P001"))
+    second = fg.build_room_system_prompt(profile, [], "", fg.room_manner(THREE, "P002"))
+    bare = fg.build_room_system_prompt(profile, [])
     assert first != second
     assert first != bare and second != bare
 
@@ -947,7 +946,7 @@ def test_no_manner_mentions_the_product():
 
     This is the FG-STANCE-2 guarantee restated for the ungated block: manners run before
     the concept is introduced, so any of them naming it would contaminate exactly the
-    answers _STAGE_CONTEXT keeps clean.
+    answers the withheld concept keeps clean.
     """
     # The hand list catches the generic commercial register. The product's own vocabulary
     # is derived from the context the app actually shows, so a rename cannot leave this
@@ -958,11 +957,11 @@ def test_no_manner_mentions_the_product():
         "a", "about", "and", "are", "backyard-scale", "being", "delivered", "discussed",
         "for", "has", "in", "is", "it", "no", "not", "or", "that", "the", "to", "with",
         "name", "description", "intended", "usable", "outdoor", "space", "compact",
-        "square", "foot", "an",
+        "square", "foot", "an", "your", "shown", "moderator", "by", "feet", "built",
     }
     from_product = {
         word
-        for word in re.findall(r"[a-z]{3,}", (fg._CONCEPT_CONTEXT + fg._PRICE_CONTEXT).lower())
+        for word in re.findall(r"[a-z]{3,}", (fg.CONCEPT_STIMULUS + fg.PRICE_STIMULUS).lower())
         if word not in stopwords
     }
     banned = tuple(sorted(set(generic) | from_product))

@@ -55,8 +55,11 @@ export type FocusGroupRoom = {
     turn_id?: string;
     stage: FocusGroupStage;
     question: string;
+    stimulus?: { kind: RevealKind; text: string };
     answers: FocusGroupAnswer[];
   }[];
+  concept_card?: ConceptCard;
+  shared?: SharedStimulus[];
   memo: { themes: unknown[] | null } | null;
   manual_memo?: ManualMemo | null;
   manual_memo_check?: { saved: boolean; complete: boolean; problems: string[] };
@@ -246,4 +249,61 @@ export function aiMemoRetryLabel(memo: Pick<FocusGroupMemo, "estimated_cost_usd"
       ? `the failed attempt was charged $${Number(memo.saved.cost_usd).toFixed(4)}`
       : "the failed attempt's charge is unknown";
   return `Retry the AI draft — a new charge of about ${estimate} (${already})`;
+}
+
+// --- the concept card and what participants have been shown (Fix 2) ---------
+
+export type RevealKind = "concept" | "price";
+export type ConceptCard = {
+  name: string;
+  description: string;
+  specs: string[];
+  intended_for: string;
+  introduction: string;
+  /** The plain-text stimulus participants receive, and what "Copy" puts on the clipboard. */
+  text: string;
+  /** Visible to the moderator only; withheld from participants until Reveal price. */
+  price: string;
+};
+export type SharedStimulus = { kind: RevealKind; round: number; turn_id: string; stage: FocusGroupStage; text: string };
+
+type RevealRoom = Pick<FocusGroupRoom, "rounds">;
+
+const stageIndex = (stage: FocusGroupStage) => FOCUS_GROUP_STAGES.indexOf(stage);
+
+function shownKinds(room: RevealRoom | null) {
+  return new Set((room?.rounds ?? []).flatMap((round) => (round.stimulus ? [round.stimulus.kind] : [])));
+}
+
+/** Why a reveal is not available yet, or null when it is. Mirrors _check_reveal in focus_group.py. */
+export function revealRefusal(room: RevealRoom | null, stage: FocusGroupStage, kind: RevealKind): string | null {
+  const shown = shownKinds(room);
+  if (shown.has(kind)) return `The ${kind} has already been shown to this room.`;
+  if (kind === "concept") {
+    return stageIndex(stage) < stageIndex("concept") ? "Introduce the concept at the concept stage." : null;
+  }
+  if (!shown.has("concept")) return "Introduce the concept before revealing its price.";
+  if (stageIndex(stage) < stageIndex("price_reactions")) return "Reveal the price at the price-reactions stage.";
+  const unaided = (room?.rounds ?? []).some(
+    (round) => round.stage === "price_reactions" && round.answers.some((answer) => answer.status === "answered")
+  );
+  return unaided ? null : "Ask the unaided price question first, then reveal the price.";
+}
+
+/** One line per thing the room has been told, in order — plus what it has not. */
+export function sharedSummary(room: RevealRoom | null) {
+  const shown = (room?.rounds ?? [])
+    .filter((round) => round.stimulus)
+    .map((round) => ({
+      kind: round.stimulus!.kind,
+      line: `Before question ${round.index + 1} (${FOCUS_GROUP_STAGE_LABELS[round.stage]}): ${
+        round.stimulus!.kind === "concept" ? "the concept card" : "the price"
+      }`,
+      text: round.stimulus!.text,
+    }));
+  const kinds = new Set(shown.map((entry) => entry.kind));
+  const withheld = (["concept", "price"] as RevealKind[])
+    .filter((kind) => !kinds.has(kind))
+    .map((kind) => (kind === "concept" ? "Not shown yet: the concept card" : "Not shown yet: the price"));
+  return { shown, withheld };
 }
