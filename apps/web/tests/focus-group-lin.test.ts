@@ -92,6 +92,9 @@ const ROOMS = "/api/backend/api/v1/studies/std_1/interview/focus-group/rooms";
 const NEW_STUDENT_ENDPOINTS: [string, string][] = [
   ["POST", `${ROOMS}/fg_1/manual-memo`],
   ["POST", `${ROOMS}/fg_1/extend`],
+  ["GET", "/api/backend/api/v1/studies/std_1/interview/focus-group/personas"],
+  ["POST", "/api/backend/api/v1/studies/std_1/interview/focus-group/personas"],
+  ["POST", "/api/backend/api/v1/studies/std_1/interview/focus-group/personas/fgp_abc"],
 ];
 const STILL_REFUSED: [string, string][] = [
   ["GET", `${ROOMS}/fg_1/manual-memo`],
@@ -101,6 +104,11 @@ const STILL_REFUSED: [string, string][] = [
   ["POST", `${ROOMS}/fg_1/manual`],
   ["GET", `${ROOMS}/fg_1/extend`],
   ["POST", `${ROOMS}/fg_1/extend/more`],
+  ["DELETE", "/api/backend/api/v1/studies/std_1/interview/focus-group/personas/fgp_abc"],
+  ["GET", "/api/backend/api/v1/studies/std_1/interview/focus-group/personas/fgp_abc"],
+  ["POST", "/api/backend/api/v1/studies/std_1/interview/focus-group/personas/fgp_abc/rooms"],
+  ["POST", "/api/backend/api/v1/studies/std_1/interview/focus-group/personas/..%2F..%2Fsimulation-runs"],
+  ["POST", "/api/backend/api/v1/studies/std_1/interview/focus-group/personas-all"],
 ];
 
 test("classroom allowlist: every new student endpoint is reachable and nothing wider opened", () => {
@@ -255,4 +263,42 @@ test("recipient selector: Ask follow-up and Next stage are separate, stage butto
   assert.match(pageSource, /\{allowanceLine\(room\.allowance\)\}/);
   assert.match(pageSource, /aria-label="Confirm extension cost"[\s\S]*?Confirm and extend/);
   assert.match(pageSource, /extra_rounds: extendBy,\s*authorize_charge: true/);
+});
+
+// --- Fix 3 ------------------------------------------------------------------
+
+import { emptyPersonaFields, fieldsFromRosterCard, personaFormRefusal } from "../src/lib/focus-group";
+
+const personaFormSource = read("src/components/focus-group/persona-form.tsx");
+
+test("create persona: Create and Duplicate and edit sit beside the roster, preview comes before save", () => {
+  assert.match(pageSource, /Duplicate and edit/);
+  assert.match(pageSource, /Create persona/);
+  assert.match(pageSource, /preview: true/);
+  assert.match(personaFormSource, /disabled=\{busy \|\| refusal !== null \|\| !preview\}/, "Save waits for a preview");
+  assert.match(pageSource, /setPersonaPreview\(null\); \/\/ a preview must show what will actually be saved/);
+  assert.match(personaFormSource, /Student-created fictional persona/);
+  assert.match(personaFormSource, /never counts as\s+recruiting a real PA3\.5 participant/);
+  for (const label of ["Household and living situation", "Tenure", "Usable outdoor space",
+    "How they use their space today", "Willing to consider additional living or work space",
+    "Relevant constraints", "Conversation style", "relate to your research question"]) {
+    assert.ok(personaFormSource.includes(label), label);
+  }
+  assert.doesNotMatch(personaFormSource, /opinion|desired finding/i, "no predetermined opinion or findings field");
+});
+
+test("create persona: duplicating copies what the roster card says and nothing it does not", () => {
+  const copy = fieldsFromRosterCard({
+    ...CARD,
+    attributes: [
+      ...CARD.attributes,
+      { key: "household", label: "Household", value: "Married couple household, 4 people", source: "census" },
+    ],
+  });
+  assert.equal(copy.tenure, "owner");
+  assert.equal(copy.outdoor_space, "unknown", "an unknown stays unknown");
+  assert.match(copy.household, /Married couple household/);
+  assert.equal(copy.research_link, "");
+  assert.match(String(personaFormRefusal(emptyPersonaFields())), /household/);
+  assert.match(String(personaFormRefusal({ ...emptyPersonaFields(), household: "x" })), /research question/);
 });

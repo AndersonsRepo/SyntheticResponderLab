@@ -156,8 +156,10 @@ def test_rehearsal_label_on_every_export(room):
 
 
 def test_serialized_new_mutating_entry_points():
-    for name in ("save_manual_memo", "extend_room"):
-        assert getattr(getattr(fg, name), "__wrapped__", None) is not None, name
+    from src.services import focus_group_personas as fgp
+    for module, name in ((fg, "save_manual_memo"), (fg, "extend_room"),
+                         (fgp, "create_persona"), (fgp, "update_persona")):
+        assert getattr(getattr(module, name), "__wrapped__", None) is not None, name
 
 
 # --- Fix 2: the concept is shown, and information is released on purpose ---
@@ -479,3 +481,143 @@ def test_extension_needs_authorization_and_fits_the_budget(room):
     assert over.status_code == 429 and "budget" in over.json()["error"]["message"].lower()
     assert calls and all(c["model"] for c in calls)  # the extension itself never calls a model
     assert len(calls) == 3
+
+
+# --- Fix 3: student-created practice personas -----------------------------------
+
+FIELDS = {"name": "Dana", "household": "Two adults and a toddler in a three-bedroom house",
+          "tenure": "owner", "outdoor_space": "yes", "outdoor_note": "a flat side yard",
+          "current_space_use": "the dining table doubles as an office", "willing_more_space": "maybe",
+          "constraints": "tight budget after daycare", "style": "brief",
+          "research_link": "Tests whether young families see a backyard office as childcare relief."}
+
+
+def personas_url(study_id):
+    return f"/api/v1/studies/{study_id}/interview/focus-group/personas"
+
+
+def create(client, study_id, fields=FIELDS, **extra):
+    from uuid import uuid4
+    return client.post(personas_url(study_id), json={"request_id": str(uuid4()), "fields": fields, **extra})
+
+
+def seat(client, study_id, persona_ids):
+    return start(client, study_id, persona_ids=persona_ids)
+
+
+def test_custom_persona_lifecycle_preview_save_edit_recruit(room):
+    client, study_id, calls, _ = room
+    preview = client.post(personas_url(study_id), json={"fields": FIELDS, "preview": True}).json()["data"]["persona"]
+    assert preview["preview"] is True and preview["card"]["origin"] == "student_created"
+    assert "flat side yard" in preview["description"]
+    assert client.get(personas_url(study_id)).json()["data"]["personas"] == [], "preview stores nothing"
+    made = create(client, study_id).json()["data"]["persona"]
+    assert (made["persona_id"], made["version"]) == ("S01", 1)
+    edited = client.post(f"{personas_url(study_id)}/{made['id']}",
+                         json={"version": 1, "fields": {**FIELDS, "constraints": "HOA rules"}}).json()["data"]["persona"]
+    assert edited["version"] == 2 and edited["card"]["version"] == 2
+    stale = client.post(f"{personas_url(study_id)}/{made['id']}", json={"version": 1, "fields": FIELDS})
+    assert stale.status_code == 409
+    started = seat(client, study_id, ["P001", "P002", "S01"])
+    assert started.status_code == 200, started.text
+    room_state = started.json()["data"]["room"]
+    ask(client, study_id, room_state, stage="icebreaker", question=FUNNEL[0][1])
+    s01 = [c for c in calls if "participant S01" in c["messages"][0]["content"]]
+    assert len(s01) == 1 and "HOA rules" in s01[0]["messages"][0]["content"]
+    assert fg._MANNERS[0] in s01[0]["messages"][0]["content"], "brief style is the manner"
+
+
+def test_duplicate_and_edit_starts_from_a_roster_persona_and_is_fictional(room):
+    client, study_id, _, _ = room
+    copy = create(client, study_id, based_on="P004").json()["data"]["persona"]
+    assert copy["based_on"] == "P004"
+    assert "copy of P004" in copy["card"]["origin_label"]
+    assert {a["source"] for a in copy["card"]["attributes"]} <= {"fictional", "unknown"}
+    assert create(client, study_id, based_on="P999").status_code == 400
+
+
+def test_frozen_version_used_once_discussion_starts(room):
+    client, study_id, calls, _ = room
+    made = create(client, study_id).json()["data"]["persona"]
+    room_state = seat(client, study_id, ["P001", "P002", "S01"]).json()["data"]["room"]
+    client.post(f"{personas_url(study_id)}/{made['id']}",
+                json={"version": 1, "fields": {**FIELDS, "household": "A retired couple"}})
+    walked = walk(client, study_id, room_state, FUNNEL[:2])
+    prompts = [c["messages"][0]["content"] for c in calls if "participant S01" in c["messages"][0]["content"]]
+    assert len(prompts) == 2 and all("toddler" in p and "retired" not in p for p in prompts)
+    assert {p["persona_id"]: p["card"].get("version") for p in walked["participants"]}["S01"] == 1
+    fresh = seat(client, study_id, ["P001", "P002", "S01"]).json()["data"]["room"]
+    assert {p["persona_id"]: p["card"].get("version") for p in fresh["participants"]}["S01"] == 2
+
+
+def test_custom_export_names_origin_and_version_and_no_real_participant(room):
+    client, study_id, _, _ = room
+    create(client, study_id, based_on="P004")
+    room_state = seat(client, study_id, ["P001", "P002", "S01"]).json()["data"]["room"]
+    card = {p["persona_id"]: p["card"] for p in room_state["participants"]}["S01"]
+    assert card["origin_label"].startswith("Student-created fictional persona")
+    md = export(client, study_id, room_state)["content"]
+    assert "S01: Student-created fictional persona, version 1, started from a copy of P004. " \
+           "Not a real PA3.5 participant." in md
+    assert "P001: roster persona grounded in one ACS household record" in md
+    assert "Real PA3.5 participants in this room: 0" in md
+    csv_text = export(client, study_id, room_state, "csv")["content"]
+    assert "participant,S01,student_created_fictional,1,P004,False" in csv_text
+
+
+def test_research_link_required_never_an_opinion_and_never_sent_to_the_model(room):
+    client, study_id, calls, _ = room
+    missing = create(client, study_id, fields={**FIELDS, "research_link": ""})
+    assert missing.status_code == 400 and "research question" in missing.json()["error"]["message"]
+    made = create(client, study_id, fields={**FIELDS, "product_opinion": "loves it",
+                                            "desired_findings": "they buy"}).json()["data"]["persona"]
+    assert "product_opinion" not in made["fields"] and "desired_findings" not in made["fields"]
+    walk(client, study_id, seat(client, study_id, ["P001", "P002", "S01"]).json()["data"]["room"], FUNNEL[:1])
+    assert calls and all(FIELDS["research_link"] not in joined(c) for c in calls)
+    assert all("loves it" not in joined(c) for c in calls)
+
+
+def test_custom_persona_isolated_to_its_own_study(room):
+    client, study_id, _, _ = room
+    made = create(client, study_id).json()["data"]["persona"]
+    other = client.post("/api/v1/studies", json={}).json()["data"]["study"]["study_id"]
+    assert client.get(personas_url(other)).json()["data"]["personas"] == []
+    hijack = client.post(f"{personas_url(other)}/{made['id']}", json={"version": 1, "fields": FIELDS})
+    assert hijack.status_code == 404
+    assert seat(client, other, ["P001", "P002", "S01"]).status_code == 400
+
+
+def test_custom_persona_bounds_refused_and_nothing_stored(room):
+    from src.services import focus_group_personas as fgp
+    client, study_id, _, _ = room
+    for bad in ("text", {**FIELDS, "household": "x" * 301}, {**FIELDS, "tenure": "castle"},
+                {**FIELDS, "household": ""}, {**FIELDS, "name": 7}, {**FIELDS, "style": "shouty"}):
+        response = create(client, study_id, fields=bad)
+        assert response.status_code == 400, bad
+    assert client.get(personas_url(study_id)).json()["data"]["personas"] == []
+    for _ in range(fgp.MAX_PER_STUDY):
+        assert create(client, study_id).status_code == 200
+    over = create(client, study_id)
+    assert over.status_code == 400 and "at most" in over.json()["error"]["message"]
+
+
+def test_student_data_stays_in_the_focus_group_rows(room, db_session, caplog):
+    import logging
+    from sqlalchemy import select
+    from src.persistence.models import InterviewCacheEntry, InterviewTurn, Job
+    client, study_id, _, behavior = room
+    marker = "zebra-marker-4711"
+    caplog.set_level(logging.DEBUG)
+    create(client, study_id, fields={**FIELDS, "constraints": f"{marker} constraint",
+                                     "research_link": f"{marker} link"})
+    room_state = seat(client, study_id, ["P001", "P002", "S01"]).json()["data"]["room"]
+    behavior["fail"] = lambda pid: pid == "P002"  # the failure path logs too
+    room_state = ask(client, study_id, room_state, stage="icebreaker", question=FUNNEL[0][1]).json()["data"]["room"]
+    save(client, study_id, room_state, {"moderation_improvement": f"{marker} memo"})
+    for entry in db_session.scalars(select(InterviewCacheEntry)).all():
+        assert marker not in entry.question and marker not in entry.answer_text
+    assert all(marker not in (t.text or "") for t in db_session.scalars(select(InterviewTurn)).all())
+    assert marker not in caplog.text
+    rows = [j for j in db_session.scalars(select(Job)).all()
+            if marker in str(j.payload_json) + str(j.result_json)]
+    assert rows and {j.job_type for j in rows} <= {"focus_group_room", "focus_group_persona"}

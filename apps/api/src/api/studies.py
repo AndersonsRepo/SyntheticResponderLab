@@ -844,6 +844,30 @@ def next_human_interview_question(study_id: str, request: Request, payload: dict
 
 # --- Focus group: its own lane, never mixed into the interview batch endpoints ---
 
+@router.get("/api/v1/studies/{study_id}/interview/focus-group/personas")
+def list_focus_group_personas(study_id: str, request: Request,
+    db: Session = Depends(get_db_session), current_user: AuthUser = Depends(get_current_user)):
+    from src.services.focus_group_personas import list_personas
+    study = get_owned_study_or_404(db, study_id, current_user)
+    return response_envelope(request, {"personas": list_personas(db, study)})
+
+
+@router.post("/api/v1/studies/{study_id}/interview/focus-group/personas")
+def create_focus_group_persona(study_id: str, request: Request, payload: dict = Body(...),
+    db: Session = Depends(get_db_session), current_user: AuthUser = Depends(get_current_user)):
+    from src.services.focus_group_personas import create_persona
+    study = get_owned_study_or_404(db, study_id, current_user)
+    return response_envelope(request, {"persona": create_persona(db, study, payload)})
+
+
+@router.post("/api/v1/studies/{study_id}/interview/focus-group/personas/{persona_id}")
+def update_focus_group_persona(study_id: str, persona_id: str, request: Request, payload: dict = Body(...),
+    db: Session = Depends(get_db_session), current_user: AuthUser = Depends(get_current_user)):
+    from src.services.focus_group_personas import update_persona
+    study = get_owned_study_or_404(db, study_id, current_user)
+    return response_envelope(request, {"persona": update_persona(db, study, persona_id, payload)})
+
+
 @router.post("/api/v1/studies/{study_id}/interview/focus-group/rooms")
 def create_focus_group_room(study_id: str, request: Request, payload: dict = Body(...),
     db: Session = Depends(get_db_session), settings: AppSettings = Depends(get_settings),

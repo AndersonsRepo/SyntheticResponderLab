@@ -33,6 +33,9 @@ const CLASSROOM_INTERVIEW_API_RULES = [
   { method: "GET", pattern: /^\/api\/backend\/api\/v1\/studies\/[A-Za-z0-9_-]+\/interview\/focus-group\/rooms(?:\/[A-Za-z0-9_-]+(?:\/memo)?)?\/?$/ },
   { method: "POST", pattern: /^\/api\/backend\/api\/v1\/studies\/[A-Za-z0-9_-]+\/interview\/focus-group\/rooms\/[A-Za-z0-9_-]+\/(?:ask|cancel|memo|manual-memo|extend|export)\/?$/ },
   { method: "DELETE", pattern: /^\/api\/backend\/api\/v1\/studies\/[A-Za-z0-9_-]+\/interview\/focus-group\/rooms\/[A-Za-z0-9_-]+\/?$/ },
+  // Student-created practice personas: list, create, edit. No delete, no other suffix.
+  { method: "GET", pattern: /^\/api\/backend\/api\/v1\/studies\/[A-Za-z0-9_-]+\/interview\/focus-group\/personas\/?$/ },
+  { method: "POST", pattern: /^\/api\/backend\/api\/v1\/studies\/[A-Za-z0-9_-]+\/interview\/focus-group\/personas(?:\/[A-Za-z0-9_-]+)?\/?$/ },
 ] as const;
 
 export function isClassroomNoLoginEnabled(value = process.env.CLASSROOM_NO_LOGIN) {

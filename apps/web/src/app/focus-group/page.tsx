@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ConceptCardPanel } from "@/components/focus-group/concept-card";
 import { PersonaCardView } from "@/components/focus-group/persona-card";
+import { PersonaForm } from "@/components/focus-group/persona-form";
 import { ManualMemoForm } from "@/components/focus-group/manual-memo-form";
 import { Button } from "@/components/ui/button";
 import { GlassPanel } from "@/components/ui/glass-panel";
@@ -20,6 +21,8 @@ import {
   askRefusal,
   CORE_QUESTIONS,
   DEFAULT_PROBES,
+  emptyPersonaFields,
+  fieldsFromRosterCard,
   nextStage,
   questionKind,
   unansweredNote,
@@ -43,6 +46,9 @@ import {
   type ManualMemo,
   type QuoteTarget,
   type RevealKind,
+  type PersonaCard,
+  type PersonaFields,
+  type StudentPersona,
   type FocusGroupRoom,
   type FocusGroupStage,
 } from "@/lib/focus-group";
@@ -93,6 +99,14 @@ function FocusGroupPageContent() {
     selected: [],
   });
   const [extendBy, setExtendBy] = useState(2);
+  const [studentPersonas, setStudentPersonas] = useState<StudentPersona[]>([]);
+  const [personaDraft, setPersonaDraft] = useState<{
+    fields: PersonaFields;
+    editing: StudentPersona | null;
+    basedOn: string | null;
+  } | null>(null);
+  const [personaPreview, setPersonaPreview] = useState<{ card: PersonaCard; description: string } | null>(null);
+  const personaRequest = useRef<string>("");
   const [confirmExtend, setConfirmExtend] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [room, setRoom] = useState<FocusGroupRoom | null>(null);
@@ -145,6 +159,57 @@ function FocusGroupPageContent() {
       .then((result) => setRooms(result.rooms))
       .catch(() => undefined);
   }, [studyId, room?.revision, room?.status]);
+
+  useEffect(() => {
+    if (!studyId) return;
+    interviewOperation<{ personas: StudentPersona[] }>(studyId, "focus-group/personas")
+      .then((result) => setStudentPersonas(result.personas))
+      .catch(() => undefined);
+  }, [studyId]);
+
+  function openPersonaForm(draft: NonNullable<typeof personaDraft>) {
+    personaRequest.current = "";
+    setPersonaPreview(null);
+    setPersonaDraft(draft);
+  }
+
+  async function previewPersona() {
+    if (!studyId || !personaDraft) return;
+    const result = await run(() =>
+      interviewOperation<{ persona: { card: PersonaCard; description: string } }>(studyId, "focus-group/personas", {
+        fields: personaDraft.fields,
+        based_on: personaDraft.basedOn,
+        preview: true,
+      })
+    );
+    if (result) setPersonaPreview(result.persona);
+  }
+
+  async function savePersona() {
+    if (!studyId || !personaDraft) return;
+    const { editing } = personaDraft;
+    // One request id per form, so a double-clicked Save creates one persona.
+    personaRequest.current = personaRequest.current || crypto.randomUUID();
+    const result = await run(() =>
+      editing
+        ? interviewOperation<{ persona: StudentPersona }>(studyId, `focus-group/personas/${encodeURIComponent(editing.id)}`, {
+            version: editing.version,
+            fields: personaDraft.fields,
+          })
+        : interviewOperation<{ persona: StudentPersona }>(studyId, "focus-group/personas", {
+            request_id: personaRequest.current,
+            fields: personaDraft.fields,
+            based_on: personaDraft.basedOn,
+          })
+    );
+    if (!result) return;
+    setStudentPersonas((current) => [
+      ...current.filter((entry) => entry.id !== result.persona.id),
+      result.persona,
+    ]);
+    setPersonaDraft(null);
+    setPersonaPreview(null);
+  }
 
   function togglePersona(personaId: string) {
     setSelectedPersonaIds((current) =>
@@ -356,10 +421,88 @@ function FocusGroupPageContent() {
                   card={persona.card}
                   personaId={persona.persona_id}
                   selected={selectedPersonaIds.includes(persona.persona_id)}
-                />
+                >
+                  {persona.card ? (
+                    <Button
+                      variant="secondary"
+                      onClick={() =>
+                        openPersonaForm({
+                          fields: fieldsFromRosterCard(persona.card!),
+                          editing: null,
+                          basedOn: persona.persona_id,
+                        })
+                      }
+                      disabled={busy}
+                    >
+                      Duplicate and edit
+                    </Button>
+                  ) : null}
+                </PersonaCardView>
               </li>
             ))}
           </ul>
+
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-3">
+              <h3 className="text-lg font-semibold">Your practice personas</h3>
+              <Button
+                variant="secondary"
+                onClick={() => openPersonaForm({ fields: emptyPersonaFields(), editing: null, basedOn: null })}
+                disabled={busy}
+              >
+                Create persona
+              </Button>
+            </div>
+            <p className="text-xs text-app-muted">
+              Student-created fictional personas, kept apart from the source-grounded roster above.
+            </p>
+            {personaDraft ? (
+              <PersonaForm
+                fields={personaDraft.fields}
+                onChange={(fields) => {
+                  setPersonaDraft({ ...personaDraft, fields });
+                  setPersonaPreview(null); // a preview must show what will actually be saved
+                }}
+                onPreview={previewPersona}
+                onSave={savePersona}
+                onCancel={() => setPersonaDraft(null)}
+                preview={personaPreview}
+                editing={personaDraft.editing !== null}
+                basedOn={personaDraft.basedOn}
+                busy={busy}
+              />
+            ) : null}
+            <ul className="grid gap-2 md:grid-cols-2" aria-label="Your practice personas">
+              {studentPersonas.map((persona) => (
+                <li key={persona.id} className="flex flex-col gap-1">
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={selectedPersonaIds.includes(persona.persona_id)}
+                      onChange={() => togglePersona(persona.persona_id)}
+                      disabled={busy}
+                    />
+                    Recruit {persona.persona_id} (Student-created fictional persona)
+                  </label>
+                  <PersonaCardView
+                    card={persona.card}
+                    personaId={persona.persona_id}
+                    selected={selectedPersonaIds.includes(persona.persona_id)}
+                  >
+                    <Button
+                      variant="secondary"
+                      onClick={() =>
+                        openPersonaForm({ fields: persona.fields, editing: persona, basedOn: persona.based_on })
+                      }
+                      disabled={busy}
+                    >
+                      Edit
+                    </Button>
+                  </PersonaCardView>
+                </li>
+              ))}
+            </ul>
+          </div>
 
           <label className="flex items-center gap-3 text-sm">
             Follow-up probes, on top of {CORE_QUESTIONS} core questions (one per stage)

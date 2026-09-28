@@ -407,3 +407,64 @@ export function unansweredNote(answer: Pick<FocusGroupAnswer, "status" | "error"
   if (answer.error?.code === "out_of_character") return "reply withheld (it stepped out of character) — retry below";
   return answer.error ? "no answer — retry below" : "not run yet";
 }
+
+// --- student-created practice personas (Fix 3) ------------------------------------
+
+export type PersonaFields = {
+  name: string;
+  household: string;
+  tenure: "owner" | "landowner" | "renter" | "lives_with_family" | "unknown";
+  outdoor_space: "yes" | "no" | "unknown";
+  outdoor_note: string;
+  current_space_use: string;
+  willing_more_space: "yes" | "maybe" | "no" | "unknown";
+  constraints: string;
+  style: "" | "brief" | "talkative";
+  research_link: string;
+};
+export type StudentPersona = {
+  id: string;
+  persona_id: string;
+  version: number;
+  based_on: string | null;
+  fields: PersonaFields;
+  card: PersonaCard;
+  description: string;
+};
+
+export function emptyPersonaFields(): PersonaFields {
+  return {
+    name: "",
+    household: "",
+    tenure: "unknown",
+    outdoor_space: "unknown",
+    outdoor_note: "",
+    current_space_use: "",
+    willing_more_space: "unknown",
+    constraints: "",
+    style: "",
+    research_link: "",
+  };
+}
+
+/** Duplicate and edit: start from what a roster card actually says; unknowns stay unknown. */
+export function fieldsFromRosterCard(card: PersonaCard): PersonaFields {
+  const value = (key: string) => {
+    const attribute = card.attributes.find((entry) => entry.key === key);
+    return attribute && attribute.source !== "unknown" ? attribute.value : "";
+  };
+  const tenure = value("tenure").toLowerCase();
+  return {
+    ...emptyPersonaFields(),
+    household: [value("household"), value("age"), value("county")].filter(Boolean).join("; "),
+    tenure: tenure.startsWith("own") ? "owner" : tenure.startsWith("rent") ? "renter" : "unknown",
+    constraints: value("housing_cost") ? `Housing costs take ${value("housing_cost")} of income` : "",
+  };
+}
+
+/** Mirrors clean_fields' required fields, so Save explains itself before the round trip. */
+export function personaFormRefusal(fields: PersonaFields) {
+  if (!fields.household.trim()) return "Describe the household and living situation.";
+  if (!fields.research_link.trim()) return "Say how this profile relates to your research question.";
+  return null;
+}

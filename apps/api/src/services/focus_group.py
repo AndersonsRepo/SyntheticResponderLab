@@ -165,6 +165,9 @@ _MANNERS = (
     " do not extend it.",
 )
 
+# A student persona's optional conversation style, as a manner.
+_STYLE_MANNERS = {"brief": _MANNERS[0], "talkative": _MANNERS[6]}
+
 # Same rule as _STANCES: no two seats in a full room share one.
 assert len(_MANNERS) >= MAX_PERSONAS, "every seat in a full room needs its own manner"
 
@@ -258,6 +261,9 @@ def estimate_room_cost_usd(*, persona_count: int, rounds: int, model_id: str) ->
 
 
 def participant_card(config, persona_id):
+    custom = config.get("custom_personas", {}).get(persona_id)
+    if custom:
+        return custom["card"]
     from src.persistence.persona_seed import persona_cards
     return persona_cards().get(persona_id)
 
@@ -360,9 +366,13 @@ def start_room(session, settings, study, payload):
         raise ValidationApiError(f"Plan between 1 and {MAX_ROUNDS} questions for the room.")
     model = payload.get("model")
     validate_models([model], payload.get("allow_expensive_models"))
-    found = session.scalars(select(Persona).where(Persona.persona_id.in_(persona_ids))).all()
-    if len(found) != len(persona_ids):
+    from src.services.focus_group_personas import frozen_seats, is_student_persona_id
+    roster_ids = [pid for pid in persona_ids if not is_student_persona_id(pid)]
+    found = session.scalars(select(Persona).where(Persona.persona_id.in_(roster_ids))).all()
+    if len(found) != len(roster_ids):
         raise ValidationApiError("One or more of the selected personas is unavailable.")
+    # Student personas are frozen into the room at the version seated (Lin fix 3).
+    custom = frozen_seats(session, study, persona_ids)
     try:
         request_id = str(UUID(str(payload.get("request_id"))))
     except ValueError as exc:
@@ -372,7 +382,8 @@ def start_room(session, settings, study, payload):
     _lock_cache_key_for_transaction(session, hashlib.sha256(room_id.encode()).hexdigest())
     config = {"persona_ids": persona_ids, "model": model, "max_rounds": rounds,
               "estimated_cost_usd": str(estimate_room_cost_usd(
-                  persona_count=len(persona_ids), rounds=rounds, model_id=model))}
+                  persona_count=len(persona_ids), rounds=rounds, model_id=model)),
+              **({"custom_personas": custom} if custom else {})}
     existing = session.scalar(select(Job).where(Job.public_id == room_id))
     if existing:
         # A double-clicked start, or a lost creation response, resolves to the one room.
@@ -551,14 +562,22 @@ def ask_round(session, settings, study, room_id, payload):
     def run_answer(round_, answer, history):
         """One persona's turn: budgeted, cached, charged, and recorded on its own."""
         nonlocal charged_any
-        persona = session.get(Persona, answer["persona_id"])
         stage_ = round_["stage"]
         seats = room.payload_json["persona_ids"]
         stance = room_stance(seats, answer["persona_id"])
         manner = room_manner(seats, answer["persona_id"])
+        custom = room.payload_json.get("custom_personas", {}).get(answer["persona_id"])
+        if custom:
+            # The frozen snapshot, never the live persona: edits after the start do not
+            # reach a running room. A chosen style replaces the seat's drawn manner.
+            profile, description = {"persona_id": answer["persona_id"]}, custom["description"]
+            manner = _STYLE_MANNERS.get(custom["style"], manner)
+        else:
+            profile, description = session.get(Persona, answer["persona_id"]).profile_json, None
         prior = [{"role": "system",
                   "content": build_room_system_prompt(
-                      persona.profile_json, shared_stimuli(state["rounds"], round_["index"]), stance, manner)},
+                      profile, shared_stimuli(state["rounds"], round_["index"]), stance, manner,
+                      description=description)},
                  *_prior_messages(history, answer["persona_id"])]
         question_text = _moderator_line(round_)
         budget_error = None
@@ -1153,6 +1172,18 @@ def _manual_memo_rows(status):
     return rows
 
 
+def _origin_line(status, persona_id):
+    custom = status.get("custom_personas", {}).get(persona_id)
+    if not custom:
+        return "roster persona grounded in one ACS household record (name invented)"
+    card = custom["card"]
+    line = f"Student-created fictional persona, version {custom['version']}"
+    if custom.get("based_on"):
+        line += f", started from a copy of {custom['based_on']}"
+    return (line + ". Not a real PA3.5 participant. How it relates to the research question: "
+            + (card.get("research_link") or "not given"))
+
+
 def build_room_export(status, export_format):
     """Markdown or CSV of the transcript and memos, attributed turn by turn."""
     from src.services.interview_export import InterviewTranscriptExport, _as_csv_text
@@ -1187,6 +1218,14 @@ def build_room_export(status, export_format):
                 writer.writerow([round_["index"] + 1, round_["stage"], _as_csv_text(answer["persona_id"]),
                                  "participant", _as_csv_text(answer["text"]), answer["status"],
                                  str(not unfinished), turn_id(round_["index"], answer["persona_id"])])
+        writer.writerow([])
+        writer.writerow(["participant", "persona_id", "origin", "version", "based_on", "real_pa35_participant",
+                         "complete", "turn_id"])
+        for pid in status["persona_ids"]:
+            custom = status.get("custom_personas", {}).get(pid)
+            writer.writerow(["participant", pid, "student_created_fictional" if custom else "source_grounded_roster",
+                             custom["version"] if custom else "", (custom or {}).get("based_on") or "", "False",
+                             str(not unfinished), ""])
         if manual_rows:
             writer.writerow([])
             writer.writerow(["student_memo", "field", "speaker", "label_or_topic", "text", "link",
@@ -1229,6 +1268,8 @@ def build_room_export(status, export_format):
                   + (f" Missing answers (round:persona): {', '.join(incomplete)}." if incomplete else ""), ""]
     lines += [f"- Room: `{room_id}`", f"- Model: `{status['model']}`",
               f"- Participants: {', '.join(status['persona_ids'])}",
+              *(f"  - {pid}: {_origin_line(status, pid)}" for pid in status["persona_ids"]),
+              "- Real PA3.5 participants in this room: 0 — every participant is simulated.",
               f"- Stages reached: {', '.join(STAGE_LABELS[s] for s in status['stages_reached']) or 'none'}"]
     shared = {item["kind"]: item for item in shared_view(status["rounds"])}
     for kind, label in (("concept", "Concept introduced"), ("price", "Price revealed")):
