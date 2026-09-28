@@ -98,6 +98,57 @@ PRICE = "about $23,000"
 PRICE_STIMULUS = f"PRICE SHOWN BY THE MODERATOR: {PRICE}"
 STIMULI = {"concept": CONCEPT_STIMULUS, "price": PRICE_STIMULUS}
 
+# Rounds stored before the reveal controls existed (rooms run in class on 2026-09-23) carry
+# no "kind" and no "stimulus", but the old stage map still put the concept into every prompt
+# from the concept stage on, and the price from price_reactions on. Read as absent, those
+# rooms would claim participants were never shown what they discussed (refuter
+# LEGACY-STIMULUS / SOL-1), so the exposure is derived from the stage, with the old text.
+_LEGACY_CONCEPT = """PRODUCT BEING DISCUSSED:
+Name: Tahoe Mini by Neo Smart Living
+Description: A compact 117-square-foot factory-built studio that is delivered and installed in a backyard. It is not an ADU and has no kitchen or bathroom.
+Intended for: homeowners with usable outdoor space"""
+_LEGACY_STIMULI = (("concept", "concept", _LEGACY_CONCEPT), ("price", "price_reactions", f"Price: {PRICE}"))
+
+
+def with_legacy_stimuli(rounds):
+    """Rounds with the stage-implied stimulus on the legacy round that first showed it.
+
+    ponytail: one stimulus per round. The old funnel refused price_reactions until a concept
+    round was answered, so a legacy round never introduced both; if one somehow did, the
+    concept is attached and the price lands on the next legacy round at price or later."""
+    shown = {r["stimulus"]["kind"] for r in rounds if r.get("stimulus")}
+    out = []
+    for r in rounds:
+        if "kind" not in r and not r.get("stimulus"):
+            for kind, stage, text in _LEGACY_STIMULI:
+                if kind not in shown and STAGES.index(r["stage"]) >= STAGES.index(stage):
+                    r = {**r, "stimulus": {"kind": kind, "text": text, "derived": True}}
+                    shown.add(kind)
+                    break
+        out.append(r)
+    return out
+
+
+def _normalized(state):
+    return {**state, "rounds": with_legacy_stimuli(state.get("rounds", []))}
+
+
+def _shown(rounds):
+    return {r["stimulus"]["kind"] for r in rounds if r.get("stimulus")}
+
+
+def _counted(rounds):
+    """Rounds that count toward reaching their stage. A question at the concept stage asked
+    without the concept on screen did not reach the concept stage (refuter
+    CONCEPT-STAGE-REACHED-WITHOUT-CONCEPT), so it neither advances the funnel nor makes the
+    memo eligible."""
+    concept_shown, out = False, []
+    for r in rounds:
+        concept_shown = concept_shown or (r.get("stimulus") or {}).get("kind") == "concept"
+        if concept_shown or STAGES.index(r["stage"]) < STAGES.index("concept"):
+            out.append(r)
+    return out
+
 # A moderator question that names a dollar figure before the price is revealed anchors the
 # room just as surely as the app doing it. Refuse it and say why.
 # A dollar sign, a thousands-grouped figure, or a bare number carrying a money word.
@@ -297,8 +348,9 @@ def _with_turn_ids(rounds):
 
 def room_status(session, settings, study, room_id, room=None):
     room = room or owned_room(session, study, room_id)
-    state = room.result_json or {}
-    stages_reached = sorted({r["stage"] for r in state.get("rounds", []) if
+    state = _normalized(room.result_json or {})
+    config = room.payload_json or {}
+    stages_reached = sorted({r["stage"] for r in _counted(state["rounds"]) if
                              any(a["status"] == "answered" for a in r["answers"])}, key=STAGES.index)
     return {
         "room_id": room.public_id,
@@ -307,20 +359,21 @@ def room_status(session, settings, study, room_id, room=None):
         **state,
         # Derived on read, never stored: a room written before turn IDs existed gets the
         # same IDs a new one does.
-        "rounds": _with_turn_ids(state.get("rounds", [])),
+        "rounds": _with_turn_ids(state["rounds"]),
         "manual_memo_check": manual_memo_check(state),
-        "allowance": allowance(room.payload_json, state),
-        "estimated_total_cost_usd": str(Decimal(room.payload_json["estimated_cost_usd"]) + sum(
+        "allowance": allowance(config, state),
+        # .get with start_room's defaults: a room row missing a key, or whose model has since
+        # left the catalog, must still open and export (refuter SOL-4).
+        "estimated_total_cost_usd": str(Decimal(config.get("estimated_cost_usd") or "0") + sum(
             (Decimal(e["estimated_cost_usd"]) for e in state.get("extensions", [])), Decimal("0"))),
-        "extension_cost_per_round_usd": str(estimate_room_cost_usd(
-            persona_count=len(room.payload_json["persona_ids"]), rounds=1, model_id=room.payload_json["model"])),
+        "extension_cost_per_round_usd": _extension_cost(config),
         "rehearsal_label": REHEARSAL_LABEL,
         # The moderator sees the price; participants do not until it is revealed.
         "concept_card": {**CONCEPT_CARD, "text": CONCEPT_STIMULUS, "price": PRICE},
         "shared": shared_view(state.get("rounds", [])),
         # The same cards the student recruited from, so they can be reopened mid-discussion.
         "participants": [{"persona_id": pid, "card": participant_card(room.payload_json, pid)}
-                         for pid in room.payload_json.get("persona_ids", [])],
+                         for pid in config.get("persona_ids", [])],
         "stage": STAGES[state.get("stage_index", 0)],
         "stages": list(STAGES),
         "stage_labels": STAGE_LABELS,
@@ -329,6 +382,14 @@ def room_status(session, settings, study, room_id, room=None):
         "error": room.error_json,
         "session_usage": usage(session, settings, room.public_id),
     }
+
+
+def _extension_cost(config):
+    try:
+        return str(estimate_room_cost_usd(persona_count=len(config.get("persona_ids", [])), rounds=1,
+                                          model_id=config.get("model")))
+    except StopIteration:
+        return None  # the model is no longer offered, so neither is an extension
 
 
 def list_rooms(session, settings, study):
@@ -422,14 +483,18 @@ def _moderator_line(round_):
 
 # A participant talking about being an AI, its prompt or its instructions is out of
 # character — the "P002 only" failure Lin saw. Such a reply never enters the dialogue.
-# ponytail: a phrase list, not a classifier. It only catches meta-talk about the setup;
-# a subtler slip gets through, and a persona saying "as an AI" in some story is withheld
-# (charged, retryable). Upgrade to a judged check if false positives show up in logs.
+# Only SELF-reference counts: "as an AI," / "I'm an AI language model" / "my instructions" /
+# "system prompt". A persona who works on "a large language model at my job" or is "an AI
+# researcher" is in character (refuter OOC-REGEX-REPEAT-CHARGE), so a bare "AI" must end the
+# clause or be followed by model/assistant/chatbot.
+# ponytail: a phrase list, not a classifier; a subtler slip gets through. Upgrade to a judged
+# check if the logs show misses.
+_SELF_AI = (r"(?:(?:ai|artificial intelligence) (?:language model|model|assistant|chatbot)\b"
+            r"|(?:(?:large )?language model|chatbot|ai|artificial intelligence)(?=\s*(?:[.,;:!?]|$)))")
 _OUT_OF_CHARACTER = re.compile(
-    r"\b(?:as an ai|i(?:'m| am) (?:just )?an? (?:ai|artificial intelligence|language model|chatbot)"
-    r"|(?:large )?language model|my (?:system )?prompt|system prompt|my instructions|i was instructed"
-    r"|(?:out of|stay(?:ing)? in|break(?:ing)?) character|i(?:'m| am) (?:just )?role-?playing|(?:this|my) persona"
-    r"|simulated (?:persona|participant|focus group))\b", re.I)
+    rf"\b(?:as an? {_SELF_AI}|i(?:'|’)?m (?:just |only |not )?an? {_SELF_AI}|i am (?:just |only |not )?an? {_SELF_AI}"
+    r"|my (?:system )?instructions\b|system prompt\b|i(?:'|’)?m (?:just )?role-?playing\b|i am (?:just )?role-?playing\b"
+    r"|simulated (?:persona|participant|focus group)\b)", re.I | re.M)
 
 
 def out_of_character(text):
@@ -440,12 +505,19 @@ OUT_OF_CHARACTER_MESSAGE = ("The reply stepped out of character, so it was kept 
                             "discussion. Retry this turn.")
 
 
+class OutOfCharacterReply(TransientProviderError):
+    """A billed reply withheld for breaking character. Its own type, so the error code never
+    depends on a message string surviving a wrapper (refuter SOL-3). Raised once per call:
+    the provider is asked with max_attempts=1 and nothing retries it automatically, so a
+    flagged turn costs one charge per student click."""
+
+
 def allowance(config, state):
     """Core questions are one per stage and are reserved: a probe may never spend the
     question a stage still needs, so a room can always reach its close."""
-    total = config["max_rounds"] + state.get("extra_rounds", 0)
-    rounds = state.get("rounds", [])
-    asked_stages = {r["stage"] for r in rounds}
+    total = config.get("max_rounds", MAX_ROUNDS) + state.get("extra_rounds", 0)
+    rounds = with_legacy_stimuli(state.get("rounds", []))
+    asked_stages = {r["stage"] for r in _counted(rounds)}
     cores_left = len([s for s in STAGES if s not in asked_stages])
     probes_used = sum(1 for r in rounds if r.get("kind") == "probe")
     return {"total": total, "used": len(rounds), "cores_total": CORE_QUESTIONS,
@@ -490,7 +562,7 @@ def ask_round(session, settings, study, room_id, payload):
         raise ValidationApiError("An integer room revision is required.")
     if room.status in {"cancelled", "completed"}:
         raise ConflictApiError(f"This room is {room.status}; its transcript stays readable.")
-    state = deepcopy(room.result_json)
+    state = _normalized(deepcopy(room.result_json))
     if payload["revision"] != state["revision"]:
         # Stale revision: a second submit while the first round was still generating,
         # or a retried request whose first attempt already landed.
@@ -505,7 +577,8 @@ def ask_round(session, settings, study, room_id, payload):
         stage = str(payload.get("stage") or STAGES[state["stage_index"]])
         if stage not in STAGES:
             raise ValidationApiError("Unknown focus-group stage.")
-        reached = {r["stage"] for r in state["rounds"] if any(a["status"] == "answered" for a in r["answers"])}
+        reached = {r["stage"] for r in _counted(state["rounds"])
+                   if any(a["status"] == "answered" for a in r["answers"])}
         furthest = max((STAGES.index(s) for s in reached), default=-1)
         if STAGES.index(stage) > furthest + 1:
             # "Work the funnel in order" is the wrong sentence when the funnel WAS worked in
@@ -522,22 +595,27 @@ def ask_round(session, settings, study, room_id, payload):
             raise ValidationApiError(
                 f"Work the funnel in order: {STAGE_LABELS[STAGES[furthest + 1]]} comes before "
                 f"{STAGE_LABELS[stage]}.")
-        kind = "probe" if any(r["stage"] == stage for r in state["rounds"]) else "core"
+        reveal = payload.get("reveal")
+        shown = _shown(state["rounds"])
+        # A concept-stage question without the concept on screen is not the stage's core
+        # question: it spends a probe, so it can never use up the question the funnel needs.
+        counts = STAGES.index(stage) < STAGES.index("concept") or "concept" in shown or reveal == "concept"
+        kind = "core" if counts and all(r["stage"] != stage for r in _counted(state["rounds"])) else "probe"
         left = allowance(room.payload_json, state)
         if left["used"] >= left["total"]:
             raise ValidationApiError("This room has used all the questions it was started with.")
         if kind == "probe" and left["probes_left"] <= 0:
             raise ValidationApiError(
-                f"No follow-up probes left: the remaining {left['cores_left']} question(s) are held for "
+                ("" if counts else "Introduce the concept with this question — without it, the question "
+                 "does not count as the concept stage. ")
+                + f"No follow-up probes left: the remaining {left['cores_left']} question(s) are held for "
                 "the stages you have not asked yet. Move to the next stage, or extend the room for "
                 "more probes.")
         recipients = _check_recipients(room.payload_json["persona_ids"], payload.get("recipients"))
         question = str(payload.get("question") or "").strip()
         if not question:
             raise ValidationApiError("Type the question you want to put to the room.")
-        reveal = payload.get("reveal")
         _check_reveal(state, stage, reveal)
-        shown = {r["stimulus"]["kind"] for r in state["rounds"] if r.get("stimulus")}
         if "price" not in shown and reveal != "price" and _MONEY.search(question):
             raise ValidationApiError(
                 "Don't anchor price first — ask the unaided price question, then use Reveal price "
@@ -605,7 +683,7 @@ def ask_round(session, settings, study, room_id, payload):
             if out_of_character(result.text):
                 # Raised, not returned: a billed reply is still recorded, and it never
                 # reaches the answer cache, so a retry asks again instead of replaying it.
-                raise TransientProviderError(OUT_OF_CHARACTER_MESSAGE, measured_usage=result)
+                raise OutOfCharacterReply(OUT_OF_CHARACTER_MESSAGE, measured_usage=result)
             return result
 
         def log(error):
@@ -622,7 +700,7 @@ def ask_round(session, settings, study, room_id, payload):
                 _record_usage(session, study, room_id, answer["persona_id"], measured)
                 charged_any = True
             error = exc if isinstance(exc, ApiError) else ProviderUnavailableApiError(str(exc))
-            if str(exc) == OUT_OF_CHARACTER_MESSAGE:
+            if isinstance(exc, OutOfCharacterReply):
                 error.code = "out_of_character"
             answer["error"] = {"code": error.code, "message": error.message}
             log(error)
@@ -714,7 +792,7 @@ def _check_reveal(state, stage, reveal):
     if reveal not in STIMULI:
         raise ValidationApiError("Only the concept card or the price can be revealed.")
     rounds = state["rounds"]
-    shown = {r["stimulus"]["kind"] for r in rounds if r.get("stimulus")}
+    shown = _shown(rounds)
     if reveal in shown:
         raise ValidationApiError(f"The {reveal} has already been shown to this room.")
     if reveal == "concept" and STAGES.index(stage) < STAGES.index("concept"):
@@ -749,9 +827,16 @@ def extend_room(session, settings, study, room_id, payload):
     if room.status in {"cancelled", "completed"}:
         raise ConflictApiError(f"This room is {room.status}; it cannot be extended.")
     state = deepcopy(room.result_json)
-    if payload["revision"] != state["revision"]:
-        return room_status(session, settings, study, room_id)  # a double-click extends once
     extra = payload.get("extra_rounds")
+    if payload["revision"] != state["revision"]:
+        last = (state.get("extensions") or [{}])[-1]
+        if last.get("from_revision") == payload["revision"] == state["revision"] - 1 \
+                and last.get("extra_rounds") == extra:
+            return room_status(session, settings, study, room_id)  # a double-click extends once
+        # A stale tab must not be told it succeeded when nothing was added (refuter SOL-2).
+        raise ConflictApiError("The room changed since this page loaded (a question was asked or it was "
+                               "already extended), so nothing was added or charged. Review the room and "
+                               "confirm the extension again.")
     left = allowance(room.payload_json, state)["extensions_left"]
     if type(extra) is not int or not 1 <= extra <= left:
         raise ValidationApiError(f"Add between 1 and {left} probes." if left
@@ -759,8 +844,11 @@ def extend_room(session, settings, study, room_id, payload):
     if payload.get("authorize_charge") is not True:
         raise ValidationApiError("Confirm the extra probes' estimated charge first.")
     config = room.payload_json
-    estimate = estimate_room_cost_usd(persona_count=len(config["persona_ids"]), rounds=extra,
-                                      model_id=config["model"])
+    try:
+        estimate = estimate_room_cost_usd(persona_count=len(config["persona_ids"]), rounds=extra,
+                                          model_id=config.get("model"))
+    except StopIteration:
+        raise ConflictApiError("This room's model is no longer offered, so it cannot be extended.") from None
     lock_class_budget_for_transaction(session)
     snapshot = load_interview_budget_snapshot(session, session_id=room_id, run_budget_usd=settings.llm_budget_usd)
     enforce_budget_open(snapshot)
@@ -771,7 +859,8 @@ def extend_room(session, settings, study, room_id, payload):
                           run_budget_usd=snapshot.run_budget_usd)
     state["extra_rounds"] = state.get("extra_rounds", 0) + extra
     state.setdefault("extensions", []).append(
-        {"extra_rounds": extra, "estimated_cost_usd": str(estimate), "at": utcnow().isoformat()})
+        {"extra_rounds": extra, "estimated_cost_usd": str(estimate), "at": utcnow().isoformat(),
+         "from_revision": state["revision"]})
     state["revision"] += 1
     room.result_json = state
     session.commit()
@@ -841,7 +930,8 @@ def _revision(state):
 
     Turn IDs are stripped: room_status adds them on read, and the export hashes that view
     while the memo hashed the stored rounds — the two must agree."""
-    rounds = [{**{k: v for k, v in r.items() if k != "turn_id"},
+    rounds = [{**{k: v for k, v in r.items()
+                  if k != "turn_id" and not (k == "stimulus" and v.get("derived"))},
                "answers": [{k: v for k, v in a.items() if k != "turn_id"} for a in r["answers"]]}
               for r in state.get("rounds", [])]
     return hashlib.sha256(json.dumps(rounds, sort_keys=True).encode()).hexdigest()
@@ -849,9 +939,9 @@ def _revision(state):
 
 def memo_view(session, settings, study, room_id, room=None):
     room = room or owned_room(session, study, room_id)
-    state = room.result_json or {}
+    state = _normalized(room.result_json or {})
     answers = _answered(state)
-    reached = {r["stage"] for r, _ in answers}
+    reached = {r["stage"] for r, _ in _answered({"rounds": _counted(state["rounds"])})}
     missing_stages = [s for s in MEMO_REQUIRED_STAGES if s not in reached]
     if missing_stages:
         eligible, message = False, (
@@ -1127,6 +1217,14 @@ def manual_memo_check(state):
     return {"saved": True, "complete": not problems, "problems": problems}
 
 
+def _memo_is_blank(memo):
+    quotes = [q for t in memo["themes"] for q in t["quotes"]] + [memo["surprise"]["quote"]]
+    return not any([*(t["label"] or t["synthesis"] for t in memo["themes"]), memo["surprise"]["summary"],
+                    *(q["turn_id"] or q["text"] for q in quotes),
+                    *(o["text"] or o["topic"] or o["turn_id"] for o in memo["answer_options"]),
+                    memo["moderation_improvement"]])
+
+
 @serialized_local
 def save_manual_memo(session, settings, study, room_id, payload):
     """Free, and allowed in every room state: the student's own writing never waits on
@@ -1134,8 +1232,23 @@ def save_manual_memo(session, settings, study, room_id, payload):
     from src.services.interview_service import utcnow
     room = owned_room(session, study, room_id, lock=True)
     memo = _clean_manual_memo((payload or {}).get("memo"))
+    base = (payload or {}).get("base_version")
+    if type(base) is not int:
+        raise ValidationApiError("Reload the page before saving: the memo version it was opened at is missing.")
     state = deepcopy(room.result_json)
-    state["manual_memo"] = {**memo, "saved_at": utcnow().isoformat()}
+    saved = state.get("manual_memo")
+    version = (saved or {}).get("version", 0)
+    if base != version:
+        # Another tab (or an export from one) saved since this page loaded. Overwriting it
+        # would silently lose the newer memo (refuter EXPORT-IMPLICIT-SAVE-OVERWRITES).
+        raise ConflictApiError("Your memo was saved from another tab or window after this page loaded, so "
+                               "this save was refused to keep that newer version. Copy anything you need "
+                               "from this page, then re-open the room to see the saved memo.")
+    if saved is None and _memo_is_blank(memo):
+        # Nothing written: an untouched form is not a draft, and the export keeps saying
+        # "Not written yet" instead of listing blank padding.
+        return room_status(session, settings, study, room_id, room=room)
+    state["manual_memo"] = {**memo, "saved_at": utcnow().isoformat(), "version": version + 1}
     room.result_json = state
     session.commit()
     return room_status(session, settings, study, room_id, room=room)
@@ -1269,7 +1382,7 @@ def build_room_export(status, export_format):
     if unfinished:
         lines += [f"> **INCOMPLETE — do not submit as final.** Room status: `{status['status']}`."
                   + (f" Missing answers (round:persona): {', '.join(incomplete)}." if incomplete else ""), ""]
-    lines += [f"- Room: `{room_id}`", f"- Model: `{status['model']}`",
+    lines += [f"- Room: `{room_id}`", f"- Model: `{status.get('model') or 'unknown'}`",
               f"- Participants: {', '.join(status['persona_ids'])}",
               *(f"  - {pid}: {_origin_line(status, pid)}" for pid in status["persona_ids"]),
               "- Real PA3.5 participants in this room: 0 — every participant is simulated.",
@@ -1285,7 +1398,9 @@ def build_room_export(status, export_format):
                   + (" — asked after participants had been shown the concept" if round_.get("post_exposure") else ""),
                   ""]
         if round_.get("stimulus"):
-            lines += [f"**Shown to participants with this question ({round_['stimulus']['kind']}):**", "",
+            how = (" — by this stage, in the prompt, before Introduce/Reveal existed"
+                   if round_["stimulus"].get("derived") else "")
+            lines += [f"**Shown to participants with this question ({round_['stimulus']['kind']}{how}):**", "",
                       *(f"> {line}" for line in round_["stimulus"]["text"].splitlines()), ""]
         to = f" _(to {', '.join(round_['recipients'])} only)_" if round_.get("recipients") else ""
         lines += [f"**Moderator:**{to} {round_['question']} `[{turn_id(round_['index'])}]`", ""]

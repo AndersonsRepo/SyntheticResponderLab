@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import {
   addQuote,
   aiMemoRetryLabel,
+  manualMemoEdited,
   manualMemoFrom,
   quotableTurns,
   REHEARSAL_LABEL,
@@ -70,8 +71,8 @@ test("manual memo: the form comes before the optional AI draft and each turn sho
   assert.match(memoFormSource, /PA4 answer options/);
   assert.match(memoFormSource, /question topic/);
   assert.match(memoFormSource, /would change about how you moderated/);
-  // Exporting saves the on-screen memo first, so typed work is never left out of the file.
-  assert.match(pageSource, /postManualMemo\(\)\s*\.catch\([\s\S]*?\.then\(\(\) =>\s*interviewOperation/,
+  // Exporting saves unsaved on-screen edits first, so typed work is never left out of the file.
+  assert.match(pageSource, /\(edited \? postManualMemo\(\) : Promise\.resolve\(\)\)\s*\.catch\([\s\S]*?\.then\(\(\) =>\s*interviewOperation/,
     "a failed memo save never blocks the export");
 });
 
@@ -302,4 +303,34 @@ test("create persona: duplicating copies what the roster card says and nothing i
   assert.equal(copy.research_link, "");
   assert.match(String(personaFormRefusal(emptyPersonaFields())), /household/);
   assert.match(String(personaFormRefusal({ ...emptyPersonaFields(), household: "x" })), /research question/);
+});
+
+// --- refuter round ------------------------------------------------------------------------
+
+test("memo lost update: export saves only an edited memo, on top of the version it loaded", () => {
+  const saved = { ...manualMemoFrom(null), version: 3 };
+  assert.equal(manualMemoEdited(null, manualMemoFrom(null)), false, "an untouched form is not a memo");
+  assert.equal(manualMemoEdited(saved, manualMemoFrom(saved)), false);
+  const edited = manualMemoFrom(saved);
+  edited.moderation_improvement = "Ask P003 sooner.";
+  assert.equal(manualMemoEdited(saved, edited), true);
+  assert.match(pageSource, /base_version: room!\.manual_memo\?\.version \?\? 0/);
+  assert.match(pageSource, /\(edited \? postManualMemo\(\) : Promise\.resolve\(\)\)/);
+});
+
+test("concept stage: a question without the concept on screen is a probe, not the stage's core", () => {
+  const rounds = (["icebreaker", "space_needs"] as FocusGroupStage[]).map((stage, index) => ({ index, stage, question: "q", answers: [] }));
+  assert.equal(questionKind({ rounds }, "concept"), "probe");
+  assert.equal(questionKind({ rounds }, "concept", "concept"), "core");
+  const legacy = [...rounds, { index: 2, stage: "concept" as FocusGroupStage, question: "q", answers: [],
+    stimulus: { kind: "concept" as const, text: "t", derived: true } }];
+  assert.equal(questionKind({ rounds: legacy }, "price_reactions"), "core");
+  assert.match(String(askRefusal({ rounds, allowance: { ...ALLOWANCE, probes_left: 0 } }, "concept", { mode: "room", selected: [] })), /probes/);
+  assert.equal(askRefusal({ rounds, allowance: { ...ALLOWANCE, probes_left: 0 } }, "concept", { mode: "room", selected: [] }, "concept"), null);
+});
+
+test("extension: a refused (stale) extension surfaces its message instead of looking like success", () => {
+  const extend = pageSource.slice(pageSource.indexOf("async function extendRoom"), pageSource.indexOf("async function openRoom"));
+  assert.match(extend, /await run\(/, "run() shows the server's 409 message in the alert");
+  assert.match(extend, /if \(result\) setRoom\(result\.room\)/, "only a real extension updates the room");
 });

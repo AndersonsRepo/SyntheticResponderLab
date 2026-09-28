@@ -59,7 +59,8 @@ export type FocusGroupRoom = {
     turn_id?: string;
     stage: FocusGroupStage;
     question: string;
-    stimulus?: { kind: RevealKind; text: string };
+    /** derived: a room from before Introduce/Reveal, where the stage itself showed it. */
+    stimulus?: { kind: RevealKind; text: string; derived?: boolean };
     kind?: "core" | "probe";
     recipients?: string[] | null;
     answers: FocusGroupAnswer[];
@@ -67,7 +68,7 @@ export type FocusGroupRoom = {
   concept_card?: ConceptCard;
   allowance?: Allowance;
   estimated_total_cost_usd?: string;
-  extension_cost_per_round_usd?: string;
+  extension_cost_per_round_usd?: string | null;
   participants?: { persona_id: string; card: PersonaCard | null }[];
   shared?: SharedStimulus[];
   memo: { themes: unknown[] | null } | null;
@@ -206,6 +207,8 @@ export function focusGroupPath(roomId?: string, suffix?: string) {
 
 export type ManualQuote = { turn_id: string; text: string };
 export type ManualMemo = {
+  /** Server-assigned; a save must name the version it was edited from. */
+  version?: number;
   themes: { label: string; synthesis: string; quotes: ManualQuote[] }[];
   surprise: { summary: string; quote: ManualQuote };
   answer_options: { text: string; topic: string; turn_id: string }[];
@@ -366,8 +369,28 @@ export type Allowance = {
 };
 
 /** The first question at a stage is its core question; every later one is a follow-up probe. */
-export function questionKind(room: Pick<FocusGroupRoom, "rounds"> | null, stage: FocusGroupStage) {
-  return (room?.rounds ?? []).some((round) => round.stage === stage) ? "probe" : "core";
+/** Mirrors ask_round: a question at the concept stage or later is the stage's core question
+ * only once the concept is on screen (shown before, or introduced with it). */
+export function questionKind(
+  room: Pick<FocusGroupRoom, "rounds"> | null,
+  stage: FocusGroupStage,
+  reveal: RevealKind | null = null
+) {
+  const at = (s: FocusGroupStage) => FOCUS_GROUP_STAGES.indexOf(s);
+  let conceptShown = false;
+  const counted = new Set<FocusGroupStage>();
+  for (const round of room?.rounds ?? []) {
+    conceptShown ||= round.stimulus?.kind === "concept";
+    if (conceptShown || at(round.stage) < at("concept")) counted.add(round.stage);
+  }
+  const counts = at(stage) < at("concept") || conceptShown || reveal === "concept";
+  return counts && !counted.has(stage) ? "core" : "probe";
+}
+
+/** True when the form differs from the saved memo — only then does Export save it first,
+ * so an untouched form never becomes a blank "draft" and a stale tab has nothing to push. */
+export function manualMemoEdited(saved: ManualMemo | null | undefined, current: ManualMemo) {
+  return JSON.stringify(manualMemoFrom(saved)) !== JSON.stringify(manualMemoFrom(current));
 }
 
 export function nextStage(stage: FocusGroupStage): FocusGroupStage | null {
@@ -386,7 +409,8 @@ export function allowanceLine(allowance: Allowance | undefined) {
 export function askRefusal(
   room: Pick<FocusGroupRoom, "rounds" | "allowance"> | null,
   stage: FocusGroupStage,
-  target: { mode: "room" | "selected"; selected: string[] }
+  target: { mode: "room" | "selected"; selected: string[] },
+  reveal: RevealKind | null = null
 ) {
   if (target.mode === "selected" && target.selected.length === 0) {
     return "Choose at least one participant, or ask the whole room.";
@@ -394,7 +418,7 @@ export function askRefusal(
   const allowance = room?.allowance;
   if (!allowance) return null;
   if (allowance.used >= allowance.total) return "This room has used all the questions it was started with.";
-  if (questionKind(room, stage) === "probe" && allowance.probes_left <= 0) {
+  if (questionKind(room, stage, reveal) === "probe" && allowance.probes_left <= 0) {
     return "No follow-up probes left — move to the next stage, or extend the room for more probes.";
   }
   return null;

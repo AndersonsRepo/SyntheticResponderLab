@@ -62,6 +62,15 @@ Checks run from this directory. `P` = `cd ../.. && ./apps/api/.venv/bin/python -
 - [x] (final) Nothing already working broke — full API suite (incl. the "AI interviews you" tests and the original focus-group tests: funnel, 3-person floor, cost preview, manual stages, cross-references). — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests -q`
 - [x] (final) Full web unit suite green and next build passes (with placeholder env: the build refuses to prerender without a backend origin and proxy secret). — check: `cd ../../apps/web && npm run test:unit && API_BASE_URL=https://api.example.invalid DEPLOYMENT_SHARED_SECRET=build-only-secret APP_ACCESS_PASSWORD=build-only-password ./node_modules/.bin/next build`
 
+## Refuter round (2026-09-27) — legacy rooms first
+
+- [x] Rooms stored before this branch (run in class 2026-09-23) get their concept/price exposure derived from the stage, as the old stage map gave it: the export says the concept and price WERE shown and where, a later early-stage round is post-exposure, the system prompt lists what was shown, the moderator may name the price, and neither can be revealed twice. — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'legacy_room_exposure_derived_from_stage'`
+- [x] A room row missing payload keys, or whose model left the catalog, still opens, lists and exports (every stored room has all four keys per git history; this is belt and braces). — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'legacy_room_with_missing_payload_keys'`
+- [x] A memo save on top of a newer saved memo is refused with 409 and a clear message; an untouched form is never persisted, and Export saves only real edits. — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'memo_stale_write_refused' && cd plans/lin-classroom-fixes && sh ./webcheck.sh 'memo lost update'`
+- [x] A concept-stage question without the concept shown is a probe and does not reach the concept stage (funnel and memo eligibility). — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'concept_stage_question_without_the_concept' && cd plans/lin-classroom-fixes && sh ./webcheck.sh 'concept stage: a question'`
+- [x] The out-of-character matcher flags only self-referential AI talk (not "I work on a large language model at my job" or "my persona at work"), uses its own exception type, and a flagged turn is billed once per click. — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'flags_only_self_reference or billed_once_per_click'`
+- [x] Extending with a stale revision is a 409 the page shows (a double-click of the extension just recorded is still a no-op). — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'extend_with_stale_revision' && cd plans/lin-classroom-fixes && sh ./webcheck.sh 'extension: a refused'`
+
 ## Out of scope
 
 - Real-participant recruitment or any claim that personas predict real customers.
@@ -84,7 +93,7 @@ visible, but it is not refused.
 4. Roster names marked "fictional" (ACS PUMS has no names); usable outdoor space and willingness to add space are "unknown" for every roster persona. — `persona_seed.py persona_card`.
 5. PA3.5 screener = homeowner/landowner, usable outdoor space, open to adding space (from Lin's fix-1 wording). — `persona_seed.py screener`.
 6. Core vs probe is derived: the first question at a stage is core, later ones are probes; probes cannot spend a question a not-yet-asked stage needs. Extension capped at 4 extra probes per room. Asking the close question still completes the room (no probes after close). — `allowance`, `MAX_EXTENSION_ROUNDS`.
-7. Out-of-character guard is a phrase list; a flagged reply is charged, withheld and retryable. — `_OUT_OF_CHARACTER`.
+7. Out-of-character guard is a phrase list of self-referential AI talk only (occupational "language model"/"persona" talk passes); a flagged reply is charged once per click, withheld and retryable. — `_OUT_OF_CHARACTER`, `OutOfCharacterReply`.
 8. Manual memo saves drafts in any room state (incl. cancelled), completeness checked live; answer options may optionally cite a turn. Turn IDs are `R<round>-<speaker>`, derived on read. — `manual_memo_check`, `turn_id`.
 9. CSV export's first row is the rehearsal label (then the header). — `build_room_export`.
 10. Student personas count toward the room's 3-seat minimum but every export says 0 real PA3.5 participants; IDs are S01–S20 per study; no delete endpoint. — `focus_group_personas.py`.
@@ -94,6 +103,6 @@ visible, but it is not refused.
 
 - The live model actually obeys "no price has been shown — frame guesses as guesses" and "never mention being an AI"; tests prove only that the price is absent from every prompt and that flagged replies are withheld. — settle: one real room on staging through all five stages without Reveal price, read the transcript.
 - The out-of-character phrase list has an acceptable false-positive rate on real replies. — settle: grep production `focus_group_failure ... code=out_of_character` logs after the first class.
-- Rooms already in progress at deploy time: their earlier rounds had the concept/price injected by stage, but new rounds only get what is revealed; the student must click Introduce/Reveal in such a room. — settle: open one pre-deploy room on staging after deploy.
+- Rooms already in progress at deploy time: exposure is now derived from the stage (refuter round), proven on seeded legacy-shaped rows only. — settle: open one real pre-deploy room on staging after deploy and export it.
 - Layout/readability of the new cards, side panel and forms in a real browser (only `next build` and source checks ran; no screenshot). — settle: click through /focus-group on a preview deploy.
 - Deploy order: web and API ship separately; the new web sends `reveal`/`recipients`/`max_rounds=5+probes` which an old API ignores. — settle: deploy API first.

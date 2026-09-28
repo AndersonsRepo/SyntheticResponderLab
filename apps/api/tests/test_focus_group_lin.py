@@ -33,8 +33,12 @@ def full_memo(room_state):
     }
 
 
-def save(client, study_id, room_state, body):
-    return client.post(base(study_id, room_state) + "/manual-memo", json={"memo": body})
+def save(client, study_id, room_state, body, base_version=None):
+    """Saves as the page does: on top of the memo version it last loaded (the current one)."""
+    if base_version is None:
+        base_version = (get_room(client, study_id, room_state).get("manual_memo") or {}).get("version", 0)
+    return client.post(base(study_id, room_state) + "/manual-memo",
+                       json={"memo": body, "base_version": base_version})
 
 
 def export(client, study_id, room_state, fmt="markdown"):
@@ -624,3 +628,164 @@ def test_student_data_stays_in_the_focus_group_rows(room, db_session, caplog):
     rows = [j for j in db_session.scalars(select(Job)).all()
             if marker in str(j.payload_json) + str(j.result_json)]
     assert rows and {j.job_type for j in rows} <= {"focus_group_room", "focus_group_persona"}
+
+
+# --- Refuter round: legacy rooms and the review's concerns ----------------------------------
+
+def seed_legacy(client, study_id, db_session, stages, payload=None, status="running"):
+    """A room exactly as the pre-branch API stored it (rooms students ran on 2026-09-23):
+    rounds with no kind, no recipients, no stimulus."""
+    from sqlalchemy import select
+    from src.persistence.models import Job
+    room_state = start(client, study_id).json()["data"]["room"]
+    job = db_session.scalar(select(Job).where(Job.public_id == room_state["room_id"]))
+    rounds = [{"index": i, "stage": stage, "question": f"Legacy {stage} question?",
+               "post_exposure": False,
+               "answers": [{"persona_id": pid, "text": f"{pid} said something about {stage}.",
+                            "status": "answered", "error": None} for pid in THREE]}
+              for i, stage in enumerate(stages)]
+    job.result_json = {"revision": len(rounds), "stage_index": fg.STAGES.index(stages[-1]),
+                       "rounds": rounds, "memo": None}
+    job.payload_json = payload or {"persona_ids": list(THREE), "model": "openai/gpt-4o-mini",
+                                   "max_rounds": 12, "estimated_cost_usd": "0.0100"}
+    job.status = status
+    db_session.commit()
+    return get_room(client, study_id, room_state)
+
+
+def test_legacy_room_exposure_derived_from_stage(room, db_session):
+    client, study_id, calls, _ = room
+    legacy = seed_legacy(client, study_id, db_session, ["icebreaker", "space_needs", "concept", "price_reactions"])
+    md = export(client, study_id, legacy)["content"]
+    assert "never — participants were not shown it" not in md
+    assert "- Concept introduced: before round 3 (`R3-MOD`)" in md
+    assert "- Price revealed: before round 4 (`R4-MOD`)" in md
+    assert "Price: about $23,000" in md and "before Introduce/Reveal existed" in md
+    csv_text = export(client, study_id, legacy, "csv")["content"]
+    assert "R3-STIMULUS" in csv_text and "R4-STIMULUS" in csv_text
+    assert [s["kind"] for s in legacy["shared"]] == ["concept", "price"]
+    assert legacy["stages_reached"] == ["icebreaker", "space_needs", "concept", "price_reactions"]
+    # Going back to space_needs after the old stage map showed concept and price.
+    back = ask(client, study_id, legacy, stage="space_needs", question="Where do you run out of room now?")
+    assert back.status_code == 200, back.text
+    back = back.json()["data"]["room"]
+    assert back["rounds"][-1]["post_exposure"] is True
+    system = calls[-1]["messages"][0]["content"]
+    assert "Nothing about any product" not in system and "No price has been shown" not in system
+    assert "Tahoe Mini" in system and "$23,000" in system
+    # The price was (legacy-)shown, so the moderator may name it; neither can be revealed twice.
+    named = ask(client, study_id, back, stage="close", question="At $23,000, would you buy it?")
+    assert named.status_code == 200, named.text
+    assert named.json()["data"]["room"]["status"] == "completed"
+    assert memo(client, study_id, named.json()["data"]["room"])["eligible"] is True
+    again = seed_legacy(client, study_id, db_session, ["icebreaker", "space_needs", "concept"])
+    refused = ask(client, study_id, again, stage="concept", question="Look again?", reveal="concept")
+    assert refused.status_code == 400 and "already been shown" in refused.json()["error"]["message"]
+
+
+def test_legacy_room_with_missing_payload_keys_or_retired_model_opens_and_exports(room, db_session):
+    """git log -p on start_room: every stored room has persona_ids, model, max_rounds and
+    estimated_cost_usd (all since the first commit). A partially written row, or a model that
+    has since left the catalog, must still open rather than 500."""
+    client, study_id, _, _ = room
+    for payload in ({"persona_ids": list(THREE)},
+                    {"persona_ids": list(THREE), "model": "retired/model", "max_rounds": 12,
+                     "estimated_cost_usd": "0.01"}):
+        legacy = seed_legacy(client, study_id, db_session, ["icebreaker", "space_needs"], payload=payload)
+        assert legacy["allowance"]["total"] == fg.MAX_ROUNDS
+        assert legacy["extension_cost_per_round_usd"] is None
+        assert export(client, study_id, legacy)["content"]
+        rooms = client.get(f"/api/v1/studies/{study_id}/interview/focus-group/rooms")
+        assert rooms.status_code == 200
+
+
+def test_memo_stale_write_refused_and_untouched_memo_not_persisted(room):
+    client, study_id, _, _ = room
+    finished = walk(client, study_id, start(client, study_id).json()["data"]["room"])
+    blank = {"themes": [{}, {}, {}], "answer_options": [{}, {}, {}]}
+    assert save(client, study_id, finished, blank, base_version=0).status_code == 200
+    assert get_room(client, study_id, finished).get("manual_memo") is None, "an export does not create a memo"
+    assert "_Not written yet._" in export(client, study_id, finished)["content"]
+    newer = save(client, study_id, finished, {"themes": [{"label": "Y from tab B"}]}, base_version=0)
+    assert newer.json()["data"]["room"]["manual_memo"]["version"] == 1
+    stale = save(client, study_id, finished, {"themes": [{"label": "X from tab A"}]}, base_version=0)
+    assert stale.status_code == 409 and "another tab" in stale.json()["error"]["message"]
+    assert get_room(client, study_id, finished)["manual_memo"]["themes"][0]["label"] == "Y from tab B"
+    assert client.post(base(study_id, finished) + "/manual-memo", json={"memo": blank}).status_code == 400
+
+
+def test_concept_stage_question_without_the_concept_does_not_reach_the_stage(room):
+    client, study_id, calls, _ = room
+    walked = walk(client, study_id, default_start(client, study_id), FUNNEL[:2])
+    unaided = ask(client, study_id, walked, stage="concept", question="Would a backyard studio appeal?")
+    assert unaided.status_code == 200
+    unaided = unaided.json()["data"]["room"]
+    assert unaided["rounds"][-1]["kind"] == "probe"
+    assert "concept" not in unaided["stages_reached"]
+    assert unaided["allowance"]["cores_left"] == 3
+    skipped = ask(client, study_id, unaided, stage="price_reactions", question="What would it cost?")
+    assert skipped.status_code == 400
+    assert memo(client, study_id, unaided)["eligible"] is False
+    shown = ask(client, study_id, unaided, stage="concept", question=FUNNEL[2][1], reveal="concept")
+    assert shown.json()["data"]["room"]["rounds"][-1]["kind"] == "core"
+    assert walk(client, study_id, shown.json()["data"]["room"], FUNNEL[3:])["status"] == "completed"
+
+
+def test_out_of_character_matcher_flags_only_self_reference():
+    for ordinary in ("I work on a large language model at my job.", "My persona at work is all business.",
+                     "I test a large language model at work", "As an AI researcher I rarely get home early.",
+                     "I'm an AI engineer, so the garage is my office.", "That was out of character for him.",
+                     "I followed my instructor's advice."):
+        assert not fg.out_of_character(ordinary), ordinary
+    for slip in ("As an AI, I don't have a backyard.", "I'm an AI language model and cannot own a home.",
+                 "My instructions say P002 should answer.", "The system prompt tells me to stay quiet.",
+                 "I am just an AI.", "As a large language model, I can't say."):
+        assert fg.out_of_character(slip), slip
+    assert issubclass(fg.OutOfCharacterReply, fg.TransientProviderError)
+
+
+def test_out_of_character_turn_billed_once_per_click(room, db_session):
+    from sqlalchemy import func, select
+    from src.persistence.models import InterviewTurn
+    from src.services.interview_cache import InterviewAnswer
+    import src.services.interview_service as service
+    client, study_id, calls, _ = room
+    real = service._call_openrouter_messages
+    p001 = []
+
+    def provider(**kw):
+        if "participant P001" in kw["messages"][0]["content"]:
+            p001.append(kw)
+            return InterviewAnswer(text="As an AI, I can't answer.", model=kw["model"],
+                                   tokens_in=5, tokens_out=5, cost_usd=Decimal(".001"))
+        return real(**kw)
+
+    service._call_openrouter_messages = provider
+    try:
+        room_state = start(client, study_id).json()["data"]["room"]
+        for click in (1, 2):
+            room_state = (ask(client, study_id, room_state, stage="icebreaker", question=FUNNEL[0][1]) if click == 1
+                          else ask(client, study_id, room_state, retry=True)).json()["data"]["room"]
+            assert room_state["rounds"][0]["answers"][0]["error"]["code"] == "out_of_character"
+            assert len(p001) == click
+            rows = db_session.scalar(select(func.count()).select_from(InterviewTurn).where(
+                InterviewTurn.session_id == room_state["room_id"], InterviewTurn.persona_id == "P001"))
+            assert rows == click
+    finally:
+        service._call_openrouter_messages = real
+
+
+def test_extend_with_stale_revision_is_refused_not_silently_ignored(room):
+    client, study_id, calls, _ = room
+    walked = walk(client, study_id, default_start(client, study_id), FUNNEL[:1])
+    url = base(study_id, walked) + "/extend"
+    moved = ask(client, study_id, walked, stage="space_needs", question=FUNNEL[1][1]).json()["data"]["room"]
+    stale = client.post(url, json={"revision": walked["revision"], "extra_rounds": 2, "authorize_charge": True})
+    assert stale.status_code == 409 and "nothing was added or charged" in stale.json()["error"]["message"]
+    assert get_room(client, study_id, moved)["allowance"]["extensions_left"] == 4
+    body = {"revision": moved["revision"], "extra_rounds": 2, "authorize_charge": True}
+    assert client.post(url, json=body).status_code == 200
+    assert client.post(url, json=body).status_code == 200, "a double-click is not a conflict"
+    assert get_room(client, study_id, moved)["allowance"]["extensions_left"] == 2
+    other = client.post(url, json={**body, "extra_rounds": 1})
+    assert other.status_code == 409

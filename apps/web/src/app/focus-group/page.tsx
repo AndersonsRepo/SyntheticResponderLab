@@ -34,6 +34,7 @@ import {
   focusGroupPath,
   focusGroupSetupRefusal,
   formatFocusGroupCostEstimate,
+  manualMemoEdited,
   manualMemoFrom,
   MAX_ROUNDS,
   MIN_PERSONAS,
@@ -310,7 +311,8 @@ function FocusGroupPageContent() {
     return interviewOperation<{ room: FocusGroupRoom }>(
       studyId!,
       focusGroupPath(room!.room_id, "manual-memo"),
-      { memo: manualMemo }
+      // The version this page loaded: a save on top of a newer one (another tab) is refused.
+      { memo: manualMemo, base_version: room!.manual_memo?.version ?? 0 }
     ).then((result) => {
       setRoom(result.room);
       return result;
@@ -351,11 +353,13 @@ function FocusGroupPageContent() {
 
   async function exportRoom(format: "markdown" | "csv") {
     if (!studyId || !room) return;
-    // Save the memo first so the file carries what the student sees on screen, not the
-    // last explicit save. A save that fails must never block the export itself.
+    // Save unsaved edits first so the file carries what the student sees on screen. An
+    // untouched form is not saved (no blank draft, nothing stale to push over a newer tab's
+    // memo). A save that fails must never block the export itself.
     let saveError = "";
+    const edited = manualMemoEdited(room.manual_memo, manualMemo);
     const result = await run(() =>
-      postManualMemo()
+      (edited ? postManualMemo() : Promise.resolve())
         .catch((err: Error) => {
           saveError = `Your latest memo edits were not saved (${err.message}); the file has your last saved memo.`;
         })
@@ -379,7 +383,7 @@ function FocusGroupPageContent() {
     URL.revokeObjectURL(url);
   }
 
-  const askBlocked = askRefusal(room, stage, target) !== null;
+  const askBlocked = askRefusal(room, stage, target, pendingReveal) !== null;
   const answered = collectedAnswers(room);
   const turns = quotableTurns(room);
   const missing = missingAnswers(room);
@@ -690,7 +694,7 @@ function FocusGroupPageContent() {
             <Button onClick={() => askRoom()} disabled={busy || !question.trim() || askBlocked}>
               {busy
                 ? "Asking…"
-                : questionKind(room, stage) === "probe"
+                : questionKind(room, stage, pendingReveal) === "probe"
                   ? "Ask follow-up"
                   : "Ask core question"}
             </Button>
@@ -713,9 +717,9 @@ function FocusGroupPageContent() {
           <p className="text-sm" data-testid="focus-group-allowance">
             {allowanceLine(room.allowance)}
           </p>
-          {askRefusal(room, stage, target) ? (
+          {askRefusal(room, stage, target, pendingReveal) ? (
             <p role="status" className="text-sm text-app-muted">
-              {askRefusal(room, stage, target)}
+              {askRefusal(room, stage, target, pendingReveal)}
             </p>
           ) : null}
           {room.allowance && room.allowance.extensions_left > 0 && room.status !== "completed" && room.status !== "cancelled" ? (
