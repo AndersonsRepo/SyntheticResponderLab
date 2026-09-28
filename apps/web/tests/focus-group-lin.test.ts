@@ -71,7 +71,8 @@ test("manual memo: the form comes before the optional AI draft and each turn sho
   assert.match(memoFormSource, /question topic/);
   assert.match(memoFormSource, /would change about how you moderated/);
   // Exporting saves the on-screen memo first, so typed work is never left out of the file.
-  assert.match(pageSource, /postManualMemo\(\)\.then\(\(\) =>\s*interviewOperation/);
+  assert.match(pageSource, /postManualMemo\(\)\s*\.catch\([\s\S]*?\.then\(\(\) =>\s*interviewOperation/,
+    "a failed memo save never blocks the export");
 });
 
 test("manual memo: a failed AI attempt's retry says it is a new charge and what the failure cost", () => {

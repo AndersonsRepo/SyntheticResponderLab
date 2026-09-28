@@ -133,6 +133,9 @@ def test_draft_memo_is_kept_and_the_export_names_what_is_missing(room):
     assert saved["manual_memo"]["themes"][0]["label"] == "Cold garage"
     md = export(client, study_id, finished)["content"]
     assert "DRAFT — not complete" in md and "at least 3 themes" in md
+    padded = {"themes": [{"label": "Cold garage"}, {}, {}], "answer_options": [{}, {}, {}]}
+    save(client, study_id, finished, padded)
+    assert "(no label)" not in export(client, study_id, finished)["content"], "form padding is not content"
 
 
 def test_memo_input_bounds_refused_and_nothing_stored(room):

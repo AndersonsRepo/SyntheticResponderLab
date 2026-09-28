@@ -10,6 +10,7 @@ Checks run from this directory. `P` = `cd ../.. && ./apps/api/.venv/bin/python -
 - [x] The student can export the transcript and the human-written memo (Markdown and CSV) without any AI memo ever succeeding; each quote in the export carries its turn ID, stage and round. — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'export_manual_memo'`
 - [x] A failed AI memo attempt keeps the transcript and the student's memo intact, says why it failed and exactly what it charged, and the retry control says a retry is a new charge; the student can finish and export the manual memo without retrying. — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'failed_ai_memo_preserves'`
 - [x] A half-finished memo is saved as a draft rather than lost, and the export marks it a draft and names what is missing. — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'draft_memo'`
+- [x] If saving the memo is refused (say a field is too long), Export still downloads the transcript with the last saved memo and tells the student their latest edits were not saved. — check: `sh ./webcheck.sh 'manual memo: the form comes before'`
 - [x] Oversized or malformed memo input is refused with a plain message and stores nothing. — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'memo_input_bounds'`
 - [x] Every export and the focus-group page carry "Synthetic rehearsal - not PA3.5 live fieldwork". — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'rehearsal_label' && cd plans/lin-classroom-fixes && sh ./webcheck.sh 'rehearsal label'`
 - [x] On the page the manual memo form comes before the optional AI feedback, each answered turn shows its ID with a "Quote" control, and a saved draft is restored when the room is re-opened. — check: `sh ./webcheck.sh 'manual memo'`
@@ -65,3 +66,34 @@ Checks run from this directory. `P` = `cd ../.. && ./apps/api/.venv/bin/python -
 
 - Real-participant recruitment or any claim that personas predict real customers.
 - Instructor authoring UI for the concept card (the card is the instructor-approved text in code).
+
+## Adversarial pass (own, in place of Sol/Codex — rate-limited)
+
+Found and fixed: out-of-character check ran before the measured-cost budget check; export
+listed the form's blank padding themes; a refused memo save aborted the whole export (now
+exports the last saved memo and says so). Checked and left: stale-revision reveal is dropped
+client-side only if the server ignored the ask (no charge); the student can still say a price
+in words ("twenty-three thousand") — it is in the transcript, so "what participants saw" stays
+visible, but it is not refused.
+
+## Design calls made without asking (file — how to revert)
+
+1. Before Reveal price, a dollar figure in ANY moderator question is refused, including at the price stage (old rule allowed it there). — `focus_group.py` ask_round `_MONEY` check; revert by re-adding the stage condition.
+2. Concept facts reach participants only on a question that introduces the card (`reveal: "concept"`); a concept-stage question without it gets no product facts. The page pre-selects introduce when arriving at the concept stage. — `_check_reveal`, `page.tsx` stage onClick.
+3. No concept image: none was found in the repo, so the card has description + specs only. — `CONCEPT_CARD`.
+4. Roster names marked "fictional" (ACS PUMS has no names); usable outdoor space and willingness to add space are "unknown" for every roster persona. — `persona_seed.py persona_card`.
+5. PA3.5 screener = homeowner/landowner, usable outdoor space, open to adding space (from Lin's fix-1 wording). — `persona_seed.py screener`.
+6. Core vs probe is derived: the first question at a stage is core, later ones are probes; probes cannot spend a question a not-yet-asked stage needs. Extension capped at 4 extra probes per room. Asking the close question still completes the room (no probes after close). — `allowance`, `MAX_EXTENSION_ROUNDS`.
+7. Out-of-character guard is a phrase list; a flagged reply is charged, withheld and retryable. — `_OUT_OF_CHARACTER`.
+8. Manual memo saves drafts in any room state (incl. cancelled), completeness checked live; answer options may optionally cite a turn. Turn IDs are `R<round>-<speaker>`, derived on read. — `manual_memo_check`, `turn_id`.
+9. CSV export's first row is the rehearsal label (then the header). — `build_room_export`.
+10. Student personas count toward the room's 3-seat minimum but every export says 0 real PA3.5 participants; IDs are S01–S20 per study; no delete endpoint. — `focus_group_personas.py`.
+11. The AI memo button is now labelled optional feedback and sits after the manual form. — `page.tsx`.
+
+## Unverified
+
+- The live model actually obeys "no price has been shown — frame guesses as guesses" and "never mention being an AI"; tests prove only that the price is absent from every prompt and that flagged replies are withheld. — settle: one real room on staging through all five stages without Reveal price, read the transcript.
+- The out-of-character phrase list has an acceptable false-positive rate on real replies. — settle: grep production `focus_group_failure ... code=out_of_character` logs after the first class.
+- Rooms already in progress at deploy time: their earlier rounds had the concept/price injected by stage, but new rounds only get what is revealed; the student must click Introduce/Reveal in such a room. — settle: open one pre-deploy room on staging after deploy.
+- Layout/readability of the new cards, side panel and forms in a real browser (only `next build` and source checks ran; no screenshot). — settle: click through /focus-group on a preview deploy.
+- Deploy order: web and API ship separately; the new web sends `reveal`/`recipients`/`max_rounds=5+probes` which an old API ignores. — settle: deploy API first.

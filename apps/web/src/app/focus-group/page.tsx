@@ -352,9 +352,14 @@ function FocusGroupPageContent() {
   async function exportRoom(format: "markdown" | "csv") {
     if (!studyId || !room) return;
     // Save the memo first so the file carries what the student sees on screen, not the
-    // last explicit save.
+    // last explicit save. A save that fails must never block the export itself.
+    let saveError = "";
     const result = await run(() =>
-      postManualMemo().then(() =>
+      postManualMemo()
+        .catch((err: Error) => {
+          saveError = `Your latest memo edits were not saved (${err.message}); the file has your last saved memo.`;
+        })
+        .then(() =>
         interviewOperation<{ export: { content: string; filename: string; media_type: string } }>(
           studyId,
           focusGroupPath(room.room_id, "export"),
@@ -362,6 +367,7 @@ function FocusGroupPageContent() {
         )
       )
     );
+    if (saveError) setError(saveError);
     if (!result) return;
     const url = URL.createObjectURL(
       new Blob([result.export.content], { type: result.export.media_type })

@@ -598,14 +598,14 @@ def ask_round(session, settings, study, room_id, payload):
                 api_key=settings.openrouter_api_key or "", model=model,
                 messages=[*prior, {"role": "user", "content": question_text}],
                 timeout=PROVIDER_TIMEOUT_SECONDS, max_attempts=1)
-            if out_of_character(result.text):
-                # Raised, not returned: a billed reply is still recorded, and it never
-                # reaches the answer cache, so a retry asks again instead of replaying it.
-                raise TransientProviderError(OUT_OF_CHARACTER_MESSAGE, measured_usage=result)
             try:
                 enforce_measured_cost(snapshot, cost_usd=result.cost_usd)
             except QuotaExceededApiError as exc:
                 budget_error = exc
+            if out_of_character(result.text):
+                # Raised, not returned: a billed reply is still recorded, and it never
+                # reaches the answer cache, so a retry asks again instead of replaying it.
+                raise TransientProviderError(OUT_OF_CHARACTER_MESSAGE, measured_usage=result)
             return result
 
         def log(error):
@@ -628,7 +628,9 @@ def ask_round(session, settings, study, room_id, payload):
             log(error)
             # A budget stop ends the room's spending; one persona failing only leaves a
             # visible hole, so the personas after it still get their turn.
-            return exc if isinstance(exc, QuotaExceededApiError) else None
+            if isinstance(exc, QuotaExceededApiError):
+                return exc
+            return budget_error  # an out-of-character reply can still be the one that hit the cap
         _record_usage(session, study, room_id, answer["persona_id"], reply)
         charged_any = charged_any or reply.cost_usd > 0
         if out_of_character(reply.text):  # an answer cached before this guard existed
@@ -1158,13 +1160,14 @@ def _manual_memo_rows(status):
         rows.append((field, turn["persona_id"] if turn and not why else "", label, quote.get("text", ""),
                      "not_linked" if why else "linked", quote.get("turn_id", ""), why or turn))
 
-    for theme in memo["themes"]:
+    # The form pads to three themes and three options; blank padding is not memo content.
+    for theme in [t for t in memo["themes"] if t["label"] or t["synthesis"] or t["quotes"]]:
         rows.append(("theme", "", theme["label"], theme["synthesis"], "", "", None))
         for quote in theme["quotes"]:
             quote_row("theme_quote", theme["label"], quote)
     rows.append(("surprise", "", "", memo["surprise"]["summary"], "", "", None))
     quote_row("surprise_quote", "", memo["surprise"]["quote"])
-    for option in memo["answer_options"]:
+    for option in [o for o in memo["answer_options"] if o["text"] or o["topic"]]:
         turn = turns.get(option["turn_id"])
         rows.append(("answer_option", turn["persona_id"] if turn else "", option["topic"], option["text"],
                      "linked" if turn else ("not_linked" if option["turn_id"] else ""), option["turn_id"], turn))
