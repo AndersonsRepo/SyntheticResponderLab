@@ -114,7 +114,7 @@ function AiInterviewsYouContent() {
         <GlassPanel className="flex flex-col gap-4 p-5" aria-label="Interview transcript">
           <p className="text-xs text-app-muted">
             {interview.ended ? "Interview ended" : `Question ${answeredCount + 1} of ${interview.turnLimit}`}
-            {" · "}Measured cost: ${interview.costUsd}
+            {" · "}Measured cost: ${Number(interview.costUsd).toFixed(4)}
           </p>
           <ol className="flex flex-col gap-3">
             {interview.messages.map((message, index) => (
