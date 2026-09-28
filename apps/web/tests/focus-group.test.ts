@@ -221,7 +221,7 @@ test("the page shows the stage the student is in and lets them step back", () =>
 test("the page puts the actual spend next to the estimate it was approved against", () => {
   assert.match(
     pageSource,
-    /Estimated \{formatFocusGroupCostEstimate\(Number\(room\.estimated_cost_usd\)\)\}[\s\S]*?actually[\s\S]*?room\.session_usage\.cost_usd/
+    /Estimated \{formatFocusGroupCostEstimate\(Number\(room\.estimated_total_cost_usd \?\? room\.estimated_cost_usd\)\)\}[\s\S]*?actually[\s\S]*?room\.session_usage\.cost_usd/
   );
 });
 

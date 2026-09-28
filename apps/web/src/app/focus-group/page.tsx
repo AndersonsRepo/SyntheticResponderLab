@@ -16,6 +16,13 @@ import {
 import {
   addQuote,
   aiMemoRetryLabel,
+  allowanceLine,
+  askRefusal,
+  CORE_QUESTIONS,
+  DEFAULT_PROBES,
+  nextStage,
+  questionKind,
+  unansweredNote,
   canAskStage,
   collectedAnswers,
   estimateFocusGroupCost,
@@ -78,7 +85,15 @@ function FocusGroupPageContent() {
   const [selectedPersonaIds, setSelectedPersonaIds] = useState<string[]>([]);
   const [modelId, setModelId] = useState("");
   const [expensiveOptIn, setExpensiveOptIn] = useState(false);
-  const [plannedRounds, setPlannedRounds] = useState<number>(FOCUS_GROUP_STAGES.length);
+  const [plannedProbes, setPlannedProbes] = useState<number>(DEFAULT_PROBES);
+  // Core questions are fixed (one per stage); the student plans probes on top of them.
+  const plannedRounds = CORE_QUESTIONS + plannedProbes;
+  const [target, setTarget] = useState<{ mode: "room" | "selected"; selected: string[] }>({
+    mode: "room",
+    selected: [],
+  });
+  const [extendBy, setExtendBy] = useState(2);
+  const [confirmExtend, setConfirmExtend] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [room, setRoom] = useState<FocusGroupRoom | null>(null);
   const [rooms, setRooms] = useState<FocusGroupRoom[]>([]);
@@ -188,6 +203,7 @@ function FocusGroupPageContent() {
           stage,
           question: question.trim(),
           ...(pendingReveal && !extra.retry ? { reveal: pendingReveal } : {}),
+          ...(target.mode === "selected" && !extra.retry ? { recipients: target.selected } : {}),
           ...extra,
         }
       )
@@ -197,6 +213,19 @@ function FocusGroupPageContent() {
       if (!extra.retry) setPendingReveal(null);
       setMemo(null);
     }
+  }
+
+  async function extendRoom() {
+    if (!studyId || !room) return;
+    const result = await run(() =>
+      interviewOperation<{ room: FocusGroupRoom }>(studyId, focusGroupPath(room.room_id, "extend"), {
+        revision: room.revision,
+        extra_rounds: extendBy,
+        authorize_charge: true,
+      })
+    );
+    setConfirmExtend(false);
+    if (result) setRoom(result.room);
   }
 
   async function openRoom(roomId: string) {
@@ -279,6 +308,7 @@ function FocusGroupPageContent() {
     URL.revokeObjectURL(url);
   }
 
+  const askBlocked = askRefusal(room, stage, target) !== null;
   const answered = collectedAnswers(room);
   const turns = quotableTurns(room);
   const missing = missingAnswers(room);
@@ -332,13 +362,13 @@ function FocusGroupPageContent() {
           </ul>
 
           <label className="flex items-center gap-3 text-sm">
-            Questions planned
+            Follow-up probes, on top of {CORE_QUESTIONS} core questions (one per stage)
             <input
               type="number"
-              min={1}
-              max={MAX_ROUNDS}
-              value={plannedRounds}
-              onChange={(event) => setPlannedRounds(Number(event.target.value))}
+              min={0}
+              max={MAX_ROUNDS - CORE_QUESTIONS}
+              value={plannedProbes}
+              onChange={(event) => setPlannedProbes(Number(event.target.value))}
               className="w-20 rounded-lg border border-app-border bg-transparent px-3 py-2"
             />
           </label>
@@ -454,20 +484,125 @@ function FocusGroupPageContent() {
             />
           ) : null}
 
+          <fieldset className="flex flex-wrap items-center gap-3 text-sm" aria-label="Who the question is for">
+            <legend className="sr-only">Who the question is for</legend>
+            <label className="flex items-center gap-1">
+              <input
+                type="radio"
+                name="recipients"
+                checked={target.mode === "room"}
+                onChange={() => setTarget({ mode: "room", selected: [] })}
+              />
+              Whole room
+            </label>
+            <label className="flex items-center gap-1">
+              <input
+                type="radio"
+                name="recipients"
+                checked={target.mode === "selected"}
+                onChange={() => setTarget((current) => ({ ...current, mode: "selected" }))}
+              />
+              Selected participant(s)
+            </label>
+            {target.mode === "selected"
+              ? room.persona_ids.map((personaId) => (
+                  <label key={personaId} className="flex items-center gap-1">
+                    <input
+                      type="checkbox"
+                      checked={target.selected.includes(personaId)}
+                      onChange={() =>
+                        setTarget((current) => ({
+                          ...current,
+                          selected: current.selected.includes(personaId)
+                            ? current.selected.filter((id) => id !== personaId)
+                            : [...current.selected, personaId],
+                        }))
+                      }
+                    />
+                    {personaId}
+                  </label>
+                ))
+              : null}
+            {target.mode === "selected" ? (
+              <span className="text-app-muted">The others listen and stay silent on purpose.</span>
+            ) : null}
+          </fieldset>
+
           <div className="flex gap-2">
             <input
               value={question}
               onChange={(event) => setQuestion(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === "Enter") askRoom();
+                if (event.key === "Enter" && !askBlocked) askRoom();
               }}
               placeholder="Ask the room…"
               className="flex-1 rounded-lg border border-app-border bg-transparent px-3 py-2"
             />
-            <Button onClick={() => askRoom()} disabled={busy || !question.trim()}>
-              {busy ? "Asking…" : "Ask the room"}
+            <Button onClick={() => askRoom()} disabled={busy || !question.trim() || askBlocked}>
+              {busy
+                ? "Asking…"
+                : questionKind(room, stage) === "probe"
+                  ? "Ask follow-up"
+                  : "Ask core question"}
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                const next = nextStage(stage);
+                if (!next) return;
+                setStage(next);
+                const introduce =
+                  next === "concept" && room.concept_card && !revealRefusal(room, next, "concept");
+                setQuestion(introduce ? room.concept_card!.introduction : STAGE_PROMPTS[next]);
+                setPendingReveal(introduce ? "concept" : null);
+              }}
+              disabled={busy || !nextStage(stage) || !canAskStage(room, nextStage(stage)!)}
+            >
+              {nextStage(stage) ? `Next stage: ${FOCUS_GROUP_STAGE_LABELS[nextStage(stage)!]} →` : "Last stage"}
             </Button>
           </div>
+          <p className="text-sm" data-testid="focus-group-allowance">
+            {allowanceLine(room.allowance)}
+          </p>
+          {askRefusal(room, stage, target) ? (
+            <p role="status" className="text-sm text-app-muted">
+              {askRefusal(room, stage, target)}
+            </p>
+          ) : null}
+          {room.allowance && room.allowance.extensions_left > 0 && room.status !== "completed" && room.status !== "cancelled" ? (
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <label className="flex items-center gap-2">
+                Extend by
+                <input
+                  type="number"
+                  min={1}
+                  max={room.allowance.extensions_left}
+                  value={extendBy}
+                  onChange={(event) => setExtendBy(Number(event.target.value))}
+                  className="w-16 rounded-lg border border-app-border bg-transparent px-2 py-1"
+                />
+                probe(s)
+              </label>
+              <Button variant="secondary" onClick={() => setConfirmExtend(true)} disabled={busy}>
+                Extend the room
+              </Button>
+              {confirmExtend ? (
+                <span role="dialog" aria-label="Confirm extension cost" className="flex items-center gap-2">
+                  About{" "}
+                  <strong>
+                    {formatFocusGroupCostEstimate(Number(room.extension_cost_per_round_usd ?? 0) * extendBy)}
+                  </strong>{" "}
+                  more, within the same budget.
+                  <Button onClick={extendRoom} disabled={busy}>
+                    Confirm and extend
+                  </Button>
+                  <Button variant="secondary" onClick={() => setConfirmExtend(false)} disabled={busy}>
+                    Cancel
+                  </Button>
+                </span>
+              ) : null}
+            </div>
+          ) : null}
 
           {room.status === "budget_stopped" || room.status === "failed" ? (
             <div role="alert" className="rounded-xl border border-app-border p-4 text-sm">
@@ -489,15 +624,20 @@ function FocusGroupPageContent() {
                 <p className="text-xs uppercase tracking-wide text-app-muted">
                   {FOCUS_GROUP_STAGE_LABELS[round.stage]}
                 </p>
-                <p className="font-semibold">Moderator: {round.question}</p>
-                {round.answers.map((answer) => (
+                <p className="font-semibold">
+                  Moderator{round.recipients ? ` (to ${round.recipients.join(", ")})` : ""}: {round.question}
+                  {round.kind === "probe" ? (
+                    <span className="ml-2 text-xs font-normal text-app-muted">follow-up probe</span>
+                  ) : null}
+                </p>
+                {round.answers.filter((answer) => answer.status !== "silent").map((answer) => (
                   <div key={`${round.index}-${answer.persona_id}`} className="flex flex-wrap items-start gap-2 text-sm">
                     <p className="flex-1">
                       <strong>{answer.persona_id}:</strong>{" "}
                       {answer.status === "answered" ? (
                         answer.text
                       ) : (
-                        <em>no answer yet — {answer.error?.message ?? "not run"}</em>
+                        <em className="text-app-muted">{unansweredNote(answer)}</em>
                       )}{" "}
                       <span className="text-xs text-app-muted">[{answer.turn_id}]</span>
                     </p>
@@ -527,12 +667,21 @@ function FocusGroupPageContent() {
                     ) : null}
                   </div>
                 ))}
+                {round.recipients ? (
+                  <p className="text-xs text-app-muted">
+                    {round.answers
+                      .filter((answer) => answer.status === "silent")
+                      .map((answer) => answer.persona_id)
+                      .join(", ")}{" "}
+                    listened and stayed silent — the question was not for them.
+                  </p>
+                ) : null}
               </li>
             ))}
           </ol>
 
           <p className="text-sm" data-testid="focus-group-actual">
-            Estimated {formatFocusGroupCostEstimate(Number(room.estimated_cost_usd))} · actually
+            Estimated {formatFocusGroupCostEstimate(Number(room.estimated_total_cost_usd ?? room.estimated_cost_usd))} · actually
             spent ${Number(room.session_usage.cost_usd).toFixed(4)} across {answered.length} answers
           </p>
 

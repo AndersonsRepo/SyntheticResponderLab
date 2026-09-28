@@ -31,7 +31,7 @@ const CLASSROOM_INTERVIEW_API_RULES = [
   // Focus group: its own lane here too, so widening it never widens the interview lane.
   { method: "POST", pattern: /^\/api\/backend\/api\/v1\/studies\/[A-Za-z0-9_-]+\/interview\/focus-group\/rooms\/?$/ },
   { method: "GET", pattern: /^\/api\/backend\/api\/v1\/studies\/[A-Za-z0-9_-]+\/interview\/focus-group\/rooms(?:\/[A-Za-z0-9_-]+(?:\/memo)?)?\/?$/ },
-  { method: "POST", pattern: /^\/api\/backend\/api\/v1\/studies\/[A-Za-z0-9_-]+\/interview\/focus-group\/rooms\/[A-Za-z0-9_-]+\/(?:ask|cancel|memo|manual-memo|export)\/?$/ },
+  { method: "POST", pattern: /^\/api\/backend\/api\/v1\/studies\/[A-Za-z0-9_-]+\/interview\/focus-group\/rooms\/[A-Za-z0-9_-]+\/(?:ask|cancel|memo|manual-memo|extend|export)\/?$/ },
   { method: "DELETE", pattern: /^\/api\/backend\/api\/v1\/studies\/[A-Za-z0-9_-]+\/interview\/focus-group\/rooms\/[A-Za-z0-9_-]+\/?$/ },
 ] as const;
 

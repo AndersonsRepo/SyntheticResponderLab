@@ -42,6 +42,10 @@ STAGE_LABELS = {
 MIN_PERSONAS = 3          # Lin: "3 is the floor — a group, not an interview"
 MAX_PERSONAS = 8
 MAX_ROUNDS = 12
+# Lin fix 4: five core questions (one per stage) plus three follow-up probes by default.
+CORE_QUESTIONS = 5
+DEFAULT_ROUNDS = CORE_QUESTIONS + 3
+MAX_EXTENSION_ROUNDS = 4
 PROVIDER_TIMEOUT_SECONDS = 60
 
 # Planning allowance for ONE persona turn in a room (the transcript is resent each
@@ -233,6 +237,8 @@ YOUR PERSONA:
 {product}{stance_block}{manner_block}
 INSTRUCTIONS:
 - Stay fully in character. Answer the moderator as this person would, in first person.
+- Never mention being an AI, a model, a simulation, a prompt or instructions — not even to
+  explain why you are quiet. If the moderator addresses someone else, that question is not for you.
 - You know only what is listed above and what was said in the room. Do not invent product
   details (size, features, amenities, price) you were not shown.{price_rule}
 - This is a group, not an interview. Whenever other participants' answers are shown to you,
@@ -297,6 +303,11 @@ def room_status(session, settings, study, room_id, room=None):
         # same IDs a new one does.
         "rounds": _with_turn_ids(state.get("rounds", [])),
         "manual_memo_check": manual_memo_check(state),
+        "allowance": allowance(room.payload_json, state),
+        "estimated_total_cost_usd": str(Decimal(room.payload_json["estimated_cost_usd"]) + sum(
+            (Decimal(e["estimated_cost_usd"]) for e in state.get("extensions", [])), Decimal("0"))),
+        "extension_cost_per_round_usd": str(estimate_room_cost_usd(
+            persona_count=len(room.payload_json["persona_ids"]), rounds=1, model_id=room.payload_json["model"])),
         "rehearsal_label": REHEARSAL_LABEL,
         # The moderator sees the price; participants do not until it is revealed.
         "concept_card": {**CONCEPT_CARD, "text": CONCEPT_STIMULUS, "price": PRICE},
@@ -344,7 +355,7 @@ def start_room(session, settings, study, payload):
             f"A focus group needs at least {MIN_PERSONAS} personas — fewer than that is an interview, not a group.")
     if len(persona_ids) > MAX_PERSONAS:
         raise ValidationApiError(f"A room holds at most {MAX_PERSONAS} personas.")
-    rounds = payload.get("max_rounds", MAX_ROUNDS)
+    rounds = payload.get("max_rounds", DEFAULT_ROUNDS)
     if type(rounds) is not int or not 1 <= rounds <= MAX_ROUNDS:
         raise ValidationApiError(f"Plan between 1 and {MAX_ROUNDS} questions for the room.")
     model = payload.get("model")
@@ -388,8 +399,48 @@ def cancel_room(session, settings, study, room_id):
 
 
 def _missing(state):
+    # "silent" is a participant the question was not addressed to: intended, not a hole.
     return [(r["index"], a["persona_id"]) for r in state.get("rounds", [])
-            for a in r["answers"] if a["status"] != "answered"]
+            for a in r["answers"] if a["status"] == "missing"]
+
+
+def _moderator_line(round_):
+    to = round_.get("recipients")
+    return f"Moderator (to {', '.join(to)}): {round_['question']}" if to else f"Moderator: {round_['question']}"
+
+
+# A participant talking about being an AI, its prompt or its instructions is out of
+# character — the "P002 only" failure Lin saw. Such a reply never enters the dialogue.
+# ponytail: a phrase list, not a classifier. It only catches meta-talk about the setup;
+# a subtler slip gets through, and a persona saying "as an AI" in some story is withheld
+# (charged, retryable). Upgrade to a judged check if false positives show up in logs.
+_OUT_OF_CHARACTER = re.compile(
+    r"\b(?:as an ai|i(?:'m| am) (?:just )?an? (?:ai|artificial intelligence|language model|chatbot)"
+    r"|(?:large )?language model|my (?:system )?prompt|system prompt|my instructions|i was instructed"
+    r"|(?:out of|stay(?:ing)? in|break(?:ing)?) character|i(?:'m| am) (?:just )?role-?playing|(?:this|my) persona"
+    r"|simulated (?:persona|participant|focus group))\b", re.I)
+
+
+def out_of_character(text):
+    return bool(_OUT_OF_CHARACTER.search(text or ""))
+
+
+OUT_OF_CHARACTER_MESSAGE = ("The reply stepped out of character, so it was kept out of the "
+                            "discussion. Retry this turn.")
+
+
+def allowance(config, state):
+    """Core questions are one per stage and are reserved: a probe may never spend the
+    question a stage still needs, so a room can always reach its close."""
+    total = config["max_rounds"] + state.get("extra_rounds", 0)
+    rounds = state.get("rounds", [])
+    asked_stages = {r["stage"] for r in rounds}
+    cores_left = len([s for s in STAGES if s not in asked_stages])
+    probes_used = sum(1 for r in rounds if r.get("kind") == "probe")
+    return {"total": total, "used": len(rounds), "cores_total": CORE_QUESTIONS,
+            "cores_left": cores_left, "probes_used": probes_used,
+            "probes_left": max(total - len(rounds) - cores_left, 0),
+            "extensions_left": MAX_EXTENSION_ROUNDS - state.get("extra_rounds", 0)}
 
 
 def _prior_messages(state, persona_id):
@@ -404,7 +455,7 @@ def _prior_messages(state, persona_id):
         answers = {a["persona_id"]: a for a in round_["answers"] if a["status"] == "answered"}
         if not answers:
             continue
-        messages.append({"role": "user", "content": f"Moderator: {round_['question']}"})
+        messages.append({"role": "user", "content": _moderator_line(round_)})
         own = answers.get(persona_id)
         if own:
             messages.append({"role": "assistant", "content": own["text"]})
@@ -437,7 +488,7 @@ def ask_round(session, settings, study, room_id, payload):
     if retry:
         if not _missing(state):
             return room_status(session, settings, study, room_id)
-        targets = [r for r in state["rounds"] if any(a["status"] != "answered" for a in r["answers"])]
+        targets = [r for r in state["rounds"] if any(a["status"] == "missing" for a in r["answers"])]
         stage = targets[-1]["stage"]
     else:
         stage = str(payload.get("stage") or STAGES[state["stage_index"]])
@@ -460,8 +511,16 @@ def ask_round(session, settings, study, room_id, payload):
             raise ValidationApiError(
                 f"Work the funnel in order: {STAGE_LABELS[STAGES[furthest + 1]]} comes before "
                 f"{STAGE_LABELS[stage]}.")
-        if len(state["rounds"]) >= room.payload_json["max_rounds"]:
+        kind = "probe" if any(r["stage"] == stage for r in state["rounds"]) else "core"
+        left = allowance(room.payload_json, state)
+        if left["used"] >= left["total"]:
             raise ValidationApiError("This room has used all the questions it was started with.")
+        if kind == "probe" and left["probes_left"] <= 0:
+            raise ValidationApiError(
+                f"No follow-up probes left: the remaining {left['cores_left']} question(s) are held for "
+                "the stages you have not asked yet. Move to the next stage, or extend the room for "
+                "more probes.")
+        recipients = _check_recipients(room.payload_json["persona_ids"], payload.get("recipients"))
         question = str(payload.get("question") or "").strip()
         if not question:
             raise ValidationApiError("Type the question you want to put to the room.")
@@ -477,9 +536,11 @@ def ask_round(session, settings, study, room_id, payload):
         # present it as pre-exposure data (refuter FG-C).
         post_exposure = STAGES.index(stage) < STAGES.index("concept") and bool(shown)
         round_ = {"index": len(state["rounds"]), "stage": stage, "question": question,
-                  "post_exposure": post_exposure,
+                  "post_exposure": post_exposure, "kind": kind, "recipients": recipients,
                   **({"stimulus": {"kind": reveal, "text": STIMULI[reveal]}} if reveal else {}),
-                  "answers": [{"persona_id": pid, "text": "", "status": "missing", "error": None}
+                  "answers": [{"persona_id": pid, "text": "",
+                               "status": "missing" if not recipients or pid in recipients else "silent",
+                               "error": None}
                               for pid in room.payload_json["persona_ids"]]}
         state["rounds"].append(round_)
         targets = [round_]
@@ -499,7 +560,7 @@ def ask_round(session, settings, study, room_id, payload):
                   "content": build_room_system_prompt(
                       persona.profile_json, shared_stimuli(state["rounds"], round_["index"]), stance, manner)},
                  *_prior_messages(history, answer["persona_id"])]
-        question_text = round_["question"]
+        question_text = _moderator_line(round_)
         budget_error = None
 
         def provider():
@@ -516,8 +577,12 @@ def ask_round(session, settings, study, room_id, payload):
                 raise ConflictApiError("OPENROUTER_API_KEY is not configured.")
             result = service._call_openrouter_messages(
                 api_key=settings.openrouter_api_key or "", model=model,
-                messages=[*prior, {"role": "user", "content": f"Moderator: {question_text}"}],
+                messages=[*prior, {"role": "user", "content": question_text}],
                 timeout=PROVIDER_TIMEOUT_SECONDS, max_attempts=1)
+            if out_of_character(result.text):
+                # Raised, not returned: a billed reply is still recorded, and it never
+                # reaches the answer cache, so a retry asks again instead of replaying it.
+                raise TransientProviderError(OUT_OF_CHARACTER_MESSAGE, measured_usage=result)
             try:
                 enforce_measured_cost(snapshot, cost_usd=result.cost_usd)
             except QuotaExceededApiError as exc:
@@ -538,6 +603,8 @@ def ask_round(session, settings, study, room_id, payload):
                 _record_usage(session, study, room_id, answer["persona_id"], measured)
                 charged_any = True
             error = exc if isinstance(exc, ApiError) else ProviderUnavailableApiError(str(exc))
+            if str(exc) == OUT_OF_CHARACTER_MESSAGE:
+                error.code = "out_of_character"
             answer["error"] = {"code": error.code, "message": error.message}
             log(error)
             # A budget stop ends the room's spending; one persona failing only leaves a
@@ -545,6 +612,9 @@ def ask_round(session, settings, study, room_id, payload):
             return exc if isinstance(exc, QuotaExceededApiError) else None
         _record_usage(session, study, room_id, answer["persona_id"], reply)
         charged_any = charged_any or reply.cost_usd > 0
+        if out_of_character(reply.text):  # an answer cached before this guard existed
+            answer["error"] = {"code": "out_of_character", "message": OUT_OF_CHARACTER_MESSAGE}
+            return budget_error
         answer.update(text=reply.text, status="answered", error=None)
         if budget_error is not None:
             log(budget_error)
@@ -555,8 +625,8 @@ def ask_round(session, settings, study, room_id, payload):
         # same prompts the first attempt used and lands on the same cache keys.
         history = {"rounds": state["rounds"][:round_["index"]]}
         for answer in round_["answers"]:
-            if answer["status"] == "answered":
-                continue  # A retry re-runs only the turns that are actually missing.
+            if answer["status"] != "missing":
+                continue  # A retry re-runs only the turns that are actually missing; silent stays silent.
             stopped = run_answer(round_, answer, history)
             if stopped is not None:
                 break
@@ -599,6 +669,22 @@ def ask_round(session, settings, study, room_id, payload):
     return status
 
 
+def _check_recipients(seats, recipients):
+    """None is the whole room. A selection is a subset of the seats; naming every seat is
+    the whole room too."""
+    if recipients is None:
+        return None
+    if (not isinstance(recipients, list) or not recipients
+            or any(not isinstance(pid, str) for pid in recipients)):
+        raise ValidationApiError("Choose at least one participant to ask, or ask the whole room.")
+    if len(set(recipients)) != len(recipients):
+        raise ValidationApiError("Each participant can only be selected once.")
+    strangers = [pid for pid in recipients if pid not in seats]
+    if strangers:
+        raise ValidationApiError(f"{', '.join(strangers)} is not in this room.")
+    return None if set(recipients) == set(seats) else [pid for pid in seats if pid in recipients]
+
+
 def _check_reveal(state, stage, reveal):
     """A stimulus is released on purpose, once, in funnel order — and the price only after
     the room has answered an unaided price question."""
@@ -629,6 +715,46 @@ def shared_view(rounds):
     'what has the room seen?'."""
     return [{"kind": r["stimulus"]["kind"], "round": r["index"], "turn_id": turn_id(r["index"]),
              "stage": r["stage"], "text": r["stimulus"]["text"]} for r in rounds if r.get("stimulus")]
+
+
+@serialized_local
+def extend_room(session, settings, study, room_id, payload):
+    """More follow-up probes, bought on purpose. The added rounds' estimate is shown first,
+    must be authorized, and has to fit the same run and class budget a room start does."""
+    from src.services.interview_service import utcnow
+    room = owned_room(session, study, room_id, lock=True)
+    if type(payload.get("revision")) is not int:
+        raise ValidationApiError("An integer room revision is required.")
+    if room.status in {"cancelled", "completed"}:
+        raise ConflictApiError(f"This room is {room.status}; it cannot be extended.")
+    state = deepcopy(room.result_json)
+    if payload["revision"] != state["revision"]:
+        return room_status(session, settings, study, room_id)  # a double-click extends once
+    extra = payload.get("extra_rounds")
+    left = allowance(room.payload_json, state)["extensions_left"]
+    if type(extra) is not int or not 1 <= extra <= left:
+        raise ValidationApiError(f"Add between 1 and {left} probes." if left
+                                 else "This room has already had its full extension.")
+    if payload.get("authorize_charge") is not True:
+        raise ValidationApiError("Confirm the extra probes' estimated charge first.")
+    config = room.payload_json
+    estimate = estimate_room_cost_usd(persona_count=len(config["persona_ids"]), rounds=extra,
+                                      model_id=config["model"])
+    lock_class_budget_for_transaction(session)
+    snapshot = load_interview_budget_snapshot(session, session_id=room_id, run_budget_usd=settings.llm_budget_usd)
+    enforce_budget_open(snapshot)
+    # Same shape as the memo's preflight: what this room already spent plus what the
+    # extension could spend must fit the run budget, and the class ceiling.
+    enforce_run_preflight(estimated_cost_usd=estimate + snapshot.run_spent_usd,
+                          class_spent_usd=snapshot.class_spent_usd - snapshot.run_spent_usd,
+                          run_budget_usd=snapshot.run_budget_usd)
+    state["extra_rounds"] = state.get("extra_rounds", 0) + extra
+    state.setdefault("extensions", []).append(
+        {"extra_rounds": extra, "estimated_cost_usd": str(estimate), "at": utcnow().isoformat()})
+    state["revision"] += 1
+    room.result_json = state
+    session.commit()
+    return room_status(session, settings, study, room_id, room=room)
 
 
 def _record_usage(session, study, room_id, persona_id, measured):
@@ -1034,7 +1160,7 @@ def build_room_export(status, export_format):
     import io
     room_id = status["room_id"]
     incomplete = [f"{r['index']}:{a['persona_id']}" for r in status["rounds"]
-                  for a in r["answers"] if a["status"] != "answered"]
+                  for a in r["answers"] if a["status"] == "missing"]
     unfinished = status["status"] != "completed" or bool(incomplete)
     memo = (status.get("memo") or {}) if isinstance(status.get("memo"), dict) else {}
     memo_stale = bool(memo.get("themes") and memo.get("revision") != _revision(status))
@@ -1117,12 +1243,16 @@ def build_room_export(status, export_format):
         if round_.get("stimulus"):
             lines += [f"**Shown to participants with this question ({round_['stimulus']['kind']}):**", "",
                       *(f"> {line}" for line in round_["stimulus"]["text"].splitlines()), ""]
-        lines += [f"**Moderator:** {round_['question']} `[{turn_id(round_['index'])}]`", ""]
+        to = f" _(to {', '.join(round_['recipients'])} only)_" if round_.get("recipients") else ""
+        lines += [f"**Moderator:**{to} {round_['question']} `[{turn_id(round_['index'])}]`", ""]
         for answer in round_["answers"]:
             tid = turn_id(round_["index"], answer["persona_id"])
-            lines += ([f"**{answer['persona_id']}:** {answer['text']} `[{tid}]`", ""]
-                      if answer["status"] == "answered"
-                      else [f"**{answer['persona_id']}:** _no answer — {answer['status']}_ `[{tid}]`", ""])
+            if answer["status"] == "answered":
+                lines += [f"**{answer['persona_id']}:** {answer['text']} `[{tid}]`", ""]
+            elif answer["status"] == "silent":
+                lines += [f"_{answer['persona_id']} was not asked this question (intentionally silent)._", ""]
+            else:
+                lines += [f"**{answer['persona_id']}:** _no answer — {answer['status']}_ `[{tid}]`", ""]
     lines += ["## Student memo (written by the student)", ""]
     if not manual_rows:
         lines += ["_Not written yet._", ""]

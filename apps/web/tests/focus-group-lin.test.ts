@@ -89,13 +89,18 @@ test("manual memo: a failed AI attempt's retry says it is a new charge and what 
 import { isClassroomInterviewApiRequest } from "../src/lib/classroom-access";
 
 const ROOMS = "/api/backend/api/v1/studies/std_1/interview/focus-group/rooms";
-const NEW_STUDENT_ENDPOINTS: [string, string][] = [["POST", `${ROOMS}/fg_1/manual-memo`]];
+const NEW_STUDENT_ENDPOINTS: [string, string][] = [
+  ["POST", `${ROOMS}/fg_1/manual-memo`],
+  ["POST", `${ROOMS}/fg_1/extend`],
+];
 const STILL_REFUSED: [string, string][] = [
   ["GET", `${ROOMS}/fg_1/manual-memo`],
   ["DELETE", `${ROOMS}/fg_1/manual-memo`],
   ["POST", `${ROOMS}/fg_1/manual-memo/extra`],
   ["POST", `${ROOMS}/fg_1/manual-memo%2F..%2F..`],
   ["POST", `${ROOMS}/fg_1/manual`],
+  ["GET", `${ROOMS}/fg_1/extend`],
+  ["POST", `${ROOMS}/fg_1/extend/more`],
 ];
 
 test("classroom allowlist: every new student endpoint is reachable and nothing wider opened", () => {
@@ -192,4 +197,62 @@ test("persona card: recruitment shows an expandable card per persona, with each 
 
 test("persona card: the seated participants' cards stay beside the discussion", () => {
   assert.match(pageSource, /<aside aria-label="Who is in the room"[\s\S]*?room\.participants[\s\S]*?<PersonaCardView/);
+});
+
+// --- Fix 4 ------------------------------------------------------------------
+
+import {
+  allowanceLine,
+  askRefusal,
+  missingAnswers,
+  nextStage,
+  questionKind,
+  unansweredNote,
+} from "../src/lib/focus-group";
+
+const ALLOWANCE = { total: 8, used: 3, cores_total: 5, cores_left: 3, probes_used: 1, probes_left: 2, extensions_left: 4 };
+
+test("recipient selector: whole room or selected participants, silence is not an error", () => {
+  assert.match(pageSource, /Whole room[\s\S]*?Selected participant\(s\)/);
+  assert.match(pageSource, /recipients: target\.selected/);
+  assert.match(String(askRefusal(null, "icebreaker", { mode: "selected", selected: [] })), /at least one participant/);
+  assert.equal(askRefusal(null, "icebreaker", { mode: "selected", selected: ["P002"] }), null);
+  const room = {
+    rounds: [
+      {
+        index: 0,
+        stage: "icebreaker" as FocusGroupStage,
+        question: "q",
+        recipients: ["P002"],
+        answers: [
+          { persona_id: "P001", text: "", status: "silent" as const, error: null },
+          { persona_id: "P002", text: "a", status: "answered" as const, error: null },
+        ],
+      },
+    ],
+  };
+  assert.deepEqual(missingAnswers(room), [], "silent is never a missing answer");
+  assert.equal(unansweredNote({ status: "silent", error: null }), "not asked — intentionally silent");
+  // Technical provider text never lands in the dialogue.
+  assert.equal(unansweredNote({ status: "missing", error: { code: "provider_unavailable", message: "HTTP 502 upstream" } }), "no answer — retry below");
+  assert.match(unansweredNote({ status: "missing", error: { code: "out_of_character", message: "x" } }), /out of character/);
+  assert.doesNotMatch(pageSource, /answer\.error\?\.message/);
+  assert.match(pageSource, /answer\.status !== "silent"/);
+});
+
+test("recipient selector: Ask follow-up and Next stage are separate, stage buttons stay, allowance shows", () => {
+  const room = { rounds: [{ index: 0, stage: "icebreaker" as FocusGroupStage, question: "q", answers: [] }], allowance: ALLOWANCE };
+  assert.equal(questionKind(room, "icebreaker"), "probe");
+  assert.equal(questionKind(room, "space_needs"), "core");
+  assert.equal(nextStage("price_reactions"), "close");
+  assert.equal(nextStage("close"), null);
+  assert.equal(allowanceLine(ALLOWANCE), "Core questions left: 3 of 5 · Follow-up probes left: 2 (used 1)");
+  assert.match(String(askRefusal({ ...room, allowance: { ...ALLOWANCE, probes_left: 0 } }, "icebreaker", { mode: "room", selected: [] })), /extend the room/);
+  assert.equal(askRefusal({ ...room, allowance: { ...ALLOWANCE, probes_left: 0 } }, "space_needs", { mode: "room", selected: [] }), null, "a core question is never blocked by probes");
+  assert.match(pageSource, /"Ask follow-up"[\s\S]*?"Ask core question"/);
+  assert.match(pageSource, /Next stage: \$\{FOCUS_GROUP_STAGE_LABELS\[nextStage\(stage\)!\]\} →/);
+  assert.match(pageSource, /FOCUS_GROUP_STAGES\.map\(\(entry, index\) => \(/, "manual stage buttons remain");
+  assert.match(pageSource, /\{allowanceLine\(room\.allowance\)\}/);
+  assert.match(pageSource, /aria-label="Confirm extension cost"[\s\S]*?Confirm and extend/);
+  assert.match(pageSource, /extra_rounds: extendBy,\s*authorize_charge: true/);
 });

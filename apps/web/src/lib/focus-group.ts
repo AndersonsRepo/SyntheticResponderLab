@@ -7,6 +7,9 @@ import { isInterviewModelSelectable } from "./interview-models";
 export const MIN_PERSONAS = 3;
 export const MAX_PERSONAS = 8;
 export const MAX_ROUNDS = 12;
+// Lin fix 4: one core question per stage, plus follow-up probes. Mirrors focus_group.py.
+export const CORE_QUESTIONS = 5;
+export const DEFAULT_PROBES = 3;
 export const ESTIMATED_PROMPT_TOKENS_PER_TURN = 2000;
 export const ESTIMATED_COMPLETION_TOKENS_PER_TURN = 400;
 
@@ -35,7 +38,8 @@ export type FocusGroupAnswer = {
   turn_id?: string;
   persona_id: string;
   text: string;
-  status: "answered" | "missing";
+  // "silent": the question was addressed to someone else. Intended, never an error.
+  status: "answered" | "missing" | "silent";
   error: { code: string; message: string } | null;
 };
 
@@ -56,9 +60,14 @@ export type FocusGroupRoom = {
     stage: FocusGroupStage;
     question: string;
     stimulus?: { kind: RevealKind; text: string };
+    kind?: "core" | "probe";
+    recipients?: string[] | null;
     answers: FocusGroupAnswer[];
   }[];
   concept_card?: ConceptCard;
+  allowance?: Allowance;
+  estimated_total_cost_usd?: string;
+  extension_cost_per_round_usd?: string;
   participants?: { persona_id: string; card: PersonaCard | null }[];
   shared?: SharedStimulus[];
   memo: { themes: unknown[] | null } | null;
@@ -182,7 +191,7 @@ export function collectedAnswers(room: Pick<FocusGroupRoom, "rounds"> | null) {
 export function missingAnswers(room: Pick<FocusGroupRoom, "rounds"> | null) {
   return (room?.rounds ?? []).flatMap((round) =>
     round.answers
-      .filter((answer) => answer.status !== "answered")
+      .filter((answer) => answer.status === "missing")
       .map((answer) => ({ round: round.index, persona_id: answer.persona_id }))
   );
 }
@@ -342,4 +351,59 @@ export function cardHeadline(card: PersonaCard) {
   for (const entry of card.screener) counts[entry.verdict] += 1;
   const who = card.name ? `${card.persona_id} · ${card.name}` : card.persona_id;
   return `${who} — screener: ${counts.meets} meet, ${counts.does_not_meet} do not, ${counts.unknown} unknown`;
+}
+
+// --- asking: recipients, core vs probe, the allowance (Fix 4) -------------------
+
+export type Allowance = {
+  total: number;
+  used: number;
+  cores_total: number;
+  cores_left: number;
+  probes_used: number;
+  probes_left: number;
+  extensions_left: number;
+};
+
+/** The first question at a stage is its core question; every later one is a follow-up probe. */
+export function questionKind(room: Pick<FocusGroupRoom, "rounds"> | null, stage: FocusGroupStage) {
+  return (room?.rounds ?? []).some((round) => round.stage === stage) ? "probe" : "core";
+}
+
+export function nextStage(stage: FocusGroupStage): FocusGroupStage | null {
+  return FOCUS_GROUP_STAGES[FOCUS_GROUP_STAGES.indexOf(stage) + 1] ?? null;
+}
+
+export function allowanceLine(allowance: Allowance | undefined) {
+  if (!allowance) return "";
+  return (
+    `Core questions left: ${allowance.cores_left} of ${allowance.cores_total} · ` +
+    `Follow-up probes left: ${allowance.probes_left} (used ${allowance.probes_used})`
+  );
+}
+
+/** Why Ask is refusing, in the student's words, or null. Mirrors ask_round's checks. */
+export function askRefusal(
+  room: Pick<FocusGroupRoom, "rounds" | "allowance"> | null,
+  stage: FocusGroupStage,
+  target: { mode: "room" | "selected"; selected: string[] }
+) {
+  if (target.mode === "selected" && target.selected.length === 0) {
+    return "Choose at least one participant, or ask the whole room.";
+  }
+  const allowance = room?.allowance;
+  if (!allowance) return null;
+  if (allowance.used >= allowance.total) return "This room has used all the questions it was started with.";
+  if (questionKind(room, stage) === "probe" && allowance.probes_left <= 0) {
+    return "No follow-up probes left — move to the next stage, or extend the room for more probes.";
+  }
+  return null;
+}
+
+/** What an unanswered turn says inside the dialogue. Never the provider's technical text:
+ * that belongs in the alert above the transcript, not in a participant's mouth. */
+export function unansweredNote(answer: Pick<FocusGroupAnswer, "status" | "error">) {
+  if (answer.status === "silent") return "not asked — intentionally silent";
+  if (answer.error?.code === "out_of_character") return "reply withheld (it stepped out of character) — retry below";
+  return answer.error ? "no answer — retry below" : "not run yet";
 }
