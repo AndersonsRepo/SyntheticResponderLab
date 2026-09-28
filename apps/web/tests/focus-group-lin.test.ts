@@ -6,6 +6,11 @@ import { resolve } from "node:path";
 import {
   addQuote,
   aiMemoRetryLabel,
+  cardTextWithPhoto,
+  PHOTO_CAPTION_MAX,
+  PHOTO_MAX_BYTES,
+  photoFileRefusal,
+  photoForAsk,
   manualMemoEdited,
   manualMemoFrom,
   quotableTurns,
@@ -143,7 +148,7 @@ test("concept card: it sits directly above the question field and can be copied 
   const input = pageSource.indexOf("value={question}");
   assert.ok(card > 0 && card < input, "the card renders before the question input");
   assert.equal(pageSource.slice(card, input).includes("<ol"), false, "nothing but the card sits between them");
-  assert.match(conceptCardSource, /navigator\.clipboard\?\.writeText\(card\.text\)/);
+  assert.match(conceptCardSource, /navigator\.clipboard\?\.writeText\(cardTextWithPhoto\(card\.text, photo\)\)/);
   assert.match(conceptCardSource, /Introduction you read aloud \(edit freely\)/);
   assert.match(conceptCardSource, /card\.specs\.map/);
   // The page sends the reveal with the question; nothing is revealed on its own.
@@ -333,4 +338,50 @@ test("extension: a refused (stale) extension surfaces its message instead of loo
   const extend = pageSource.slice(pageSource.indexOf("async function extendRoom"), pageSource.indexOf("async function openRoom"));
   assert.match(extend, /await run\(/, "run() shows the server's 409 message in the alert");
   assert.match(extend, /if \(result\) setRoom\(result\.room\)/, "only a real extension updates the room");
+});
+
+// --- the student's product photo -------------------------------------------
+
+test("photo: file rules accept jpeg/png/webp/gif up to 5 MB and refuse the rest", () => {
+  for (const type of ["image/jpeg", "image/png", "image/webp", "image/gif"]) {
+    assert.equal(photoFileRefusal({ type, size: PHOTO_MAX_BYTES }), null);
+  }
+  assert.match(photoFileRefusal({ type: "image/png", size: PHOTO_MAX_BYTES + 1 })!, /over 5 MB/);
+  for (const type of ["application/pdf", "image/svg+xml", "text/plain", ""]) {
+    assert.match(photoFileRefusal({ type, size: 10 })!, /JPEG, PNG, WebP or GIF/);
+  }
+});
+
+test("photo: the ask request carries only filename and description, never the image", () => {
+  const photo = { roomId: "r", filename: "tahoe.jpg", url: "blob:http://x/abc", caption: " Cedar cabin. " };
+  const body = JSON.stringify({ revision: 1, question: "q", reveal: "concept", ...photoForAsk(photo, "concept") });
+  assert.deepEqual(JSON.parse(body).photo, { filename: "tahoe.jpg", caption: "Cedar cabin." });
+  assert.doesNotMatch(body, /blob:|data:|base64/);
+  assert.deepEqual(photoForAsk(photo, null), {});
+  assert.deepEqual(photoForAsk(photo, "price"), {});
+  assert.deepEqual(photoForAsk(null, "concept"), {});
+  // The page spreads photoForAsk into the ask body and posts the file nowhere.
+  assert.match(pageSource, /photoForAsk\(roomPhoto, pendingReveal\)/);
+  for (const source of [pageSource, conceptCardSource]) {
+    assert.doesNotMatch(source, /FormData|readAsDataURL|readAsArrayBuffer|\.arrayBuffer\(|localStorage/);
+  }
+  assert.doesNotMatch(conceptCardSource, /fetch\(|interviewOperation/);
+});
+
+test("photo: the card offers add/replace/remove, says participants only get the description, copies it", () => {
+  assert.match(conceptCardSource, /Add a product photo/);
+  assert.match(conceptCardSource, /Replace photo/);
+  assert.match(conceptCardSource, /Remove photo/);
+  assert.match(conceptCardSource, /Participants can&apos;t see images\. They only get this description, and only after you\s+introduce the concept\./);
+  assert.match(conceptCardSource, /maxLength=\{PHOTO_CAPTION_MAX\}/);
+  assert.equal(PHOTO_CAPTION_MAX, 500);
+  assert.match(conceptCardSource, /URL\.createObjectURL/);
+  assert.match(pageSource, /URL\.revokeObjectURL\(photoUrl\)/);
+  assert.match(conceptCardSource, /cardTextWithPhoto\(card\.text, photo\)/);
+  const photo = { roomId: "r", filename: "t.jpg", url: "blob:x", caption: "Cedar cabin." };
+  assert.equal(cardTextWithPhoto("CARD", photo), "CARD\nPhoto the moderator is showing (described in words): Cedar cabin.");
+  assert.equal(cardTextWithPhoto("CARD", null), "CARD");
+  assert.equal(cardTextWithPhoto("CARD", { ...photo, caption: " " }), "CARD");
+  // The same sentence the server adds to the participants' stimulus.
+  assert.match(apiSource, /Photo the moderator is showing \(described in words\): /);
 });

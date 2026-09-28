@@ -71,6 +71,17 @@ Checks run from this directory. `P` = `cd ../.. && ./apps/api/.venv/bin/python -
 - [x] The out-of-character matcher flags only self-referential AI talk (not "I work on a large language model at my job" or "my persona at work"), uses its own exception type, and a flagged turn is billed once per click. — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'flags_only_self_reference or billed_once_per_click'`
 - [x] Extending with a stale revision is a 409 the page shows (a double-click of the extension just recorded is still a no-op). — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'extend_with_stale_revision' && cd plans/lin-classroom-fixes && sh ./webcheck.sh 'extension: a refused'`
 
+## Product photo on the concept card (2026-09-27)
+
+- [x] The photo's description never reaches any model call before the concept is introduced (a description sent without introducing the concept is refused and nothing is charged). — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'photo_caption_withheld_until_introduced'`
+- [x] Once the concept is introduced with a photo, its description reaches every participant prompt from then on, and the room's shared info shows it. — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'photo_caption_reaches_participants'`
+- [x] A dollar amount in the photo description before Reveal price is refused with a clear message and nothing is charged; oversized or malformed photo fields are refused. — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'photo_caption_price_refused or photo_fields_bounded'`
+- [x] The image itself never leaves the browser: the ask request the page builds carries only the filename and description (no data:/blob: URL, no bytes), and the page never posts the file anywhere. — check: `sh ./webcheck.sh 'photo: the ask request'`
+- [x] A non-image file or one over 5 MB is rejected with a plain message; jpeg/png/webp/gif up to 5 MB are accepted. — check: `sh ./webcheck.sh 'photo: file rules'`
+- [x] The Markdown and CSV exports say "Photo shown: <filename>, described as: <caption>" for the round that introduced it. — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'photo_in_export'`
+- [x] A room with no photo, and a legacy room, give byte-identical stimulus text, prompts and export as before. — check: `cd ../.. && ./apps/api/.venv/bin/python -m pytest apps/api/tests/test_focus_group_lin.py -q -k 'no_photo_room_unchanged or legacy_room_exposure_derived_from_stage'`
+- [x] The card has Add a product photo (Replace, Remove), the "Participants can't see images…" note, a 500-character description field, revokes object URLs, and Copy card as text includes the description. — check: `sh ./webcheck.sh 'photo: the card'`
+
 ## Out of scope
 
 - Real-participant recruitment or any claim that personas predict real customers.
@@ -98,6 +109,7 @@ visible, but it is not refused.
 9. CSV export's first row is the rehearsal label (then the header). — `build_room_export`.
 10. Student personas count toward the room's 3-seat minimum but every export says 0 real PA3.5 participants; IDs are S01–S20 per study; no delete endpoint. — `focus_group_personas.py`.
 11. The AI memo button is now labelled optional feedback and sits after the manual form. — `page.tsx`.
+12. Product photo: not persisted (no localStorage) — lost on reload, re-add it. Only sent with the concept introduction; a photo added after that is never shared (the card says so). Filename goes to the export only, never the model. Empty description = export says "(no description)" and the stimulus text is unchanged. — `_check_photo`, `photoForAsk`; revert by dropping `photo` from the ask body.
 
 ## Unverified
 
@@ -105,4 +117,6 @@ visible, but it is not refused.
 - The out-of-character phrase list has an acceptable false-positive rate on real replies. — settle: grep production `focus_group_failure ... code=out_of_character` logs after the first class.
 - Rooms already in progress at deploy time: exposure is now derived from the stage (refuter round), proven on seeded legacy-shaped rows only. — settle: open one real pre-deploy room on staging after deploy and export it.
 - Layout/readability of the new cards, side panel and forms in a real browser (only `next build` and source checks ran; no screenshot). — settle: click through /focus-group on a preview deploy.
+- Photo card in a real browser: file picker, preview, Replace/Remove, object-URL revocation (source-checked only, no click-through). — settle: add/replace/remove a photo on a preview deploy with DevTools Memory/Network open.
+- A student can still write a price in words in the description ("twenty-three thousand"); only figures are refused, same as questions. — settle: accepted limit, same as the question guard.
 - Deploy order: web and API ship separately; the new web sends `reveal`/`recipients`/`max_rounds=5+probes` which an old API ignores. — settle: deploy API first.

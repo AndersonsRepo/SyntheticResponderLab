@@ -41,7 +41,9 @@ import {
   missingAnswers,
   quotableTurns,
   REHEARSAL_LABEL,
+  photoForAsk,
   revealRefusal,
+  type ConceptPhoto,
   selectableStages,
   type FocusGroupMemo,
   type ManualMemo,
@@ -115,6 +117,11 @@ function FocusGroupPageContent() {
   const [stage, setStage] = useState<FocusGroupStage>("icebreaker");
   const [question, setQuestion] = useState(STAGE_PROMPTS.icebreaker);
   const [pendingReveal, setPendingReveal] = useState<RevealKind | null>(null);
+  const [photo, setPhoto] = useState<ConceptPhoto | null>(null);
+  const roomPhoto = photo && photo.roomId === room?.room_id ? photo : null;
+  // Revokes the previous object URL on replace/remove, and the last one on unmount.
+  const photoUrl = photo?.url;
+  useEffect(() => () => { if (photoUrl) URL.revokeObjectURL(photoUrl); }, [photoUrl]);
   const [memo, setMemo] = useState<FocusGroupMemo | null>(null);
   const [manualMemo, setManualMemo] = useState<ManualMemo>(() => manualMemoFrom(null));
   const [busy, setBusy] = useState(false);
@@ -269,6 +276,7 @@ function FocusGroupPageContent() {
           stage,
           question: question.trim(),
           ...(pendingReveal && !extra.retry ? { reveal: pendingReveal } : {}),
+          ...(extra.retry ? {} : photoForAsk(roomPhoto, pendingReveal)),
           ...(target.mode === "selected" && !extra.retry ? { recipients: target.selected } : {}),
           ...extra,
         }
@@ -634,6 +642,8 @@ function FocusGroupPageContent() {
                 if (kind && text) setQuestion(text);
               }}
               busy={busy}
+              photo={roomPhoto}
+              onPhoto={(next) => setPhoto(next && { ...next, roomId: room.room_id })}
             />
           ) : null}
 

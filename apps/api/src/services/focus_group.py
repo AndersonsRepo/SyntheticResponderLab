@@ -620,13 +620,15 @@ def ask_round(session, settings, study, room_id, payload):
             raise ValidationApiError(
                 "Don't anchor price first — ask the unaided price question, then use Reveal price "
                 "before naming a dollar figure.")
+        photo = _check_photo(payload.get("photo"), reveal, "price" in shown)
         # Going back to an early stage is allowed, but once anything was shown the room
         # has seen it, so the round is recorded as what it is and the export cannot
         # present it as pre-exposure data (refuter FG-C).
         post_exposure = STAGES.index(stage) < STAGES.index("concept") and bool(shown)
         round_ = {"index": len(state["rounds"]), "stage": stage, "question": question,
                   "post_exposure": post_exposure, "kind": kind, "recipients": recipients,
-                  **({"stimulus": {"kind": reveal, "text": STIMULI[reveal]}} if reveal else {}),
+                  **({"stimulus": {"kind": reveal, "text": _stimulus_text(reveal, photo),
+                                   **({"photo": photo} if photo else {})}} if reveal else {}),
                   "answers": [{"persona_id": pid, "text": "",
                                "status": "missing" if not recipients or pid in recipients else "silent",
                                "error": None}
@@ -807,6 +809,39 @@ def _check_reveal(state, stage, reveal):
             raise ValidationApiError(
                 "Ask the unaided price question first (what would they expect it to cost?), "
                 "then reveal the price.")
+
+
+def _check_photo(photo, reveal, price_shown):
+    """The student's product photo stays in their browser; only its filename and their
+    description of it arrive here, and only with the concept introduction. Personas are text
+    models, so the description is the only part of the photo they ever get."""
+    if photo is None:
+        return None
+    if reveal != "concept":
+        raise ValidationApiError("A product photo is shared only with the question that introduces the concept.")
+    if not isinstance(photo, dict) or set(photo) - {"filename", "caption"}:
+        raise ValidationApiError("Send only the photo's filename and description, never the image.")
+    filename, caption = str(photo.get("filename") or "").strip(), str(photo.get("caption") or "").strip()
+    if not filename or len(filename) > 200:
+        raise ValidationApiError("The photo needs a filename of at most 200 characters.")
+    if len(caption) > 500:
+        raise ValidationApiError("Keep the photo description to 500 characters.")
+    if not price_shown and _MONEY.search(caption):
+        raise ValidationApiError(
+            "Don't anchor price first — the photo description names a dollar figure. Remove it; "
+            "use Reveal price later to share the price.")
+    return {"filename": filename, "caption": caption}
+
+
+def _stimulus_text(reveal, photo):
+    if photo and photo["caption"]:
+        return f"{STIMULI[reveal]}\nPhoto the moderator is showing (described in words): {photo['caption']}"
+    return STIMULI[reveal]
+
+
+def _photo_line(stimulus):
+    photo = stimulus.get("photo")
+    return f"Photo shown: {photo['filename']}, described as: {photo['caption'] or '(no description)'}" if photo else ""
 
 
 def shared_view(rounds):
@@ -1327,6 +1362,10 @@ def build_room_export(status, export_format):
                 writer.writerow([round_["index"] + 1, round_["stage"], "Stimulus", "shown_to_participants",
                                  _as_csv_text(round_["stimulus"]["text"]), round_["stimulus"]["kind"],
                                  str(not unfinished), f"R{round_['index'] + 1}-STIMULUS"])
+                if _photo_line(round_["stimulus"]):
+                    writer.writerow([round_["index"] + 1, round_["stage"], "Stimulus", "photo_record",
+                                     _as_csv_text(_photo_line(round_["stimulus"])), "photo",
+                                     str(not unfinished), f"R{round_['index'] + 1}-PHOTO"])
             writer.writerow([round_["index"] + 1, round_["stage"], "Moderator", "moderator",
                              _as_csv_text(round_["question"]), "asked", str(not unfinished),
                              turn_id(round_["index"])])
@@ -1402,6 +1441,8 @@ def build_room_export(status, export_format):
                    if round_["stimulus"].get("derived") else "")
             lines += [f"**Shown to participants with this question ({round_['stimulus']['kind']}{how}):**", "",
                       *(f"> {line}" for line in round_["stimulus"]["text"].splitlines()), ""]
+            if _photo_line(round_["stimulus"]):
+                lines += [f"**{_photo_line(round_['stimulus'])}**", ""]
         to = f" _(to {', '.join(round_['recipients'])} only)_" if round_.get("recipients") else ""
         lines += [f"**Moderator:**{to} {round_['question']} `[{turn_id(round_['index'])}]`", ""]
         for answer in round_["answers"]:

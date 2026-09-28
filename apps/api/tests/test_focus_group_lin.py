@@ -789,3 +789,81 @@ def test_extend_with_stale_revision_is_refused_not_silently_ignored(room):
     assert get_room(client, study_id, moved)["allowance"]["extensions_left"] == 2
     other = client.post(url, json={**body, "extra_rounds": 1})
     assert other.status_code == 409
+
+
+# --- The student's product photo (2026-09-27) --------------------------------
+
+PHOTO = {"filename": "tahoe-mini.jpg", "caption": "A small cedar-clad cabin with a glass door on a lawn."}
+
+
+def introduce(client, study_id, walked, photo=PHOTO):
+    return ask(client, study_id, walked, stage="concept", question=fg.CONCEPT_CARD["introduction"],
+               reveal="concept", photo=photo)
+
+
+def test_photo_caption_withheld_until_introduced(room):
+    client, study_id, calls, _ = room
+    walked = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:2])
+    spent = len(calls)
+    for stage in ("space_needs", "concept"):
+        early = ask(client, study_id, walked, stage=stage, question="Q?", photo=PHOTO)
+        assert early.status_code == 400 and "introduces the concept" in early.json()["error"]["message"]
+    assert len(calls) == spent
+    assert all("cedar" not in joined(call) for call in calls)
+
+
+def test_photo_caption_reaches_participants_after_introduction(room):
+    client, study_id, calls, _ = room
+    walked = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:2])
+    before = len(calls)
+    introduced = introduce(client, study_id, walked)
+    assert introduced.status_code == 200, introduced.text
+    walked = walk(client, study_id, introduced.json()["data"]["room"], FUNNEL[3:])
+    assert all("cedar" not in joined(c) for c in calls[:before])
+    assert all(PHOTO["caption"] in c["messages"][0]["content"] for c in calls[before:])
+    assert all("tahoe-mini.jpg" not in joined(c) for c in calls)
+    assert PHOTO["caption"] in walked["shared"][0]["text"]
+
+
+def test_photo_caption_price_refused_before_reveal(room):
+    client, study_id, calls, _ = room
+    walked = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:2])
+    spent = len(calls)
+    for caption in ("Tag reads $23,000", "Sticker says 23,000", "price 23000 on the tag"):
+        refused = introduce(client, study_id, walked, {"filename": "a.jpg", "caption": caption})
+        assert refused.status_code == 400 and "dollar figure" in refused.json()["error"]["message"]
+    assert len(calls) == spent
+
+
+def test_photo_fields_bounded(room):
+    client, study_id, calls, _ = room
+    walked = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:2])
+    spent = len(calls)
+    for bad in ({"filename": "a.jpg", "caption": "x" * 501}, {"filename": "", "caption": "x"},
+                {"filename": "a" * 201, "caption": "x"}, "data:image/png;base64,AAAA",
+                {"filename": "a.jpg", "caption": "x", "data": "data:image/png;base64,AAAA"}):
+        assert introduce(client, study_id, walked, bad).status_code == 400
+    assert len(calls) == spent
+
+
+def test_photo_in_export(room):
+    client, study_id, _, _ = room
+    walked = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:2])
+    walked = introduce(client, study_id, walked).json()["data"]["room"]
+    line = f"Photo shown: tahoe-mini.jpg, described as: {PHOTO['caption']}"
+    assert line in export(client, study_id, walked)["content"]
+    assert line in export(client, study_id, walked, "csv")["content"]
+    bare = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:2])
+    bare = introduce(client, study_id, bare, {"filename": "b.png", "caption": ""}).json()["data"]["room"]
+    assert "Photo shown: b.png, described as: (no description)" in export(client, study_id, bare)["content"]
+    assert bare["shared"][0]["text"] == fg.CONCEPT_STIMULUS
+
+
+def test_no_photo_room_unchanged(room):
+    client, study_id, calls, _ = room
+    walked = walk(client, study_id, start(client, study_id).json()["data"]["room"], FUNNEL[:3])
+    stimulus = walked["rounds"][2]["stimulus"]
+    assert stimulus == {"kind": "concept", "text": fg.CONCEPT_STIMULUS}
+    assert all("Photo" not in joined(c) for c in calls)
+    for fmt in ("markdown", "csv"):
+        assert "Photo shown" not in export(client, study_id, walked, fmt)["content"]

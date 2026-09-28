@@ -492,3 +492,30 @@ export function personaFormRefusal(fields: PersonaFields) {
   if (!fields.research_link.trim()) return "Say how this profile relates to your research question.";
   return null;
 }
+
+// --- the student's product photo --------------------------------------------
+// ponytail: the image stays in the browser (an object URL), never uploaded; lost on reload.
+// Personas are text models, so only the student's description travels, with the concept.
+
+export const PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+export const PHOTO_MAX_BYTES = 5 * 1024 * 1024;
+export const PHOTO_CAPTION_MAX = 500;
+export type ConceptPhoto = { roomId: string; filename: string; url: string; caption: string };
+
+export function photoFileRefusal(file: { type: string; size: number }) {
+  if (!PHOTO_TYPES.includes(file.type)) return "Choose a JPEG, PNG, WebP or GIF image.";
+  if (file.size > PHOTO_MAX_BYTES) return "That photo is over 5 MB. Choose a smaller one.";
+  return null;
+}
+
+/** What the ask request carries about the photo: filename and description only, and only
+ * with the concept introduction. Never the image or its URL. */
+export function photoForAsk(photo: ConceptPhoto | null, reveal: RevealKind | null) {
+  if (!photo || reveal !== "concept") return {};
+  return { photo: { filename: photo.filename, caption: photo.caption.trim() } };
+}
+
+export function cardTextWithPhoto(text: string, photo: ConceptPhoto | null) {
+  const caption = photo?.caption.trim();
+  return caption ? `${text}\nPhoto the moderator is showing (described in words): ${caption}` : text;
+}
