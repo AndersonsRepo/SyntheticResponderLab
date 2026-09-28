@@ -248,8 +248,9 @@ test("the memo is only written after the student confirms its extra charge", () 
     pageSource,
     /authorize\s*&&\s*memo[\s\S]*?authorize_charge: true/
   );
-  assert.match(pageSource, /onClick=\{\(\) => loadMemo\(true\)\}[\s\S]*?and write it/);
-  assert.match(pageSource, /onClick=\{\(\) => loadMemo\(\)\}[\s\S]*?Write the memo/);
+  // Lin fix 5: the AI memo is optional feedback now; the confirm wording lives in aiMemoRetryLabel.
+  assert.match(pageSource, /onClick=\{\(\) => loadMemo\(true\)\}[\s\S]*?\{aiMemoRetryLabel\(memo\)\}/);
+  assert.match(pageSource, /onClick=\{\(\) => loadMemo\(\)\}[\s\S]*?AI draft memo/);
 });
 
 // --- classroom no-login -----------------------------------------------------

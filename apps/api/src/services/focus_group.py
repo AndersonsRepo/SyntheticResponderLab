@@ -63,6 +63,9 @@ MEMO_MODEL = "openai/gpt-4o-mini"
 MEMO_MIN_THEMES, MEMO_MAX_THEMES = 3, 6
 MEMO_MIN_ANSWER_OPTIONS = 3
 
+# Lin: every output says what it is. Plain ASCII so it survives CSV and copy/paste.
+REHEARSAL_LABEL = "Synthetic rehearsal - not PA3.5 live fieldwork"
+
 _CONCEPT_CONTEXT = """PRODUCT BEING DISCUSSED:
 Name: Tahoe Mini by Neo Smart Living
 Description: A compact 117-square-foot factory-built studio that is delivered and installed in a backyard. It is not an ADU and has no kitchen or bathroom.
@@ -234,6 +237,19 @@ def _answered(state):
     return [(r, a) for r in state["rounds"] for a in r["answers"] if a["status"] == "answered"]
 
 
+def turn_id(round_index, persona_id=None):
+    """A turn's stable ID. Rounds are append-only and a persona holds one seat, so the
+    round number and the speaker name a turn for the life of the room — retries and
+    later rounds never renumber it."""
+    return f"R{round_index + 1}-{persona_id or 'MOD'}"
+
+
+def _with_turn_ids(rounds):
+    return [{**r, "turn_id": turn_id(r["index"]),
+             "answers": [{**a, "turn_id": turn_id(r["index"], a["persona_id"])} for a in r["answers"]]}
+            for r in rounds]
+
+
 def room_status(session, settings, study, room_id, room=None):
     room = room or owned_room(session, study, room_id)
     state = room.result_json or {}
@@ -244,6 +260,11 @@ def room_status(session, settings, study, room_id, room=None):
         "status": room.status,
         **room.payload_json,
         **state,
+        # Derived on read, never stored: a room written before turn IDs existed gets the
+        # same IDs a new one does.
+        "rounds": _with_turn_ids(state.get("rounds", [])),
+        "manual_memo_check": manual_memo_check(state),
+        "rehearsal_label": REHEARSAL_LABEL,
         "stage": STAGES[state.get("stage_index", 0)],
         "stages": list(STAGES),
         "stage_labels": STAGE_LABELS,
@@ -595,8 +616,14 @@ def _locate(state, text, persona_id=None):
 
 def _revision(state):
     """Which transcript a memo is about. The export compares against this too, so a memo
-    written before the last round cannot be handed in unmarked (refuter FG-A)."""
-    return hashlib.sha256(json.dumps(state.get("rounds", []), sort_keys=True).encode()).hexdigest()
+    written before the last round cannot be handed in unmarked (refuter FG-A).
+
+    Turn IDs are stripped: room_status adds them on read, and the export hashes that view
+    while the memo hashed the stored rounds — the two must agree."""
+    rounds = [{**{k: v for k, v in r.items() if k != "turn_id"},
+               "answers": [{k: v for k, v in a.items() if k != "turn_id"} for a in r["answers"]]}
+              for r in state.get("rounds", [])]
+    return hashlib.sha256(json.dumps(rounds, sort_keys=True).encode()).hexdigest()
 
 
 def memo_view(session, settings, study, room_id, room=None):
@@ -689,11 +716,21 @@ def focus_group_memo(session, settings, study, room_id, payload=None):
         except QuotaExceededApiError as exc:
             record["budget_stop"] = exc.message
         record.update(_validate_memo(json.loads(result.text), state))
-    except Exception:
-        record["message"] = ("The memo could not be written from this transcript. Your transcript is "
-            "preserved. " + ("The response could not be validated against the transcript; its measured "
-            "charge is recorded. Retrying adds another charge." if record["outcome"] == "charged"
-            else "The provider's billing outcome is unknown. Retrying may incur another charge."))
+    except Exception as exc:
+        # Say WHY in the student's terms: a validation reason is ours and safe to show; a
+        # provider error is not, so it collapses to "the provider did not answer".
+        record["reason"] = ("the response was not in the memo format" if isinstance(exc, json.JSONDecodeError)
+                            else f"it could not be validated against the transcript ({exc})"
+                            if isinstance(exc, ValueError)
+                            else "the AI provider did not return a usable answer")
+        charge = (f"This attempt was charged ${Decimal(record['cost_usd']):.4f}, and that charge is "
+                  "recorded against your budget." if record["outcome"] == "charged"
+                  else "The provider's billing outcome for this attempt is unknown.")
+        record["message"] = (
+            f"The AI draft could not be used: {record['reason']}. Your transcript and your own memo "
+            f"are preserved. {charge} You can finish your memo by hand and export it now without "
+            f"another attempt; retrying the AI draft is a new charge of about "
+            f"${Decimal(view['estimated_cost_usd']):.4f}.")
     logger.log(logging.INFO if record["themes"] else logging.WARNING,
                "focus_group_memo study=%s room=%s revision=%s attempt=%s outcome=%s valid=%s",
                study.public_id, room_id, view["revision"], attempt, record["outcome"], bool(record["themes"]))
@@ -750,11 +787,174 @@ def _validate_memo(parsed, state):
 
 
 # ---------------------------------------------------------------------------
+# Manual memo: the student's own analysis, no model involved
+# ---------------------------------------------------------------------------
+
+MANUAL_MAX_THEMES, MANUAL_MAX_QUOTES, MANUAL_MAX_OPTIONS = MEMO_MAX_THEMES, 5, 12
+_SHORT, _LONG = 200, 2000
+
+
+def _manual_text(value, field, limit):
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValidationApiError(f"{field} must be text.")
+    value = value.strip()
+    if len(value) > limit:
+        raise ValidationApiError(f"{field} is longer than {limit} characters.")
+    return value
+
+
+def _manual_list(value, field, limit):
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValidationApiError(f"{field} must be a list.")
+    if len(value) > limit:
+        raise ValidationApiError(f"{field} holds at most {limit} entries.")
+    if any(not isinstance(entry, dict) for entry in value):
+        raise ValidationApiError(f"Each entry in {field} must be an object.")
+    return value
+
+
+def _manual_quote(value, field):
+    if value is None:
+        return {"turn_id": "", "text": ""}
+    if not isinstance(value, dict):
+        raise ValidationApiError(f"{field} must name a turn and the words quoted from it.")
+    return {"turn_id": _manual_text(value.get("turn_id"), f"{field} turn", 40),
+            "text": _manual_text(value.get("text"), f"{field} text", _LONG)}
+
+
+def _clean_manual_memo(raw):
+    """The trust boundary: shape and size only. Whether it is COMPLETE is a separate
+    question (manual_memo_check), so a half-written memo still saves."""
+    if not isinstance(raw, dict):
+        raise ValidationApiError("Send the memo as an object.")
+    themes = [{"label": _manual_text(t.get("label"), "Theme label", _SHORT),
+               "synthesis": _manual_text(t.get("synthesis"), "Theme summary", _LONG),
+               "quotes": [_manual_quote(q, "Theme quote")
+                          for q in _manual_list(t.get("quotes"), "Theme quotes", MANUAL_MAX_QUOTES)]}
+              for t in _manual_list(raw.get("themes"), "Themes", MANUAL_MAX_THEMES)]
+    surprise = raw.get("surprise") or {}
+    if not isinstance(surprise, dict):
+        raise ValidationApiError("The surprise must be an object.")
+    options = [{"text": _manual_text(o.get("text"), "Answer option", _SHORT),
+                "topic": _manual_text(o.get("topic"), "Answer option topic", _SHORT),
+                "turn_id": _manual_text(o.get("turn_id"), "Answer option turn", 40)}
+               for o in _manual_list(raw.get("answer_options"), "Answer options", MANUAL_MAX_OPTIONS)]
+    return {"themes": themes,
+            "surprise": {"summary": _manual_text(surprise.get("summary"), "Surprise", _LONG),
+                         "quote": _manual_quote(surprise.get("quote"), "Surprise quote")},
+            "answer_options": options,
+            "moderation_improvement": _manual_text(raw.get("moderation_improvement"),
+                                                   "Moderation improvement", _LONG)}
+
+
+def _answered_turns(state):
+    return {turn_id(r["index"], a["persona_id"]): {
+                "turn_id": turn_id(r["index"], a["persona_id"]), "persona_id": a["persona_id"],
+                "round": r["index"], "stage": r["stage"], "question": r["question"], "text": a["text"]}
+            for r in state.get("rounds", []) for a in r["answers"] if a["status"] == "answered"}
+
+
+def _quote_problem(quote, turns):
+    """None if the quote is words copied from a real answered turn; otherwise why not."""
+    if not quote.get("turn_id"):
+        return "has no quote picked from the transcript"
+    turn = turns.get(quote["turn_id"])
+    if turn is None:
+        return f"cites {quote['turn_id']}, which is not an answered turn in this transcript"
+    if not quote.get("text") or quote["text"] not in turn["text"]:
+        return f"quote is not the words {turn['persona_id']} said in {quote['turn_id']}"
+    return None
+
+
+def manual_memo_check(state):
+    """Checked against the transcript as it is NOW, so a quote can never claim a link
+    it does not have."""
+    memo = state.get("manual_memo")
+    if not memo:
+        return {"saved": False, "complete": False, "problems": ["Not started."]}
+    turns = _answered_turns(state)
+    problems = []
+    themes = [t for t in memo["themes"] if t["label"] or t["synthesis"] or t["quotes"]]
+    if len(themes) < MEMO_MIN_THEMES:
+        problems.append(f"Write at least {MEMO_MIN_THEMES} themes ({len(themes)} so far).")
+    for n, theme in enumerate(themes, 1):
+        if not theme["label"]:
+            problems.append(f"Theme {n} needs a label.")
+        if not theme["quotes"]:
+            problems.append(f"Theme {n} needs at least one quote picked from the transcript.")
+        for quote in theme["quotes"]:
+            if (why := _quote_problem(quote, turns)):
+                problems.append(f"Theme {n}: {why}.")
+    if not memo["surprise"]["summary"]:
+        problems.append("Describe one surprise.")
+    if (why := _quote_problem(memo["surprise"]["quote"], turns)):
+        problems.append(f"Surprise {why}.")
+    options = [o for o in memo["answer_options"] if o["text"] or o["topic"]]
+    if len(options) < MEMO_MIN_ANSWER_OPTIONS:
+        problems.append(f"Write at least {MEMO_MIN_ANSWER_OPTIONS} PA4 answer options ({len(options)} so far).")
+    for n, option in enumerate(options, 1):
+        if not option["text"] or not option["topic"]:
+            problems.append(f"Answer option {n} needs both its wording and the question topic it answers.")
+        if option["turn_id"] and option["turn_id"] not in turns:
+            problems.append(f"Answer option {n} cites {option['turn_id']}, which is not an answered turn.")
+    if not memo["moderation_improvement"]:
+        problems.append("Name one thing you would change about how you moderated.")
+    return {"saved": True, "complete": not problems, "problems": problems}
+
+
+@serialized_local
+def save_manual_memo(session, settings, study, room_id, payload):
+    """Free, and allowed in every room state: the student's own writing never waits on
+    a model, a budget, or a room that was ended."""
+    from src.services.interview_service import utcnow
+    room = owned_room(session, study, room_id, lock=True)
+    memo = _clean_manual_memo((payload or {}).get("memo"))
+    state = deepcopy(room.result_json)
+    state["manual_memo"] = {**memo, "saved_at": utcnow().isoformat()}
+    room.result_json = state
+    session.commit()
+    return room_status(session, settings, study, room_id, room=room)
+
+
+# ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
 
+def _manual_memo_rows(status):
+    """The student's memo as (field, speaker, label, text, link_status, turn_id, location) rows,
+    each quote resolved against the transcript so the export can only call linked what is."""
+    memo = status.get("manual_memo")
+    if not memo:
+        return []
+    turns = _answered_turns(status)
+    rows = []
+
+    def quote_row(field, label, quote):
+        why = _quote_problem(quote, turns)
+        turn = turns.get(quote.get("turn_id"))
+        rows.append((field, turn["persona_id"] if turn and not why else "", label, quote.get("text", ""),
+                     "not_linked" if why else "linked", quote.get("turn_id", ""), why or turn))
+
+    for theme in memo["themes"]:
+        rows.append(("theme", "", theme["label"], theme["synthesis"], "", "", None))
+        for quote in theme["quotes"]:
+            quote_row("theme_quote", theme["label"], quote)
+    rows.append(("surprise", "", "", memo["surprise"]["summary"], "", "", None))
+    quote_row("surprise_quote", "", memo["surprise"]["quote"])
+    for option in memo["answer_options"]:
+        turn = turns.get(option["turn_id"])
+        rows.append(("answer_option", turn["persona_id"] if turn else "", option["topic"], option["text"],
+                     "linked" if turn else ("not_linked" if option["turn_id"] else ""), option["turn_id"], turn))
+    rows.append(("moderation_improvement", "", "", memo["moderation_improvement"], "", "", None))
+    return rows
+
+
 def build_room_export(status, export_format):
-    """Markdown or CSV of the transcript and memo, attributed turn by turn."""
+    """Markdown or CSV of the transcript and memos, attributed turn by turn."""
     from src.services.interview_export import InterviewTranscriptExport, _as_csv_text
     import csv
     import io
@@ -764,43 +964,62 @@ def build_room_export(status, export_format):
     unfinished = status["status"] != "completed" or bool(incomplete)
     memo = (status.get("memo") or {}) if isinstance(status.get("memo"), dict) else {}
     memo_stale = bool(memo.get("themes") and memo.get("revision") != _revision(status))
+    check = manual_memo_check(status)
+    manual_rows = _manual_memo_rows(status)
     stem = re.sub(r"[^A-Za-z0-9._-]+", "-", room_id).strip(".-")[:64] or "room"
 
     if export_format == "csv":
         output = io.StringIO(newline="")
         writer = csv.writer(output, lineterminator="\r\n")
-        writer.writerow(["round", "stage", "speaker", "role", "text", "status", "complete"])
+        # ponytail: the label is the first row so no one opens the file without seeing it;
+        # a parser that wants the header first skips one line.
+        writer.writerow([REHEARSAL_LABEL])
+        writer.writerow(["round", "stage", "speaker", "role", "text", "status", "complete", "turn_id"])
         for round_ in status["rounds"]:
             writer.writerow([round_["index"] + 1, round_["stage"], "Moderator", "moderator",
-                             _as_csv_text(round_["question"]), "asked", str(not unfinished)])
+                             _as_csv_text(round_["question"]), "asked", str(not unfinished),
+                             turn_id(round_["index"])])
             for answer in round_["answers"]:
                 writer.writerow([round_["index"] + 1, round_["stage"], _as_csv_text(answer["persona_id"]),
                                  "participant", _as_csv_text(answer["text"]), answer["status"],
-                                 str(not unfinished)])
+                                 str(not unfinished), turn_id(round_["index"], answer["persona_id"])])
+        if manual_rows:
+            writer.writerow([])
+            writer.writerow(["student_memo", "field", "speaker", "label_or_topic", "text", "link",
+                             "complete", "turn_id"])
+            for field, speaker, label, text, link, tid, _ in manual_rows:
+                writer.writerow(["student_memo", field, _as_csv_text(speaker), _as_csv_text(label),
+                                 _as_csv_text(text), link, str(check["complete"]), _as_csv_text(tid)])
         # The docstring and the UI button both promise the memo; the CSV used to stop at
         # the transcript and say nothing about it (refuter FG-B).
         if memo.get("themes"):
             fresh = str(not unfinished and not memo_stale)
             memo_status = "out_of_date" if memo_stale else "current"
             writer.writerow([])
-            writer.writerow(["memo", "field", "speaker", "role", "text", "status", "complete"])
+            writer.writerow(["memo", "field", "speaker", "role", "text", "status", "complete", "turn_id"])
             for theme in memo["themes"]:
-                writer.writerow(["memo", "theme", _as_csv_text(theme["located_at"]["persona_id"]),
+                at = theme["located_at"]
+                writer.writerow(["memo", "theme", _as_csv_text(at["persona_id"]),
                                  theme["sentiment"],
                                  _as_csv_text(f"{theme['label']}: {theme['synthesis']} - \"{theme['quote']}\""),
-                                 memo_status, fresh])
+                                 memo_status, fresh, turn_id(at["round"], at["persona_id"])])
             surprise = memo["surprise"]
-            writer.writerow(["memo", "surprise", _as_csv_text(surprise["located_at"]["persona_id"]),
+            at = surprise["located_at"]
+            writer.writerow(["memo", "surprise", _as_csv_text(at["persona_id"]),
                              "surprise",
                              _as_csv_text(f"{surprise['summary']} - \"{surprise['quote']}\""),
-                             memo_status, fresh])
+                             memo_status, fresh, turn_id(at["round"], at["persona_id"])])
             for option in memo["answer_options"]:
-                writer.writerow(["memo", "answer_option", _as_csv_text(option["located_at"]["persona_id"]),
-                                 "answer_option", _as_csv_text(option["text"]), memo_status, fresh])
-        return InterviewTranscriptExport(content="﻿" + output.getvalue(),
+                at = option["located_at"]
+                writer.writerow(["memo", "answer_option", _as_csv_text(at["persona_id"]),
+                                 "answer_option", _as_csv_text(option["text"]), memo_status, fresh,
+                                 turn_id(at["round"], at["persona_id"])])
+        return InterviewTranscriptExport(content="\ufeff" + output.getvalue(),
             filename=f"focus-group-{stem}.csv", media_type="text/csv")
 
-    lines = ["# Focus group transcript", ""]
+    lines = ["# Focus group transcript", "",
+             f"> **{REHEARSAL_LABEL}.** Every participant below is a simulated persona, not a real "
+             "person. Nothing here is PA3.5 fieldwork or evidence about real customers.", ""]
     if unfinished:
         lines += [f"> **INCOMPLETE — do not submit as final.** Room status: `{status['status']}`."
                   + (f" Missing answers (round:persona): {', '.join(incomplete)}." if incomplete else ""), ""]
@@ -811,20 +1030,54 @@ def build_room_export(status, export_format):
         lines += [f"## {round_['index'] + 1}. {STAGE_LABELS[round_['stage']]}"
                   + (" — asked after the concept and price were shown" if round_.get("post_exposure") else ""),
                   "",
-                  f"**Moderator:** {round_['question']}", ""]
+                  f"**Moderator:** {round_['question']} `[{turn_id(round_['index'])}]`", ""]
         for answer in round_["answers"]:
-            lines += ([f"**{answer['persona_id']}:** {answer['text']}", ""] if answer["status"] == "answered"
-                      else [f"**{answer['persona_id']}:** _no answer — {answer['status']}_", ""])
+            tid = turn_id(round_["index"], answer["persona_id"])
+            lines += ([f"**{answer['persona_id']}:** {answer['text']} `[{tid}]`", ""]
+                      if answer["status"] == "answered"
+                      else [f"**{answer['persona_id']}:** _no answer — {answer['status']}_ `[{tid}]`", ""])
+    lines += ["## Student memo (written by the student)", ""]
+    if not manual_rows:
+        lines += ["_Not written yet._", ""]
+    else:
+        if not check["complete"]:
+            lines += ["> **DRAFT — not complete.** Still missing: " + " ".join(check["problems"]), ""]
+
+        def cite(tid, text, link, where):
+            if link != "linked":
+                return f"  - \"{text}\" — NOT LINKED: {where}"
+            return (f"  - \"{text}\" — {where['persona_id']} `[{tid}]`, "
+                    f"{STAGE_LABELS[where['stage']]} round {where['round'] + 1}")
+
+        section = None
+        for field, _, label, text, link, tid, where in manual_rows:
+            heading = {"theme": "### Themes", "surprise": "### One surprise",
+                       "answer_option": "### PA4 answer options (tagged by question topic)",
+                       "moderation_improvement": "### What I would change as moderator"}.get(field)
+            if heading and heading != section:
+                lines += ["", heading, ""]
+                section = heading
+            if field == "theme":
+                lines.append(f"- **{label or '(no label)'}** — {text}")
+            elif field in ("theme_quote", "surprise_quote"):
+                lines.append(cite(tid, text, link, where))
+            elif field == "answer_option":
+                source = f" — from {where['persona_id']} `[{tid}]`" if link == "linked" else ""
+                lines.append(f"- [{label or 'no topic'}] \"{text}\"{source}")
+            else:
+                lines.append(text)
+        lines.append("")
     if memo.get("themes"):
-        lines += ["## Memo", ""]
+        lines += ["## AI draft memo (optional feedback, not the student's analysis)", ""]
         if memo_stale:
             lines += ["> **OUT OF DATE — do not submit as final.** This memo was written before "
                       "the last round below and does not describe it. Rewrite the memo.", ""]
         lines += ["### Themes", ""]
         for theme in memo["themes"]:
+            at = theme["located_at"]
             lines += [f"- **{theme['label']}** ({theme['sentiment']}) — {theme['synthesis']}",
-                      f"  - \"{theme['quote']}\" — {theme['persona_id']}, "
-                      f"{STAGE_LABELS[theme['located_at']['stage']]} round {theme['located_at']['round'] + 1}"]
+                      f"  - \"{theme['quote']}\" — {theme['persona_id']} `[{turn_id(at['round'], at['persona_id'])}]`, "
+                      f"{STAGE_LABELS[at['stage']]} round {at['round'] + 1}"]
         surprise = memo["surprise"]
         lines += ["", "### One surprise", "", f"{surprise['summary']}",
                   f"- \"{surprise['quote']}\" — {surprise['persona_id']}", "",
@@ -835,8 +1088,6 @@ def build_room_export(status, export_format):
         lines += [f"- \"{option['text']}\" — {option['located_at']['persona_id']}"
                   for option in memo["answer_options"]]
         lines.append("")
-    elif not unfinished:
-        lines += ["## Memo", "", "_Not written yet._", ""]
     return InterviewTranscriptExport(content="\n".join(lines),
         filename=f"focus-group-{stem}.md", media_type="text/markdown")
 

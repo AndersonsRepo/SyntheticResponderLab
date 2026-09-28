@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { ManualMemoForm } from "@/components/focus-group/manual-memo-form";
 import { Button } from "@/components/ui/button";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import {
@@ -11,6 +12,8 @@ import {
   type InterviewPersona,
 } from "@/lib/api";
 import {
+  addQuote,
+  aiMemoRetryLabel,
   canAskStage,
   collectedAnswers,
   estimateFocusGroupCost,
@@ -19,11 +22,16 @@ import {
   focusGroupPath,
   focusGroupSetupRefusal,
   formatFocusGroupCostEstimate,
+  manualMemoFrom,
   MAX_ROUNDS,
   MIN_PERSONAS,
   missingAnswers,
+  quotableTurns,
+  REHEARSAL_LABEL,
   selectableStages,
   type FocusGroupMemo,
+  type ManualMemo,
+  type QuoteTarget,
   type FocusGroupRoom,
   type FocusGroupStage,
 } from "@/lib/focus-group";
@@ -72,6 +80,7 @@ function FocusGroupPageContent() {
   const [stage, setStage] = useState<FocusGroupStage>("icebreaker");
   const [question, setQuestion] = useState(STAGE_PROMPTS.icebreaker);
   const [memo, setMemo] = useState<FocusGroupMemo | null>(null);
+  const [manualMemo, setManualMemo] = useState<ManualMemo>(() => manualMemoFrom(null));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const startRequest = useRef<string>("");
@@ -157,6 +166,7 @@ function FocusGroupPageContent() {
     if (result) {
       setRoom(result.room);
       setStage(result.room.stage);
+      setManualMemo(manualMemoFrom(result.room.manual_memo));
       startRequest.current = "";
     }
   }
@@ -184,8 +194,25 @@ function FocusGroupPageContent() {
     if (result) {
       setRoom(result.room);
       setStage(result.room.stage);
+      setManualMemo(manualMemoFrom(result.room.manual_memo));
       setMemo(null);
     }
+  }
+
+  function postManualMemo() {
+    return interviewOperation<{ room: FocusGroupRoom }>(
+      studyId!,
+      focusGroupPath(room!.room_id, "manual-memo"),
+      { memo: manualMemo }
+    ).then((result) => {
+      setRoom(result.room);
+      return result;
+    });
+  }
+
+  async function saveManualMemo() {
+    if (!studyId || !room) return;
+    await run(postManualMemo);
   }
 
   async function deleteRoom(roomId: string) {
@@ -217,11 +244,15 @@ function FocusGroupPageContent() {
 
   async function exportRoom(format: "markdown" | "csv") {
     if (!studyId || !room) return;
+    // Save the memo first so the file carries what the student sees on screen, not the
+    // last explicit save.
     const result = await run(() =>
-      interviewOperation<{ export: { content: string; filename: string; media_type: string } }>(
-        studyId,
-        focusGroupPath(room.room_id, "export"),
-        { format }
+      postManualMemo().then(() =>
+        interviewOperation<{ export: { content: string; filename: string; media_type: string } }>(
+          studyId,
+          focusGroupPath(room.room_id, "export"),
+          { format }
+        )
       )
     );
     if (!result) return;
@@ -236,12 +267,16 @@ function FocusGroupPageContent() {
   }
 
   const answered = collectedAnswers(room);
+  const turns = quotableTurns(room);
   const missing = missingAnswers(room);
 
   return (
     <main className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-6 py-12">
       <header className="flex flex-col gap-2">
         <h1 className="text-3xl font-semibold">Simulated focus group</h1>
+        <p role="note" className="text-sm font-semibold" data-testid="rehearsal-label">
+          {REHEARSAL_LABEL}. The participants are simulated personas, not real people.
+        </p>
         <p className="text-sm text-app-muted">
           You are the moderator. The personas hear each other and react. Same funnel and same
           memo fields as PA3.5, so the rehearsal matches the real thing.
@@ -416,14 +451,41 @@ function FocusGroupPageContent() {
                 </p>
                 <p className="font-semibold">Moderator: {round.question}</p>
                 {round.answers.map((answer) => (
-                  <p key={`${round.index}-${answer.persona_id}`} className="text-sm">
-                    <strong>{answer.persona_id}:</strong>{" "}
-                    {answer.status === "answered" ? (
-                      answer.text
-                    ) : (
-                      <em>no answer yet — {answer.error?.message ?? "not run"}</em>
-                    )}
-                  </p>
+                  <div key={`${round.index}-${answer.persona_id}`} className="flex flex-wrap items-start gap-2 text-sm">
+                    <p className="flex-1">
+                      <strong>{answer.persona_id}:</strong>{" "}
+                      {answer.status === "answered" ? (
+                        answer.text
+                      ) : (
+                        <em>no answer yet — {answer.error?.message ?? "not run"}</em>
+                      )}{" "}
+                      <span className="text-xs text-app-muted">[{answer.turn_id}]</span>
+                    </p>
+                    {answer.status === "answered" && answer.turn_id ? (
+                      <select
+                        aria-label={`Quote ${answer.turn_id} in your memo`}
+                        value=""
+                        onChange={(event) => {
+                          if (!event.target.value) return;
+                          setManualMemo((current) =>
+                            addQuote(current, event.target.value as QuoteTarget, {
+                              turn_id: answer.turn_id as string,
+                              text: answer.text,
+                            })
+                          );
+                        }}
+                        className="rounded-lg border border-app-border bg-transparent px-2 py-1 text-xs"
+                      >
+                        <option value="">Quote…</option>
+                        {manualMemo.themes.map((_, n) => (
+                          <option key={n} value={`theme-${n}`}>
+                            in Theme {n + 1}
+                          </option>
+                        ))}
+                        <option value="surprise">as the surprise</option>
+                      </select>
+                    ) : null}
+                  </div>
                 ))}
               </li>
             ))}
@@ -434,9 +496,18 @@ function FocusGroupPageContent() {
             spent ${Number(room.session_usage.cost_usd).toFixed(4)} across {answered.length} answers
           </p>
 
+          <ManualMemoForm
+            memo={manualMemo}
+            onChange={setManualMemo}
+            onSave={saveManualMemo}
+            turns={turns}
+            check={room.manual_memo_check}
+            busy={busy}
+          />
+
           <div className="flex flex-wrap gap-3">
             <Button variant="secondary" onClick={() => loadMemo()} disabled={busy}>
-              Write the memo
+              Optional: AI draft memo to compare with yours
             </Button>
             <Button variant="secondary" onClick={() => exportRoom("markdown")} disabled={busy}>
               Export transcript + memo
@@ -463,7 +534,7 @@ function FocusGroupPageContent() {
               <p>{memo.message}</p>
               {memo.eligible && !memo.available ? (
                 <Button onClick={() => loadMemo(true)} disabled={busy}>
-                  Confirm {formatFocusGroupCostEstimate(Number(memo.estimated_cost_usd))} and write it
+                  {aiMemoRetryLabel(memo)}
                 </Button>
               ) : null}
               {memo.saved?.message ? <p role="alert">{memo.saved.message}</p> : null}

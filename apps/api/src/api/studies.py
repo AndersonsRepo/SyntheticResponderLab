@@ -915,6 +915,15 @@ def write_focus_group_memo(study_id: str, room_id: str, request: Request, payloa
     return response_envelope(request, {"memo": focus_group_memo(db, settings, study, room_id, payload)})
 
 
+@router.post("/api/v1/studies/{study_id}/interview/focus-group/rooms/{room_id}/manual-memo")
+def save_focus_group_manual_memo(study_id: str, room_id: str, request: Request, payload: dict = Body(...),
+    db: Session = Depends(get_db_session), settings: AppSettings = Depends(get_settings),
+    current_user: AuthUser = Depends(get_current_user)):
+    from src.services.focus_group import save_manual_memo
+    study = get_owned_study_or_404(db, study_id, current_user)
+    return response_envelope(request, {"room": save_manual_memo(db, settings, study, room_id, payload)})
+
+
 @router.post("/api/v1/studies/{study_id}/interview/focus-group/rooms/{room_id}/export")
 def export_focus_group_room(study_id: str, room_id: str, request: Request, payload: dict = Body(default=None),
     db: Session = Depends(get_db_session), settings: AppSettings = Depends(get_settings),

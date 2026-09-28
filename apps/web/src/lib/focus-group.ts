@@ -28,7 +28,11 @@ export const FOCUS_GROUP_STAGE_LABELS: Record<FocusGroupStage, string> = {
   close: "Close",
 };
 
+// Lin: every output says what it is. Mirrors REHEARSAL_LABEL in focus_group.py.
+export const REHEARSAL_LABEL = "Synthetic rehearsal - not PA3.5 live fieldwork";
+
 export type FocusGroupAnswer = {
+  turn_id?: string;
   persona_id: string;
   text: string;
   status: "answered" | "missing";
@@ -46,8 +50,16 @@ export type FocusGroupRoom = {
   max_rounds: number;
   estimated_cost_usd: string;
   complete: boolean;
-  rounds: { index: number; stage: FocusGroupStage; question: string; answers: FocusGroupAnswer[] }[];
+  rounds: {
+    index: number;
+    turn_id?: string;
+    stage: FocusGroupStage;
+    question: string;
+    answers: FocusGroupAnswer[];
+  }[];
   memo: { themes: unknown[] | null } | null;
+  manual_memo?: ManualMemo | null;
+  manual_memo_check?: { saved: boolean; complete: boolean; problems: string[] };
   session_usage: { cost_usd: string };
   error: { code: string; message: string; stage?: string; missing?: unknown[] } | null;
 };
@@ -64,6 +76,9 @@ export type FocusGroupMemo = {
   model: string;
   saved: {
     attempt: number;
+    outcome?: string;
+    cost_usd?: string;
+    reason?: string;
     message?: string;
     budget_stop?: string;
     themes:
@@ -172,4 +187,63 @@ export function focusGroupPath(roomId?: string, suffix?: string) {
   const base = "focus-group/rooms";
   if (!roomId) return base;
   return suffix ? `${base}/${encodeURIComponent(roomId)}/${suffix}` : `${base}/${encodeURIComponent(roomId)}`;
+}
+
+// --- the student's own memo (Fix 5) -----------------------------------------
+
+export type ManualQuote = { turn_id: string; text: string };
+export type ManualMemo = {
+  themes: { label: string; synthesis: string; quotes: ManualQuote[] }[];
+  surprise: { summary: string; quote: ManualQuote };
+  answer_options: { text: string; topic: string; turn_id: string }[];
+  moderation_improvement: string;
+};
+export type QuoteTarget = `theme-${number}` | "surprise";
+
+const MEMO_THEMES = 3;
+const MEMO_OPTIONS = 3;
+
+/** A saved draft, padded to the three themes and three options the memo needs. */
+export function manualMemoFrom(saved?: ManualMemo | null): ManualMemo {
+  const themes = [...(saved?.themes ?? [])];
+  while (themes.length < MEMO_THEMES) themes.push({ label: "", synthesis: "", quotes: [] });
+  const options = [...(saved?.answer_options ?? [])];
+  while (options.length < MEMO_OPTIONS) options.push({ text: "", topic: "", turn_id: "" });
+  return {
+    themes,
+    surprise: saved?.surprise ?? { summary: "", quote: { turn_id: "", text: "" } },
+    answer_options: options,
+    moderation_improvement: saved?.moderation_improvement ?? "",
+  };
+}
+
+/** Answered turns only: a quote can only come from something a participant said. */
+export function quotableTurns(room: Pick<FocusGroupRoom, "rounds"> | null) {
+  return (room?.rounds ?? []).flatMap((round) =>
+    round.answers
+      .filter((answer) => answer.status === "answered" && answer.turn_id)
+      .map((answer) => ({ turn_id: answer.turn_id as string, persona_id: answer.persona_id, text: answer.text }))
+  );
+}
+
+/** Cite a whole turn; the student trims the words in the form afterwards. */
+export function addQuote(memo: ManualMemo, target: QuoteTarget, turn: { turn_id: string; text: string }) {
+  const quote = { turn_id: turn.turn_id, text: turn.text };
+  if (target === "surprise") return { ...memo, surprise: { ...memo.surprise, quote } };
+  const index = Number(target.slice("theme-".length));
+  return {
+    ...memo,
+    themes: memo.themes.map((theme, n) => (n === index ? { ...theme, quotes: [...theme.quotes, quote] } : theme)),
+  };
+}
+
+/** The retry control has to say it costs money again, and what the failure already cost. */
+export function aiMemoRetryLabel(memo: Pick<FocusGroupMemo, "estimated_cost_usd" | "saved">) {
+  const estimate = formatFocusGroupCostEstimate(Number(memo.estimated_cost_usd));
+  if (!memo.saved || memo.saved.themes) return `Confirm ${estimate} and write it`;
+  const already =
+    memo.saved.outcome === "charged" && memo.saved.cost_usd
+      ? `the failed attempt was charged $${Number(memo.saved.cost_usd).toFixed(4)}`
+      : "the failed attempt's charge is unknown";
+  return `Retry the AI draft — a new charge of about ${estimate} (${already})`;
 }
