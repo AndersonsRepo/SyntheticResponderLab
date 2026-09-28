@@ -588,6 +588,17 @@ function InterviewPageContent() {
           models, recorded ahead of time. Replaying one costs nothing.
         </p>
 
+        <a
+          href="/interview/you"
+          className="mt-5 inline-flex items-center gap-2 rounded-xl border border-app-border px-4 py-2.5 text-sm font-semibold text-app-text transition hover:border-[var(--color-gold)] hover:text-[var(--color-gold)]"
+        >
+          AI interviews you
+          <span aria-hidden="true">&rarr;</span>
+        </a>
+        <p className="mt-2 max-w-2xl text-xs leading-5 text-app-muted">
+          Flip the roles: the AI moderator asks you the discussion guide&rsquo;s questions and follows up on your answers.
+        </p>
+
         <nav aria-label="Interview steps" className="my-5 flex flex-wrap gap-3">
           {["1. Choose", "2. Interview", "3. Themes"].map((label, index) =>
             <Button key={label} variant="secondary" aria-current={step === index ? "step" : undefined} onClick={() => changeStep(index)}>{label}</Button>)}

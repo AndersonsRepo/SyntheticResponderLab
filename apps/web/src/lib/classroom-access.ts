@@ -26,6 +26,8 @@ const CLASSROOM_INTERVIEW_API_RULES = [
   },
   { method: "GET", pattern: /^\/api\/backend\/api\/v1\/studies\/[A-Za-z0-9_-]+\/interview\/batches(?:\/[A-Za-z0-9_-]+(?:\/themes)?)?\/?$/ },
   { method: "POST", pattern: /^\/api\/backend\/api\/v1\/studies\/[A-Za-z0-9_-]+\/interview\/(?:batches\/[A-Za-z0-9_-]+\/(?:advance|themes)|answers\/[A-Za-z0-9_-]+\/regenerate)\/?$/ },
+  // AI interviews you: one POST, its own lane, so it never opens the AI-led persona endpoint.
+  { method: "POST", pattern: /^\/api\/backend\/api\/v1\/studies\/[A-Za-z0-9_-]+\/interview\/human\/next-question\/?$/ },
   // Focus group: its own lane here too, so widening it never widens the interview lane.
   { method: "POST", pattern: /^\/api\/backend\/api\/v1\/studies\/[A-Za-z0-9_-]+\/interview\/focus-group\/rooms\/?$/ },
   { method: "GET", pattern: /^\/api\/backend\/api\/v1\/studies\/[A-Za-z0-9_-]+\/interview\/focus-group\/rooms(?:\/[A-Za-z0-9_-]+(?:\/memo)?)?\/?$/ },

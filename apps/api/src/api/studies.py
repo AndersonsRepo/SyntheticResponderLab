@@ -833,6 +833,15 @@ def generate_standalone_themes(study_id: str, job_id: str, request: Request, pay
     return response_envelope(request, {"insights": standalone_themes(db, settings, study, job_id, payload)})
 
 
+@router.post("/api/v1/studies/{study_id}/interview/human/next-question")
+def next_human_interview_question(study_id: str, request: Request, payload: dict = Body(...),
+    db: Session = Depends(get_db_session), settings: AppSettings = Depends(get_settings),
+    current_user: AuthUser = Depends(get_current_user)):
+    from src.services.standalone_interview import next_human_question
+    study = get_owned_study_or_404(db, study_id, current_user)
+    return response_envelope(request, {"question": next_human_question(db, settings, study, payload)})
+
+
 # --- Focus group: its own lane, never mixed into the interview batch endpoints ---
 
 @router.post("/api/v1/studies/{study_id}/interview/focus-group/rooms")

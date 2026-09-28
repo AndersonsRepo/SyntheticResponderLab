@@ -11,10 +11,11 @@ from sqlalchemy import select
 from src.persistence.models import InterviewTurn, Job, Persona
 from src.services.exceptions import ApiError, ConflictApiError, NotFoundApiError, QuotaExceededApiError, TransientProviderError, ValidationApiError
 from src.services.ids import make_public_id
-from src.services.interview_cache import resolve_interview_answer
-from src.services.interviewer_agent import build_interviewer_messages, derive_interviewer_turn_plan
+from src.services.interview_cache import REPLAY_ONLY, normalize_cache_mode, resolve_interview_answer
+from src.services.interviewer_agent import (DEFAULT_INTERVIEW_TURN_LIMIT, _estimated_model_interview_cost, build_interviewer_messages,
+    derive_interviewer_turn_plan, normalize_interviewer_question, sanitize_interview_transcript)
 from src.services.llm_budget import enforce_budget_open, enforce_measured_cost, enforce_run_preflight, load_interview_budget_snapshot, lock_class_budget_for_transaction
-from src.services.model_catalog import list_interview_model_catalog
+from src.services.model_catalog import DEFAULT_INTERVIEW_MODEL_ID, list_interview_model_catalog
 
 RESEARCH_BRIEF = {
     "primary_question": "How would homeowners decide whether to buy a Tahoe Mini backyard studio?",
@@ -393,3 +394,91 @@ def advance_batch(session, settings, study, job_id, payload):
         job.completed_at = service.utcnow()
     session.commit()
     return batch_status(session, settings, study, job_id)
+
+
+# "AI interviews you": the batch interviewer asks, a student answers. The persona_id on the
+# interviewer's question rows, so the rows read as a human interview, never as a persona's.
+HUMAN_RESPONDENT = "human"
+MAX_HUMAN_ANSWER_CHARS = 4000
+
+
+@serialized_local
+def next_human_question(session, settings, study, payload):
+    """The next question for a student respondent, from the same agent and guide as the batches.
+
+    The student's answers are human data. They go into the interviewer's prompt and nowhere
+    else: never cached, never stored. Only the AI's questions (and their cost) are recorded,
+    exactly as the AI-led interview already records them."""
+    from src.services import interview_service as service
+    from src.services.exceptions import ProviderUnavailableApiError
+    if normalize_cache_mode(settings.cache_mode) == REPLAY_ONLY:
+        raise ConflictApiError("AI interviews you needs live model calls, and this server only replays "
+                               "recorded interviews (CACHE_MODE=replay_only).")
+    messages = payload.get("messages") or []
+    try:
+        transcript = sanitize_interview_transcript(messages if isinstance(messages, list) else [None])
+    except ValueError as exc:
+        raise ValidationApiError(str(exc)) from exc
+    if any(len(m["content"]) > MAX_HUMAN_ANSWER_CHARS for m in transcript if m["role"] == "assistant"):
+        raise ValidationApiError(f"Keep each answer under {MAX_HUMAN_ANSWER_CHARS} characters.")
+    session_id = payload.get("session_id") or make_public_id("you")
+    if not isinstance(session_id, str) or not session_id.startswith("you_") or len(session_id) > 64:
+        raise ValidationApiError("session_id must come from a previous AI interviews you question.")
+    validate_session(session, study, session_id)
+    model, turn_limit = DEFAULT_INTERVIEW_MODEL_ID, DEFAULT_INTERVIEW_TURN_LIMIT
+    answered = sum(m["role"] == "assistant" for m in transcript)
+    reply = {"session_id": session_id, "turn_limit": turn_limit, "interviewer_model": model}
+    if answered >= turn_limit:
+        session.commit()
+        return {**reply, "question": None, "complete": True, "turn_number": turn_limit,
+                "session_usage": usage(session, settings, session_id)}
+    turn_number = answered + 1
+    asked = session.scalars(select(InterviewTurn.text).where(
+        InterviewTurn.study_id == study.id, InterviewTurn.session_id == session_id,
+        InterviewTurn.role == "user", InterviewTurn.text != "").order_by(InterviewTurn.created_at)).all()
+    if len(asked) >= turn_number:
+        # A double click or a retried request after a lost response: this turn is already paid for.
+        session.commit()
+        return {**reply, "question": asked[turn_number - 1], "complete": False, "turn_number": turn_number,
+                "session_usage": usage(session, settings, session_id)}
+
+    prompt = build_interviewer_messages(research_brief=RESEARCH_BRIEF, transcript=transcript,
+                                        turn_number=turn_number, turn_limit=turn_limit)
+    lock_class_budget_for_transaction(session)
+    snapshot = load_interview_budget_snapshot(session, session_id=session_id, run_budget_usd=settings.llm_budget_usd)
+    enforce_budget_open(snapshot)
+    if snapshot.run_provider_call_count == 0:
+        enforce_run_preflight(estimated_cost_usd=_estimated_model_interview_cost(model),
+                              class_spent_usd=snapshot.class_spent_usd, run_budget_usd=snapshot.run_budget_usd)
+    if not settings.openrouter_api_key:
+        raise ConflictApiError("OPENROUTER_API_KEY is not configured.")
+
+    def record(result, text=""):
+        session.add(InterviewTurn(study_id=study.id, persona_id=HUMAN_RESPONDENT, session_id=session_id,
+            role="user", text=text, model=result.model, tokens_in=result.tokens_in,
+            tokens_out=result.tokens_out, cost_usd=result.cost_usd, created_at=service.utcnow()))
+
+    # ponytail: no cache on purpose. A cache row is keyed on, and would outlive, the student's words.
+    result = None
+    try:
+        result = service._call_openrouter_messages(api_key=settings.openrouter_api_key, model=model,
+                                                   messages=prompt, timeout=90, max_attempts=1)
+        question = normalize_interviewer_question(result.text)
+    except Exception as exc:
+        measured = exc.measured_usage if isinstance(exc, TransientProviderError) else None
+        if measured is not None:
+            record(measured)
+        elif result is not None:
+            record(result)  # Paid, but the reply held no question.
+        session.commit()
+        raise ProviderUnavailableApiError("The AI interviewer did not answer. Your answer is kept; "
+                                          "send it again to retry.") from exc
+    record(result, question)
+    session.commit()
+    try:
+        enforce_measured_cost(snapshot, cost_usd=result.cost_usd)
+    except QuotaExceededApiError as exc:
+        exc.details["session_id"] = session_id
+        raise
+    return {**reply, "question": question, "complete": False, "turn_number": turn_number,
+            "session_usage": usage(session, settings, session_id)}
