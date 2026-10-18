@@ -11,21 +11,42 @@ distribution over the options, not a single pick. Two consequences for this proj
 
 The pilot exists to answer one question cheaply before anyone builds a full adapter:
 
-    Is rho(income, E[Q1]) near the real 0.10, or near the 0.67-0.72 that DeepSeek and Qwen show?
+    Is rho(income, E[Q1]) near the real association, or near the chat models' (DeepSeek and Qwen on
+    the S1 baseline, registry R010)?
 
 Income is read from the persona file for the correlation but the exact figure is still sent to the
 model here, exactly as the baseline sends it. This is the baseline condition for Jev, not an
 ablation.
 
+No real-survey value is written in this file. The real side is supplied at runtime and only
+printed, never stored in the run folder: --real-from reads the real Q1 shares (and so the real
+top-2 share) from a compare_real output folder, and --real-rho-income-q1 takes the real
+rho(income, Q1), which needs respondent-level income and is recorded with R010 in the Assets folder
+(0_logs/EXPERIMENT_LOG.md). Without them the real rows print a pointer instead.
+
+The synthetic comparison points are not written in here either. --baseline NAME=RUN_DIR[,RUN_DIR]
+computes a chat arm's rho(income, Q1) (as spread_diagnostics.py does) and its Q6 cost-top share
+from that arm's run folders, before any request is sent. Incomes come from --baseline-personas
+(default --personas), which must be the persona file the runs used; when a run's manifest.json
+records that file's sha256, a different file is refused. The comparison the pilot was written
+against is the DeepSeek and Qwen S1 baseline runs of registry R002, in the Assets folder under
+5_experiments/2026-09-17_S1_prompt_and_sampling_tests/survey_runs/, run on the full matched 600
+(4_persona_sets/matched_600_v2_S1-S6_2026-09-16/phase1_interview_matched600.csv).
+
 Usage:
-    python research/neo_persona_set/phase3/jev_pilot.py --limit 20
+    python research/neo_persona_set/phase3/jev_pilot.py --limit 20 \\
+        [--real-from <compare_real output folder>] [--real-rho-income-q1 <value from R010>] \\
+        [--baseline DeepSeek=<run_r1>,<run_r2> --baseline Qwen=<run_r1>,<run_r2> \\
+         --baseline-personas <persona file of those runs>]
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
+import math
 import os
 import statistics
 import sys
@@ -37,6 +58,12 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[2]
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
+import score_vs_real_marginals  # noqa: E402
+import spread_diagnostics  # noqa: E402
+
 API_ENV = REPO_ROOT / "apps/api/.env"
 DEFAULT_PERSONAS = HERE.parent / "out" / "phase1_interview_matched600_s1.csv"
 DEFAULT_OUT = HERE.parent / "out" / "jev_runs"
@@ -202,6 +229,101 @@ def spearman(xs: list[float], ys: list[float]) -> float:
     return num / den if den else 0.0
 
 
+# Printed where a real value would go when none is passed in; nothing derived from the AYTM file is committed.
+REAL_POINTER = "see real_comparison/<condition>/comparison_by_question.md, or pass --real-from"
+# Printed where the chat-model comparison would go when no --baseline is passed. Synthetic values are
+# computed from run folders at runtime too, not written in (team rule: prefer the score files).
+BASELINE_POINTER = "chat models: pass --baseline NAME=RUN_DIR[,RUN_DIR] (S1 baseline runs, registry R002)"
+# Q6 option counted as a 'cost' top choice, for Jev's answers and for the --baseline runs alike.
+COST_OPTION_PREFIX = "The total cost"
+
+
+def _check_persona_file(name: str, run_dir: Path, personas: Path) -> None:
+    """Stop when the run's manifest records a different persona file: persona ids are renumbered
+    between persona files (the S1 subset file starts again at P001), so incomes would be joined to
+    the wrong personas without any error."""
+    manifest = run_dir / "manifest.json"
+    if not manifest.is_file():
+        return
+    try:
+        recorded = (json.loads(manifest.read_text(encoding="utf-8")).get("personas") or {}).get("sha256")
+    except (ValueError, AttributeError):
+        return
+    if recorded and hashlib.sha256(personas.read_bytes()).hexdigest() != recorded:
+        raise SystemExit(f"--baseline {name}: {run_dir.name} was run on a different persona file than {personas} "
+                         f"(see personas.path in its manifest.json); pass that file with --baseline-personas")
+
+
+def baseline_reference(spec: str, personas: Path | None) -> dict:
+    """One synthetic comparison arm, NAME=RUN_DIR[,RUN_DIR...], computed at runtime from its run folders.
+
+    rho_income_q1 is spread_diagnostics' (Spearman over every answer in the runs, incomes from
+    `personas`, which must be the persona file the runs used); q6_cost_top_share is the share of Q6
+    answers that pick the total-cost option.
+    """
+    name, _, paths = spec.partition("=")
+    name = name.strip()
+    run_dirs = [Path(p.strip()).expanduser() for p in paths.split(",") if p.strip()]
+    if not name or not run_dirs:
+        raise SystemExit(f"--baseline {spec!r}: expected NAME=RUN_DIR[,RUN_DIR...]")
+    if personas is not None and not Path(personas).is_file():
+        raise SystemExit(f"--baseline {name}: persona file {personas} not found (pass --baseline-personas)")
+    for run_dir in run_dirs:
+        if not (run_dir / "answers_wide.csv").is_file():
+            raise SystemExit(f"--baseline {name}: no answers_wide.csv in {run_dir}")
+        if personas is not None:
+            _check_persona_file(name, run_dir, Path(personas))
+    q6 = [(row.get("Q6") or "").strip() for run_dir in run_dirs for row in spread_diagnostics.read_wide(run_dir)]
+    q6 = [answer for answer in q6 if answer]
+    rho = spread_diagnostics.diagnose_arm(name, run_dirs, personas_csv=personas)["rho_income_q1"]
+    return {
+        "name": name,
+        "runs": [run_dir.name for run_dir in run_dirs],
+        "rho_income_q1": None if math.isnan(rho) else round(rho, 4),
+        "q6_cost_top_share": round(sum(a.startswith(COST_OPTION_PREFIX) for a in q6) / len(q6), 4) if q6 else None,
+    }
+
+
+def _baseline_text(baselines: list[dict] | None, key: str) -> str:
+    if not baselines:
+        return BASELINE_POINTER
+    return " | ".join(f"{b['name']} {b[key]:.3f}" if b.get(key) is not None else f"{b['name']} n/a" for b in baselines)
+
+
+def real_q1_shares(folder: Path) -> list[float]:
+    """Real Q1 shares for levels 1-5, read at runtime from a compare_real output folder."""
+    q1 = score_vs_real_marginals.load_real_marginals(Path(folder)).get("Q1")
+    if not q1:
+        raise SystemExit(f"no Q1 rows in {Path(folder) / 'comparison_options.csv'}")
+    return [q1.get(str(level), 0.0) for level in range(1, 6)]
+
+
+def report_lines(summary: dict, shares: list[float], real_shares: list[float] | None = None,
+                 real_rho: float | None = None, baselines: list[dict] | None = None) -> list[str]:
+    """The console table. Real values and the chat-model baselines appear only when passed in at
+    runtime (baselines from baseline_reference); otherwise a pointer."""
+    if real_shares:
+        real_row = f"  {'real 600':<20}" + "".join(f"{s:>7.2f}" for s in real_shares)
+        real_top2 = f"real {real_shares[3] + real_shares[4]:.2f}"
+    else:
+        real_row = f"  {'real 600':<20}{REAL_POINTER}"
+        real_top2 = "real: pass --real-from"
+    real_rho_text = f"real {real_rho:.2f}" if real_rho is not None else "real: pass --real-rho-income-q1"
+    return [
+        f"\n{'':22}{'1':>7}{'2':>7}{'3':>7}{'4':>7}{'5':>7}",
+        f"  {'Jev expected shares':<20}" + "".join(f"{s:>7.2f}" for s in shares),
+        real_row,
+        "",
+        f"  rho(income, E[Q1])    {summary['rho_income_q1']:>6}   "
+        f"({real_rho_text} | {_baseline_text(baselines, 'rho_income_q1')})",
+        f"  rho(income, E[Q2])    {summary['rho_income_q2']:>6}",
+        f"  top-2 share (4+5)     {summary['q1_top2_share']:>6}   ({real_top2})",
+        f"  mean confidence       {summary['q1_mean_confidence']:>6}",
+        f"  Q6 'cost' top choice  {summary['q6_cost_top_share']:>6}   ({_baseline_text(baselines, 'q6_cost_top_share')})",
+        f"  cost ~= ${summary['approx_usd']:.4f}   {summary['elapsed_seconds']}s",
+    ]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--personas", type=Path, default=DEFAULT_PERSONAS)
@@ -212,7 +334,20 @@ def main() -> int:
     parser.add_argument("--tag", default="pilot")
     parser.add_argument("--drop-census-fields", default="", help="comma-separated, for ablations")
     parser.add_argument("--drop-story-fields", default="", help="comma-separated, for ablations")
+    parser.add_argument("--real-from", type=Path, default=None,
+                        help="compare_real output folder; the real Q1 shares are read from it and printed, never stored")
+    parser.add_argument("--real-rho-income-q1", type=float, default=None,
+                        help="the real rho(income, Q1), recorded with R010 in the Assets folder; printed, never stored")
+    parser.add_argument("--baseline", action="append", default=[], metavar="NAME=RUN_DIR[,RUN_DIR...]",
+                        help="a chat-model arm to compare against (repeatable), e.g. the DeepSeek and Qwen S1 baseline "
+                             "runs of registry R002; its rho(income, Q1) and Q6 cost-top share are computed from the runs")
+    parser.add_argument("--baseline-personas", type=Path, default=None,
+                        help="persona file the --baseline runs used, for their incomes (default: --personas); the R002 runs "
+                             "used the full matched 600 (4_persona_sets/matched_600_v2_S1-S6_2026-09-16/phase1_interview_matched600.csv)")
     args = parser.parse_args()
+    # Read before any request, so a wrong folder fails before anything is spent.
+    real_shares = real_q1_shares(args.real_from) if args.real_from else None
+    baselines = [baseline_reference(spec, args.baseline_personas or args.personas) for spec in args.baseline]
 
     drop_census = {f.strip() for f in args.drop_census_fields.split(",") if f.strip()}
     drop_story = {f.strip() for f in args.drop_story_fields.split(",") if f.strip()}
@@ -319,34 +454,25 @@ def main() -> int:
             sum(1 for r in results if round(r["q1_score"]) == round(r["q2_score"])) / len(results), 4
         ),
         "q6_cost_top_share": round(
-            sum(1 for r in results if r["q6_choice"].startswith("The total cost")) / len(results), 4
+            sum(1 for r in results if r["q6_choice"].startswith(COST_OPTION_PREFIX)) / len(results), 4
         ),
         "q6_mean_cost_probability": round(statistics.mean(r["q6_cost_prob"] for r in results), 4),
         "input_tokens": tokens_in,
         "approx_usd": round(tokens_in / 1e6 * 0.042, 6),
         "elapsed_seconds": round(time.time() - started, 1),
         "reference": {
-            # Real-side values are not hardcoded here: nothing derived from the AYTM file is
-            # committed. They are in the comparison folders, beside the repository.
-            "real_reference": "see real_comparison/<condition>/comparison_by_question.md",
-            "deepseek_rho": 0.67,
-            "qwen_rho": 0.72,
+            # Real-side values are neither hardcoded nor stored here (this folder defaults to inside the
+            # repository); --real-from / --real-rho-income-q1 only print them.
+            "real_reference": REAL_POINTER,
+            # Synthetic chat-model arms, computed from their run folders at the start of this run.
+            "baselines": baselines or BASELINE_POINTER,
         },
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     (run_dir / "raw_questions.json").write_text(json.dumps(QUESTIONS, indent=2) + "\n")
 
-    print(f"\n{'':22}{'1':>7}{'2':>7}{'3':>7}{'4':>7}{'5':>7}")
-    print(f"  {'Jev expected shares':<20}" + "".join(f"{s:>7.2f}" for s in shares))
-    print("  real 600            see real_comparison/<condition>/comparison_by_question.md")
-    print()
-    print(f"  rho(income, E[Q1])    {summary['rho_income_q1']:>6}   "
-          f"(real 0.10 | DeepSeek 0.67 | Qwen 0.72)")
-    print(f"  rho(income, E[Q2])    {summary['rho_income_q2']:>6}")
-    print(f"  top-2 share (4+5)     {summary['q1_top2_share']:>6}   (real 0.23)")
-    print(f"  mean confidence       {summary['q1_mean_confidence']:>6}")
-    print(f"  Q6 'cost' top choice  {summary['q6_cost_top_share']:>6}   (DeepSeek 0.98 | Qwen 0.87)")
-    print(f"  cost ~= ${summary['approx_usd']:.4f}   {summary['elapsed_seconds']}s")
+    for line in report_lines(summary, shares, real_shares, args.real_rho_income_q1, baselines):
+        print(line)
     print(f"\nWrote {run_dir}")
     return 0
 

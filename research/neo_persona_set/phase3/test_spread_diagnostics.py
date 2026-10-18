@@ -40,3 +40,43 @@ def test_income_gradient_uses_the_persona_file(tmp_path: Path) -> None:
     assert spread_diagnostics.diagnose_arm("fake", [r1])["rho_income_q1"] != arm["rho_income_q1"]  # NaN without the file
     assert "rho(income, Q1)" in spread_diagnostics.render([arm])
     assert spread_diagnostics.main(["--arm", f"fake={r1}", "--personas", str(personas)]) == 0
+
+
+def _fake_comparison(folder: Path) -> Path:
+    """A tiny compare_real-style comparison_options.csv: two runs repeating the same real columns."""
+    folder.mkdir(parents=True)
+    header = "run_id,our_id,kind,category,real_count,real_n,real_share\n"
+    rows = []
+    for run in ("r1", "r2"):
+        rows += [f"{run},Q1,likert,{level},{count},4,0" for level, count in zip(range(1, 6), (1, 1, 1, 1, 0))]
+        rows += [f"{run},Q2,likert,{level},{count},4,0" for level, count in zip(range(1, 6), (0, 0, 4, 0, 0))]
+        rows += [f"{run},Q6,single,The total cost,3,4,0"]  # not likert: ignored
+    (folder / "comparison_options.csv").write_text(header + "\n".join(rows) + "\n", encoding="utf-8")
+    return folder
+
+
+def test_real_row_is_computed_from_the_comparison_folder(tmp_path: Path) -> None:
+    import math
+    folder = _fake_comparison(tmp_path / "cmp")
+    real = spread_diagnostics.diagnose_real(folder)
+    # Q1 = 1,2,3,4 -> mean 2.5, population SD sqrt(1.25); Q2 = 3,3,3,3 -> SD 0; top-2 = 1 of 8 answers
+    assert real["arm"] == "real" and real["n_likert_items"] == 2 and real["n_personas"] == 4
+    assert abs(real["mean_sd"] - math.sqrt(1.25) / 2) < 1e-9 and real["top2_share"] == 1 / 8
+    assert math.isnan(real["q1_ne_q2_share"]) and math.isnan(real["rho_income_q1"])
+    assert "| real | 4 | n/a |" in spread_diagnostics.render([real])
+
+
+def test_real_from_writes_only_outside_the_repository(tmp_path: Path) -> None:
+    import pytest
+    r1 = conftest.build_fake_run(tmp_path / "a_r1", run_id="a_r1", model="stub/a", repeat="1")
+    folder = _fake_comparison(tmp_path / "cmp")
+    inside = Path(spread_diagnostics.__file__).resolve().parent / "diag_should_not_exist.csv"
+    with pytest.raises(SystemExit):
+        spread_diagnostics.main(["--arm", f"fake={r1}", "--real-from", str(folder), "--out", str(inside)])
+    assert not inside.exists()
+    with pytest.raises(SystemExit):
+        spread_diagnostics.main(["--arm", f"fake={r1}", "--real-from", str(folder), "--out", str(tmp_path / "aytm" / "diag.csv")])
+    out = tmp_path / "diag.csv"
+    assert spread_diagnostics.main(["--arm", f"fake={r1}", "--real-from", str(folder), "--out", str(out)]) == 0
+    rows = list(csv.DictReader(open(out, newline="", encoding="utf-8-sig")))
+    assert [r["arm"] for r in rows] == ["fake", "real"] and list(rows[0]) == spread_diagnostics.COLUMNS

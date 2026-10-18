@@ -216,7 +216,7 @@ def main() -> int:
             "distribution of age band x gender x income bracket x region reproduces the real "
             "survey respondents. Selection within each cell is proportional to the ACS household "
             "weight and without replacement. The earlier California / income / age screens are "
-            "NOT applied — they excluded 97% of the real respondents."
+            "NOT applied — they excluded almost all of the real respondents."
         ),
         "matched_on": ["age_band", "gender", "income_bracket", "region"],
         "outdoor_space_screen": (

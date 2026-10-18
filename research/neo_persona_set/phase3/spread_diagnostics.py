@@ -2,16 +2,25 @@
 
 For each arm (a set of run folders, ideally two repeats on the same personas) it reports:
   q1_ne_q2_share    share of personas whose Q1 (interest) and Q2 (likelihood) answers differ
-  mean_sd           mean within-question standard deviation over the 25 likert items (compare with the real survey's in the comparison folders)
+  mean_sd           mean within-question standard deviation over the 25 likert items (the real survey's: --real-from)
   top2_share        share of likert answers that are 4 or 5
   repeat_agreement  share of answers identical between repeat 1 and repeat 2 (same persona)
   q1_concept_corr   Pearson r between Q1 and the mean of Q9B..Q13B (concept purchase likelihood):
                     high when one early stance drives every later answer
   rho_income_q1     Spearman rank correlation between the persona's exact household income and Q1
-                    (needs --personas; the real 600 sit at about 0.10)
+                    (needs --personas). The real association needs respondent-level income, so it is
+                    not computed here; it is recorded with R010 in the Assets folder beside the
+                    repository (0_logs/EXPERIMENT_LOG.md), not in this file
+
+--real-from <compare_real output folder> adds a "real" row computed at runtime from that folder's
+comparison_options.csv: mean_sd and top2_share over the likert items compare_real maps (24; Q7 has
+no real counterpart), for whichever real respondents that comparison scored. The other columns need
+respondent-level joins and read n/a. No real value is written into this file; with --real-from the
+--out file holds real-derived numbers, so it must be outside the repository.
 
     apps/api/.venv/bin/python research/neo_persona_set/phase3/spread_diagnostics.py \\
-        --arm baseline=<run_r1>,<run_r2> --arm qpc10=<run_r1>,<run_r2> [--personas <persona csv>] [--out diagnostics.csv]
+        --arm baseline=<run_r1>,<run_r2> --arm qpc10=<run_r1>,<run_r2> [--personas <persona csv>] \\
+        [--real-from <compare_real output folder>] [--out diagnostics.csv]
 """
 
 from __future__ import annotations
@@ -19,8 +28,16 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
+import make_real_split  # noqa: E402
+import realdata  # noqa: E402
 
 LIKERT_ITEMS = ["Q0B", "Q1", "Q2", "Q5_1", "Q5_2", "Q5_3", "Q5_4", "Q5_5", "Q5_6", "Q5_7", "Q7", "Q9A", "Q9B", "Q10A", "Q10B",
                 "Q11A", "Q11B", "Q12A", "Q12B", "Q13A", "Q13B", "Q15", "Q16", "Q17", "Q19"]
@@ -135,6 +152,49 @@ def diagnose_arm(name: str, run_dirs: List[Path], personas_csv: Optional[Path] =
     }
 
 
+def read_real_likert(folder: Path) -> Dict[str, Dict[int, int]]:
+    """{likert item: {level: real count}} from one compare_real output folder's comparison_options.csv.
+
+    The file repeats every (question, option) row once per run compared in that folder; the real
+    columns are identical in every repeat because they describe the real respondents, not the run,
+    so later rows simply overwrite earlier ones with the same count.
+    """
+    counts: Dict[str, Dict[int, int]] = {}
+    with open(Path(folder) / "comparison_options.csv", newline="", encoding="utf-8-sig") as handle:
+        for row in csv.DictReader(handle):
+            if row.get("kind") != "likert" or row.get("our_id") not in LIKERT_ITEMS:
+                continue
+            level, count = _int(row.get("category")), _int(row.get("real_count"))
+            if level is not None and count is not None:
+                counts.setdefault(row["our_id"], {})[level] = count
+    return counts
+
+
+def diagnose_real(folder: Path) -> Dict[str, Any]:
+    """The real side's likert SD and top-2 share, computed at runtime from compare_real's marginals.
+
+    Same definitions as diagnose_arm: population SD per item, averaged over items; top-2 pooled over
+    every likert answer. Columns that need respondent-level joins are NaN.
+    """
+    counts = read_real_likert(folder)
+    items = [q for q in LIKERT_ITEMS if sum(counts.get(q, {}).values())]
+    sds: List[float] = []
+    top = total = largest = 0
+    for q in items:
+        levels = counts[q]
+        n = sum(levels.values())
+        mean = sum(level * c for level, c in levels.items()) / n
+        sds.append(math.sqrt(sum(c * (level - mean) ** 2 for level, c in levels.items()) / n))
+        top += sum(c for level, c in levels.items() if level >= 4)
+        total += n
+        largest = max(largest, n)
+    return {
+        "arm": "real", "runs": Path(folder).name, "n_personas": largest, "n_likert_items": len(items),
+        "q1_ne_q2_share": NAN, "mean_sd": sum(sds) / len(sds) if sds else NAN, "top2_share": top / total if total else NAN,
+        "repeat_agreement": NAN, "q1_concept_corr": NAN, "rho_income_q1": NAN,
+    }
+
+
 def _fmt(value: Any, pct: bool = False) -> str:
     if isinstance(value, float):
         if math.isnan(value):
@@ -156,12 +216,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--arm", action="append", required=True, metavar="NAME=RUN_DIR[,RUN_DIR...]")
     parser.add_argument("--personas", type=Path, default=None, help="persona CSV with exact_household_income, for the income gradient")
+    parser.add_argument("--real-from", type=Path, default=None,
+                        help="a compare_real output folder; adds a 'real' row computed from its marginals at runtime")
     parser.add_argument("--out", type=Path, default=None, help="also write the table as CSV")
     args = parser.parse_args(argv)
+    if args.real_from is not None and args.out is not None:
+        # The real row is derived from the AYTM file, so it never lands in the repository or the real-data folder.
+        make_real_split.assert_outside_repo(realdata.assert_not_real_data_path(args.out, "--out"), "--out")
     arms = []
     for spec in args.arm:
         name, _, paths = spec.partition("=")
         arms.append(diagnose_arm(name.strip(), [Path(p.strip()) for p in paths.split(",") if p.strip()], personas_csv=args.personas))
+    if args.real_from is not None:
+        arms.append(diagnose_real(args.real_from))
     print(render(arms))
     if args.out:
         with open(args.out, "w", newline="", encoding="utf-8-sig") as handle:
