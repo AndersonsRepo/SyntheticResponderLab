@@ -47,9 +47,13 @@ a two-proportion z-test.
 `add_bom.py` (Excel-safe rewrite of old run CSVs), `registry.py` (hypothesis registry),
 `write_start_here.py` (START_HERE.md for the shared folder), `import_driver_personas.py` (Dr. Lin's driver
 files onto the team's persona file), `make_mixed_panel.py` (one persona per
-arm across several runs), `spread_diagnostics.py` (spread and the income gradient), `judge_reasons.py` (a third model
+arm across several runs), `spread_diagnostics.py` (spread and the income gradient; `--real-from <compare_real
+folder>` adds the real survey's row, computed at run time), `judge_reasons.py` (a third model
 picks the better-reasoned answer between two `--reason-per-answer` runs; needs the API). Tests:
 `apps/api/.venv/bin/python -m pytest research/neo_persona_set/phase3 -q`.
+
+Analyses that back numbers in the experiment log but were first run inline are in `offline/`
+(section at the end).
 
 ## Scoring standard: Dr. Lin's calibration / validation split
 
@@ -107,4 +111,61 @@ so these runs are labelled hybrid end to end:
 3. `compare_real.py` refuses a hybrid run without `--real-ids` or with any of the four driver
    items in the scored set (`item_sets.LIN_DRIVERS`).
 
-Pre-registered: R020 (unstyled four-model mix) and R020b (styled), in `registry.csv`.
+Pre-registered: R020 (unstyled four-model mix) and R020b (styled), then R021 (drawing only) and
+R021b (drivers only) to separate R020's two changes, in `registry.csv`.
+
+`offline/r020_r021_attribution.py` re-derives all four from the saved panels (section below).
+
+## offline/ — recovered analyses (2026-10-18)
+
+Some numbers in the experiment log come from analyses that were run inline in Claude Code
+sessions and never committed. The scripts in `offline/` recover them from the session record.
+- They make no API calls and use no network.
+- Each refuses an output folder inside the repository or the real-data folder.
+- Each writes to a `reproduced_2026-10-18/` folder inside the experiment folder it re-derives, in
+  the Assets folder.
+- The checks against the log read the logged numbers from `0_logs/EXPERIMENT_LOG.md` at run time.
+  No logged or real-derived value is written into the code.
+- The real file is read only for aggregates, directly or through `compare_real.py`.
+
+The tests (`test_offline_*.py`) use tiny fake inputs only.
+
+| Script | Reproduces | Outputs in `5_experiments/…/reproduced_2026-10-18/` |
+| --- | --- | --- |
+| `sept17_side_tables.py` | R010: Q1 by income band and rho(income, Q1 / Q2) (`income-table`, needs `--real`). R004: money reasons among Q1 = 1 answers (`money-reasons`) | `2026-09-17_S1_prompt_and_sampling_tests` |
+| `sept25_review_checks.py` | The Sept 25 review: the 18 comparison folders and 38 ALL_ARMS rows, the persona bootstrap, the unstyled mix, the money-strip audit, the random control, shuffle invariance and the income-gradient shares (`all`, about a minute) | `2026-09-24_Yaza_ablations_models_styles` |
+| `r020_r021_attribution.py` | R020 / R020b / R021 / R021b: the persona -> model deal against R018u / R018b; Lin-standard scores; income rho on the drawn and the expected Q1; the Q1 4-5 share; the verdicts. The rules are read from `registry.csv` and R020's gains computed from the score files. It builds no panel: a missing one is reported (exit 2) | `2026-10-01_R020_drivers_plus_drawing`, `2026-10-02_R021_drawing_only_vs_drivers_only` |
+| `jev_drawn_offline.py` | The Oct 5 Jev arm: answers drawn from the saved Sept 24 Jev odds with `phase2/run_survey.draw_answer` (seeds 202610051 / 202610052), scored on the Lin standard; `--check-against` compares with the Oct 5 folder byte for byte | `2026-10-05_jev_drawn_offline` |
+| `noise_check_bootstrap.py` | The Oct 5 noise check: a paired persona bootstrap between saved arms (income link, Q1 4-5 share) and the exact gaps for Anderson's tie table. It reads synthetic runs only; the tie band is passed in | `2026-10-05_noise_check_and_average_shape` |
+| `average_shape_baseline.py` | The average human answer shape fitted on the fit respondents. It pools the calibration items by default; `--pool-items all-likert` reproduces the Oct 5 and Anderson numbers and warns that the pool overlaps the scored items | `2026-10-05_noise_check_and_average_shape` |
+| `historic_common.py` | shared helpers for the two Sept scripts (not a CLI) | — |
+
+```bash
+ASSETS=../SyntheticResponderLab-Assets
+REAL="$ASSETS/2_real_data_aytm/survey-760085-2026-03-25-raw-data.csv"
+SPLIT=$ASSETS/3_scoring_standard/real_splits/lin-seed42
+PY=apps/api/.venv/bin/python; OFF=research/neo_persona_set/phase3/offline
+$PY $OFF/sept17_side_tables.py income-table --real "$REAL"
+$PY $OFF/sept17_side_tables.py money-reasons
+$PY $OFF/sept25_review_checks.py all --real "$REAL"
+$PY $OFF/r020_r021_attribution.py --real "$REAL"
+$PY $OFF/jev_drawn_offline.py \
+  --jev-run $ASSETS/5_experiments/2026-09-24_Yaza_ablations_models_styles/survey_runs/20260924T170819Z_jev-latest_r1_s1-jev-full \
+  --personas $ASSETS/4_persona_sets/matched_600_v2_S1-S6_2026-09-16/phase1_interview_matched600_s1.csv \
+  --real "$REAL" --real-ids $SPLIT/score_ids.txt \
+  --out $ASSETS/5_experiments/2026-10-05_jev_drawn_offline/reproduced_2026-10-18 \
+  --check-against $ASSETS/5_experiments/2026-10-05_jev_drawn_offline
+# the tie band is a real-vs-real number: take it from Anderson's report
+# (3_scoring_standard/real_baselines_Anderson_2026-10-05.pdf); it is not stored in the repo
+$PY $OFF/noise_check_bootstrap.py --preset oct05 --assets $ASSETS \
+  --tie-band-tv <TV band> --tie-band-rank <rank band> \
+  --out $ASSETS/5_experiments/2026-10-05_noise_check_and_average_shape/reproduced_2026-10-18
+$PY $OFF/average_shape_baseline.py --real "$REAL" \
+  --fit-ids $SPLIT/fit_ids.txt --score-ids $SPLIT/score_ids.txt \
+  --pool-items lin13-calibration --pool-items all-likert --score-items lin13-validation \
+  --out $ASSETS/5_experiments/2026-10-05_noise_check_and_average_shape/reproduced_2026-10-18
+```
+
+`jev_drawn_offline.py` imports `phase2/run_survey.py`, so it needs the `apps/api` venv. What each
+run reproduced, and the few numbers that did not match, are in the experiment log in the Assets
+folder (the 2026-10-05 entries, section 6 Reproducibility, section 8 Open issues).

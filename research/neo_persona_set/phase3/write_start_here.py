@@ -43,6 +43,8 @@ EXPERIMENTS = OrderedDict([
     ("2026-09-30_rescore_on_DrLin_standard", "R018u (the four models without styles, built from Yaza's Sept 23 runs, no new API calls) and the baselines scored on Dr. Lin's standard."),
     ("2026-10-01_R020_drivers_plus_drawing", "R020 / R020b: driver personas + answers drawn from stated probabilities on the four-model mix, unstyled and styled. R020 is the best setup so far."),
     ("2026-10-02_R021_drawing_only_vs_drivers_only", "R021 / R021b: drawing alone and drivers alone, to separate R020's two changes."),
+    ("2026-10-05_jev_drawn_offline", "Jev with answers drawn from its own saved Sept 24 odds (two seeds), scored on Dr. Lin's standard; offline, no API calls. The run manifests are copies of the Sept 24 Jev manifest (see NOTE_reproduction.md)."),
+    ("2026-10-05_noise_check_and_average_shape", "Paired persona bootstrap on the drivers' effect (R020 vs R021, R021b vs R018u), the exact gaps for Anderson's tie table, and the average human answer shape as a baseline; offline, no API calls. README.md has the results and the item-split caveat."),
 ])
 RUN_FILES = OrderedDict([
     ("answers_long.csv", "one row per persona x question: run_id, model, repeat, seed, persona_id, respondent_id, question_id, question_type, answer, answer_json, is_fallback. Drop rows with is_fallback = true."),
@@ -175,6 +177,7 @@ def render_start_here(*, assets: Path, keeper_run: Optional[Path], today: str) -
     lines += ["", "## Inside an experiment folder", "",
               "- `survey_runs/`: one folder per model run (plus mixed panels), `index.csv` (one row per run incl. smoke and failed runs) and `cross_run_summary.md`.",
               "- `real_comparison/<stamp>/`: scoring against the real survey; start with `comparison_summary.csv` or `comparison_by_question.md`.",
+              "- `reproduced_<date>/`: the folder's logged numbers re-derived offline by a script in research/neo_persona_set/phase3/offline/ (written on that date; the experiment log says what matched).",
               "", "## Run folder names", "", "`<timestamp>_<model>_r<repeat>[_n<limit>|_p<panel>][_<tag>][_failed]`", "",
               "- timestamp: start time in UTC, 20260910T014617Z = 2026-09-10 01:46:17 UTC.",
               "- model: the OpenRouter model without the vendor prefix (deepseek-v4-pro-0813, qwen3.7-plus), or `mixed-panel` for a panel built from several runs.",
