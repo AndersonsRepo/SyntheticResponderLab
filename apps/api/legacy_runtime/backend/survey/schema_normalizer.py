@@ -116,4 +116,5 @@ def _normalize_question(
 		"min_value": raw_question.get("min_value"),
 		"max_value": raw_question.get("max_value"),
 		"help_text": raw_question.get("help_text"),
+		"preamble": raw_question.get("preamble"),
 	}
