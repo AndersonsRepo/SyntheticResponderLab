@@ -112,9 +112,12 @@ so these runs are labelled hybrid end to end:
    items in the scored set (`item_sets.LIN_DRIVERS`).
 
 Pre-registered: R020 (unstyled four-model mix) and R020b (styled), then R021 (drawing only) and
-R021b (drivers only) to separate R020's two changes, in `registry.csv`.
+R021b (drivers only) to separate R020's two changes, in `registry.csv`. R022 (2026-10-19) is the
+S2 confirmation of R020 on Dr. Lin's S2, judged by his rule against R022u (the same mix without
+drivers or drawing); its row's notes give the exact run, panel and random-control commands.
 
-`offline/r020_r021_attribution.py` re-derives all four from the saved panels (section below).
+`offline/r020_r021_attribution.py` re-derives the first four from the saved panels and scores
+R022 with `--only R022` (section below).
 
 ## offline/ — recovered analyses (2026-10-18)
 
@@ -123,18 +126,20 @@ sessions and never committed. The scripts in `offline/` recover them from the se
 - They make no API calls and use no network.
 - Each refuses an output folder inside the repository or the real-data folder.
 - Each writes to a `reproduced_2026-10-18/` folder inside the experiment folder it re-derives, in
-  the Assets folder.
+  the Assets folder. The one exception is `r020_r021_attribution.py --only R022`, a new experiment
+  rather than a reproduction: it writes to `lin_rule_verdict/` inside the R022 folder.
 - The checks against the log read the logged numbers from `0_logs/EXPERIMENT_LOG.md` at run time.
   No logged or real-derived value is written into the code.
 - The real file is read only for aggregates, directly or through `compare_real.py`.
 
 The tests (`test_offline_*.py`) use tiny fake inputs only.
 
-| Script | Reproduces | Outputs in `5_experiments/…/reproduced_2026-10-18/` |
+| Script | Reproduces | Outputs in `5_experiments/…/reproduced_2026-10-18/` (unless another folder is named) |
 | --- | --- | --- |
 | `sept17_side_tables.py` | R010: Q1 by income band and rho(income, Q1 / Q2) (`income-table`, needs `--real`). R004: money reasons among Q1 = 1 answers (`money-reasons`) | `2026-09-17_S1_prompt_and_sampling_tests` |
 | `sept25_review_checks.py` | The Sept 25 review: the 18 comparison folders and 38 ALL_ARMS rows, the persona bootstrap, the unstyled mix, the money-strip audit, the random control, shuffle invariance and the income-gradient shares (`all`, about a minute) | `2026-09-24_Yaza_ablations_models_styles` |
-| `r020_r021_attribution.py` | R020 / R020b / R021 / R021b: the persona -> model deal against R018u / R018b; Lin-standard scores; income rho on the drawn and the expected Q1; the Q1 4-5 share; the verdicts. The rules are read from `registry.csv` and R020's gains computed from the score files. It builds no panel: a missing one is reported (exit 2) | `2026-10-01_R020_drivers_plus_drawing`, `2026-10-02_R021_drawing_only_vs_drivers_only` |
+| `r020_r021_attribution.py` | R020 / R020b / R021 / R021b: the persona -> model deal against R018u / R018b; Lin-standard scores; income rho on the drawn and the expected Q1; the Q1 4-5 share; the verdicts. The rules are read from `registry.csv`, as committed at each row's pre-registration commit when git can show it, and R020's gains computed from the score files. It builds no panel: a missing one is reported (exit 2). The default run is R020 and R021 | `2026-10-01_R020_drivers_plus_drawing`, `2026-10-02_R021_drawing_only_vs_drivers_only` |
+| `r020_r021_attribution.py --only R022` | Not a reproduction: R022 against R022u under Dr. Lin's rule on his S2 (income link from `4_persona_sets/hybrid_drivers/run_ready/s2lin_drv.csv`), with the S2 random control. Needs none of the S1 panels and is not checked against the log | `2026-10-20_R022_S2_confirmation/lin_rule_verdict/` |
 | `jev_drawn_offline.py` | The Oct 5 Jev arm: answers drawn from the saved Sept 24 Jev odds with `phase2/run_survey.draw_answer` (seeds 202610051 / 202610052), scored on the Lin standard; `--check-against` compares with the Oct 5 folder byte for byte | `2026-10-05_jev_drawn_offline` |
 | `noise_check_bootstrap.py` | The Oct 5 noise check: a paired persona bootstrap between saved arms (income link, Q1 4-5 share) and the exact gaps for Anderson's tie table. It reads synthetic runs only; the tie band is passed in | `2026-10-05_noise_check_and_average_shape` |
 | `average_shape_baseline.py` | The average human answer shape fitted on the fit respondents. It pools the calibration items by default; `--pool-items all-likert` reproduces the Oct 5 and Anderson numbers and warns that the pool overlaps the scored items | `2026-10-05_noise_check_and_average_shape` |
@@ -149,6 +154,7 @@ $PY $OFF/sept17_side_tables.py income-table --real "$REAL"
 $PY $OFF/sept17_side_tables.py money-reasons
 $PY $OFF/sept25_review_checks.py all --real "$REAL"
 $PY $OFF/r020_r021_attribution.py --real "$REAL"
+$PY $OFF/r020_r021_attribution.py --real "$REAL" --only R022   # after the R022 runs and panels
 $PY $OFF/jev_drawn_offline.py \
   --jev-run $ASSETS/5_experiments/2026-09-24_Yaza_ablations_models_styles/survey_runs/20260924T170819Z_jev-latest_r1_s1-jev-full \
   --personas $ASSETS/4_persona_sets/matched_600_v2_S1-S6_2026-09-16/phase1_interview_matched600_s1.csv \
