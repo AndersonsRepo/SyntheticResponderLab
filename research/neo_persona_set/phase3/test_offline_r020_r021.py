@@ -212,3 +212,65 @@ def test_expected_q1_and_the_45_share(tmp_path: Path) -> None:
     assert attr.share_45(attr.q1_answers(run)) == pytest.approx(3 / 6)
     assert attr.q1_expected(_panel(tmp_path, "no_odds", 1, [1] * 6)) is None
     assert attr.log_arm("Real vs real") is None and attr.log_arm("R020b + drivers + drawing") == "R020b" and attr.log_arm("Random control") == "random"
+
+
+def test_r022_prereg_rule_is_parsed_and_runs_on_s2_personas() -> None:
+    rows = attr.read_registry(attr.DEFAULT_REGISTRY)
+    text, _ = attr.rule_text(attr.DEFAULT_REGISTRY, rows, "R022")
+    rule = attr.parse_lin_rule(text, rows["R022"]["condition"], "R022")
+    assert (rule["rho_drop_min"], rule["tv_drop_min"], rule["baseline"]) == (0.20, 0.05, "R022u")
+    assert rule["styles"] is None and rule["stated"] is None  # no style rule; R022u's numbers are not known before the run
+    spec = attr.EXPERIMENTS["R022"]
+    assert spec["lin_rule"] == ["R022"] and spec["attribution"] == [] and attr.PAIRING["R022"] == ("R022u", ("model",))
+    assert spec["personas"] == Path("4_persona_sets/hybrid_drivers/run_ready/s2lin_drv.csv") != attr.PERSONAS_REL
+    assert all(attr.ARMS[arm][1].startswith("s2lin-") for arm in spec["arms"])  # no S1 panel is needed
+    assert "R022" not in attr.DEFAULT_EXPERIMENTS
+
+
+def test_r022_scores_without_s1_panels_on_the_s2_persona_file(tmp_path: Path, fake_real_csv: Path) -> None:
+    assets = tmp_path / "assets"
+    runs = assets / "5_experiments" / "2026-10-20_R022" / "survey_runs"
+    answers = {"R022u": ([1, 1, 1, 1, 2, 2], [1, 1, 1, 2, 2, 2]), "R022": ([2, 1, 3, 1, 3, 2], [1, 2, 3, 3, 1, 2])}  # R018u's and R020's above
+    for rep in (1, 2):
+        _panel(runs, f"T3_mixed-panel_r{rep}_s2lin-R022u-mixed", rep, answers["R022u"][rep - 1])
+        _panel(runs, f"T3_mixed-panel_r{rep}_s2lin-R022-hybrid-mixed", rep, answers["R022"][rep - 1], odds=[3, 1, 5, 2, 6, 4], kind="hybrid")
+        _panel(runs, f"T3_random-uniform_r{rep}_s2lin-RANDOM", rep, [1, 2, 3, 4, 5, 1], models=["random-uniform"] * 6)
+    # One single-model run per arm, named as run_survey.py names them: R022u runs with --persona-ids, which adds _p100.
+    singles = {_panel(runs, "T3_qwen3.7-plus_r1_p100_s2lin-R022u-single-unstyled", 1, answers["R022u"][0]).name,
+               _panel(runs, "T3_qwen3.7-plus_r1_s2lin-R022-hybrid-draw-unstyled", 1, answers["R022"][0], odds=[3, 1, 5, 2, 6, 4], kind="hybrid").name}
+    s2 = assets / attr.PERSONAS_S2_REL  # the S1 default (s1_drv.csv) is deliberately absent
+    s2.parent.mkdir(parents=True)
+    _write(s2, ["persona_id", "exact_household_income"], [{"persona_id": p, "exact_household_income": inc} for p, inc in zip(PIDS, INCOMES)])
+    ids = tmp_path / "ids" / "score_ids.txt"
+    ids.parent.mkdir()
+    ids.write_text("\n".join(str(1000 + i) for i in range(6)) + "\n", encoding="utf-8")
+    committed = attr.read_registry(attr.DEFAULT_REGISTRY)["R022"]
+    registry = tmp_path / "registry.csv"
+    _write(registry, ["registry_id", "hypothesis", "condition"], [{"registry_id": "R022", "hypothesis": committed["hypothesis"], "condition": committed["condition"]}])
+
+    assert attr.main(["--real", str(fake_real_csv), "--assets", str(assets), "--real-ids", str(ids), "--registry", str(registry), "--only", "R022"]) == 0
+    verdict = json.loads((assets / "5_experiments" / "2026-10-20_R022" / "lin_rule_verdict" / "r022_verdict.json").read_text(encoding="utf-8"))
+    assert verdict["inputs"]["personas"] == str(s2.resolve())
+    assert set(verdict["table"]) == {"R022u", "R022", "random_s2"} and verdict["pairing"]["R022"]["ok"]
+    assert {Path(p).name for p in verdict["singles"]} == singles  # scored for the record, R022u's _p100 run included
+    v = verdict["verdicts"]["R022"]
+    assert v["baseline"] == "R022u" and v["rho_drop"] == pytest.approx(0.841281820819 - 0.179284291400) and verdict["verdict_words"] == {"R022": "pass"}
+    assert verdict["reproduction_check"]["checked"] == 0  # a new experiment is not checked against the log
+
+
+def test_single_model_runs_are_found_with_or_without_a_subset_segment(tmp_path: Path) -> None:
+    runs = tmp_path / "survey_runs"
+    names = {
+        "T_gpt-5-mini_r1_p100_s2lin-R022u-single-unstyled": True,   # --persona-ids: run_survey.py adds _p100
+        "T_qwen3.7-plus_r2_p100_s2lin-R022u-single-unstyled": True,
+        "T_qwen3.7-plus_r1_n5_s2lin-R022u-single-unstyled": True,   # --limit adds _n<N>
+        "T_qwen3.7-plus_r1_s2lin-R022-hybrid-draw-unstyled": True,
+        "T_qwen3.7-plus_r1_x100_s2lin-R022u-single-unstyled": False,  # not a segment run_survey.py writes
+        "T_qwen3.7-plus_r1_p100_s2lin-R022u-single-unstyled_failed": False,
+        "T_qwen3.7-plus_r3_p100_s2lin-R022u-single-unstyled": False,  # not a pre-registered repeat
+        "T_mixed-panel_r1_s2lin-R022u-mixed": False,
+    }
+    for name in names:
+        (runs / name).mkdir(parents=True)
+    found = {p.name for p in attr.find_singles(runs, ["R022u", "R022"])}
+    assert found == {name for name, wanted in names.items() if wanted}
