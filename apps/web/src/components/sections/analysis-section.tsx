@@ -180,7 +180,9 @@ export function AnalysisSection() {
                       {isLoading ? <BadgeChip>Refreshing</BadgeChip> : null}
                     </div>
 
-                    <div className="w-full max-w-md lg:w-[23rem]">
+                    {/* shrink-0: as a flex item the filter otherwise gives way to the long demo chip and cuts
+                        model ids short ("openai/gpt-5-m"). */}
+                    <div className="w-full max-w-md lg:w-[16rem] lg:shrink-0 2xl:w-[23rem]">
                       <div className="mb-2 text-[0.72rem] uppercase tracking-[0.22em] text-app-muted">
                         Filter Results By Model
                       </div>
@@ -197,7 +199,9 @@ export function AnalysisSection() {
                 </div>
               </div>
 
-              <div className="grid gap-5 xl:grid-cols-2">
+              {/* Two columns only from 2xl: below that a half-width card is narrower than a five-option bar
+                  chart (32rem), which then scrolls sideways and hides its last options and label text. */}
+              <div className="grid gap-5 2xl:grid-cols-2">
                 {questions.length > 0 ? (
                   questions.map((question) => (
                     <QuestionDashboardCard

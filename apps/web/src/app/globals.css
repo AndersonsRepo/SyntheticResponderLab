@@ -434,10 +434,18 @@ body {
   mask-image: radial-gradient(circle at center, rgba(0, 0, 0, 0.85), transparent 82%);
 }
 
+/* The sheen sits on the panel's own fill, under its content: painted over the content, the light theme's 70%
+   white washed out the text in the top third of every tall panel (the preloaded-demo banner on Run, the
+   Insights headlines). isolation keeps z-index -1 inside the panel. */
+.glass-sheen {
+  isolation: isolate;
+}
+
 .glass-sheen::before {
   content: "";
   position: absolute;
   inset: 0;
+  z-index: -1;
   border-radius: inherit;
   background: var(--glass-sheen-bg);
   pointer-events: none;
@@ -539,4 +547,23 @@ body {
 
 [data-theme="light"] .fine-scrollbar::-webkit-scrollbar-thumb {
   background: rgba(58, 120, 160, 0.22);
+}
+
+/* Status text tuned for the dark theme (amber/emerald/red -300) is too pale to read on the light theme's
+   cream panels. The demo disclosures ("Preloaded demo answers", "Not a live run") are set in it. */
+[data-theme="light"] .text-amber-300 {
+  color: var(--status-warning-text);
+}
+
+[data-theme="light"] .text-emerald-300 {
+  color: var(--status-success-text);
+}
+
+[data-theme="light"] .text-red-300 {
+  color: var(--status-error-text);
+}
+
+/* The persona follow-up conversation box keeps the dark theme's near-black fill otherwise. */
+[data-theme="light"] [class*="bg-[rgba(8,11,15"] {
+  background-color: rgba(255, 255, 255, 0.82) !important;
 }
