@@ -1,0 +1,97 @@
+{
+  "title": "Grounded Synthetic Respondent Lab walkthrough",
+  "version": "v3",
+  "voice": {
+    "engine": "kokoro",
+    "name": "af_heart",
+    "speed": 1.0
+  },
+  "chapters": [
+    {
+      "step": "intro",
+      "label": "Introduction",
+      "text": "Welcome to the Grounded Synthetic Respondent Lab. It's a place to practice market research with AI respondents before you talk to real customers. We built it at Cal Poly Pomona with Dr. Fan Wang and Dr. Yufan Lin. First, turn on the Demo (no AI) switch at the top. It replays saved answers, so nothing is charged."
+    },
+    {
+      "step": "setup",
+      "label": "1 Set up",
+      "text": "Under Set Up, choose the Neo Smart Living guided demo. One click fills in every step for a real product, a small backyard studio called the Tahoe Mini. A custom study starts blank, for your own product."
+    },
+    {
+      "step": "audience",
+      "label": "2 Audience",
+      "text": "Audience says who you want to hear from: location, age, income, home ownership and lifestyle. Respondent traits are drawn from US Census tables, so the mix of ages, incomes and homes is realistic."
+    },
+    {
+      "step": "product",
+      "label": "3 Product",
+      "text": "Product describes what people are reacting to: the business, the product, its price range, key features, use cases and likely concerns. Every respondent reads this context before answering."
+    },
+    {
+      "step": "market",
+      "label": "4 Market",
+      "text": "Market adds the alternatives people compare against, like a shed conversion or a home addition, plus the features they expect and the objections they usually raise."
+    },
+    {
+      "step": "survey",
+      "label": "5 Survey",
+      "text": "Survey holds the questionnaire. The guided demo loads the Tahoe Mini survey, or you can upload your own as Markdown, Word or PDF. You can also add your own question. I'll ask how interested people would be in solar panels on the roof, on a one to five scale."
+    },
+    {
+      "step": "experiment",
+      "label": "6 Experiment",
+      "text": "Experiment sets the sample size and the models. You can mix models and pick Split Sample to divide respondents between them, or Mirror to have each model answer the same people. I'll ask for one hundred respondents and save the plan."
+    },
+    {
+      "step": "run",
+      "label": "7 Run",
+      "text": "With Demo on, Run live is locked, so I'll show the preloaded demo. These are one hundred synthetic respondents, answered earlier by four models that drew each answer from the odds they stated. No AI is called. My solar question isn't in that saved run; it needs a live run."
+    },
+    {
+      "step": "result",
+      "label": "8 Result",
+      "text": "Result turns every question into a small dashboard. You can read the overall answers, or filter by model to see how one model answered on its own."
+    },
+    {
+      "step": "insights",
+      "label": "9 Insights",
+      "text": "Insights pulls the signals together: the leading use case, the heaviest barriers, and which concepts lift purchase interest. Read it as directional, not a forecast. It tells you what to check with real people."
+    },
+    {
+      "step": "jev_live",
+      "label": "Run live with Jev",
+      "placeholder": true,
+      "text": "Now I turn Demo off and press Run live. With the class key set, the guided demo uses Jev, which answers every scale and choice question by drawing from the odds it states. One hundred respondents take a few seconds, and every answer comes live from the model. In Result, my solar panel question now has its own chart. Then I turn Demo back on for the rest of the tour."
+    },
+    {
+      "step": "interview",
+      "label": "10 Interview",
+      "text": "Interview runs synthetic depth interviews with the same kind of personas. In the guided demo these are seeded transcripts, so no model is called, and the page says so. You can open each transcript pair to read it."
+    },
+    {
+      "step": "research_brief",
+      "label": "11 Research brief",
+      "text": "The Research Brief frames what you want to learn: your main question, your hypotheses, and the decisions the interviews should inform. It tells the insights step which themes matter most."
+    },
+    {
+      "step": "interview_insights",
+      "label": "12 Interview insights",
+      "text": "Interview Insights groups the transcripts into recurring themes, each with a representative quote. With a live key, you can also keep interviewing any persona in character."
+    },
+    {
+      "step": "interview_page",
+      "label": "Student Interview",
+      "text": "Student Interview is a separate page for class. Each persona is one household drawn from Census data. Students pick one, ask their own questions, and export the transcript. In demo mode it plays back pre-recorded interviews at no cost."
+    },
+    {
+      "step": "focus_group",
+      "label": "Focus Group",
+      "text": "Focus Group puts you in the moderator's seat. The personas hear each other and react, across five stages, from an icebreaker through price reactions to a close. You tag quotes into themes and write your own memo. The demo replays a recorded session."
+    },
+    {
+      "step": "close",
+      "label": "What to do next",
+      "text": "That's the whole loop: set up, survey, run, read the results, and interview. These answers are a rehearsal, not data. Use them to sharpen your questions, and always compare what the AI says with real customers before you decide anything. The student team behind the lab is Anderson Edmond, Minh and Yaza."
+    }
+  ]
+}

@@ -5,11 +5,15 @@ import { MetricPill } from "@/components/ui/metric-pill";
 import { RevealOnScroll } from "@/components/ui/reveal-on-scroll";
 import { SectionWrapper } from "@/components/ui/section-wrapper";
 import { HeroSignalPanel } from "@/components/sections/hero-signal-panel";
+import { useWalkthrough } from "@/components/walkthrough/walkthrough-provider";
+import { WALKTHROUGH } from "@/lib/walkthrough-chapters";
+import { formatTime } from "@/lib/walkthrough";
 import { useSectionRegistry } from "@/providers/section-registry-provider";
 import { useStudy } from "@/providers/study-provider";
 
 export function MainHeroSection() {
   const { scrollToSection } = useSectionRegistry();
+  const walkthrough = useWalkthrough();
   const {
     createOrLoadStudy,
     createFreshStudy,
@@ -66,6 +70,10 @@ export function MainHeroSection() {
             >
               {isCreatingStudy || isHydratingStudy ? "Preparing Setup..." : "Start Setup"}
               <ArrowRightIcon />
+            </Button>
+            <Button variant="secondary" onClick={() => walkthrough.open()} className="w-full sm:w-auto">
+              <span aria-hidden="true">{"\u25B6\uFE0E"}</span>
+              Watch the walkthrough ({formatTime(WALKTHROUGH.duration)})
             </Button>
           </div>
 

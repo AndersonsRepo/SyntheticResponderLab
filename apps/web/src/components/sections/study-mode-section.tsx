@@ -185,6 +185,7 @@ export function StudyModeSection() {
         <RevealOnScroll>
           <SectionHeader
             index={1}
+            videoStep="setup"
             eyebrow="Study Setup"
             title="Choose how you want to start this study."
             description="Pick the path that fits your demo. Guided Demo loads Neo Smart defaults. Custom Study starts blank so you can build your own setup."

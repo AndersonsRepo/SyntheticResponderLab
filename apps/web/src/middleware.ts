@@ -15,19 +15,11 @@ import {
   isClassroomStudentPage,
   isValidClassroomSessionId,
 } from "./lib/classroom-access";
+import { isAlwaysPublicPath } from "./lib/public-paths";
 
 const isClerkConfigured =
   (process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY?.trim() || "") !== "" &&
   (process.env.CLERK_SECRET_KEY?.trim() || "") !== "";
-
-const isAlwaysPublicPath = (pathname: string) =>
-  pathname.startsWith("/_next/") ||
-  pathname === "/favicon.ico" ||
-  pathname === "/api/readiness" ||
-  pathname.startsWith("/access") ||
-  pathname.startsWith("/api/access/") ||
-  // Ending a shared-device session only clears a cookie; it must never need one.
-  pathname.startsWith("/api/classroom/");
 
 function unauthorizedApiResponse() {
   return NextResponse.json(
@@ -152,7 +144,8 @@ export default composed;
 
 export const config = {
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico).*)",
+    // media/: the walkthrough video and its captions, public, and fetched in many range requests while it plays.
+    "/((?!_next/static|_next/image|favicon.ico|media/).*)",
     "/api/backend/:path*",
   ],
 };

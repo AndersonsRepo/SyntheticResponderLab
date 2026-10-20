@@ -3120,7 +3120,7 @@ def _build_barrier_ranking(df: pd.DataFrame, study_mode: Optional[str] = None) -
         rows.append(
             {
                 "question_id": str(question_id),
-                "label": _compact_question_label(_safe_first_value(qdf, "question_text"), fallback=str(question_id)),
+                "label": _matrix_item_label(_safe_first_value(qdf, "question_text"), fallback=str(question_id)),
                 "value": round(float(numeric.mean()), 2),
             }
         )
@@ -3263,10 +3263,12 @@ def _build_segment_heatmap(
             values.append({"segment": segment, "value": round(mean_value, 2) if mean_value is not None else None})
         if not has_numeric_value:
             continue
+        # Barrier rows share the matrix preamble; label them by their row name, as the barrier ranking does.
+        label_for = _matrix_item_label if question_id.startswith("Q5_") else _compact_question_label
         rows.append(
             {
                 "question_id": question_id,
-                "label": _compact_question_label(_safe_first_value(qdf, "question_text"), fallback=question_id),
+                "label": label_for(_safe_first_value(qdf, "question_text"), fallback=question_id),
                 "values": values,
             }
         )
@@ -3308,7 +3310,9 @@ def _build_model_difference_chart(df: pd.DataFrame) -> dict[str, Any]:
         rows.append(
             {
                 "question_id": str(question_id),
-                "label": _compact_question_label(_safe_first_value(qdf, "question_text"), fallback=str(question_id)),
+                "label": (
+                    _matrix_item_label if str(question_id).startswith("Q5_") else _compact_question_label
+                )(_safe_first_value(qdf, "question_text"), fallback=str(question_id)),
                 "spread": round(spread, 2),
                 "values": [
                     {"model": str(model_name), "value": round(float(value), 2)}
@@ -3442,13 +3446,34 @@ def _segment_score_table(df: pd.DataFrame) -> dict[str, float]:
     return scores
 
 
-def _compact_question_label(text: Optional[str], *, fallback: str) -> str:
+def _compact_question_label(text: Optional[str], *, fallback: str, limit: int = 54) -> str:
     if not text:
         return fallback
     normalized = " ".join(str(text).split())
-    if len(normalized) <= 54:
+    if len(normalized) <= limit:
         return normalized
-    return f"{normalized[:51].rstrip()}..."
+    return f"{normalized[: limit - 3].rstrip()}..."
+
+
+MATRIX_ITEM_SEPARATOR = " — "
+
+
+def _matrix_item_label(text: Optional[str], *, fallback: str) -> str:
+    """The row name of a matrix sub-question, such as one Q5_x barrier.
+
+    The parsers expand a matrix into one question per row, worded "<shared preamble> — <row>". Every row
+    shares the long preamble, so compacting the full text from the front leaves the same truncated label on
+    each of them. The row name after the last separator is what tells them apart.
+    """
+    if text:
+        normalized = " ".join(str(text).split())
+        if MATRIX_ITEM_SEPARATOR in normalized:
+            item = normalized.rsplit(MATRIX_ITEM_SEPARATOR, 1)[1].strip()
+            if item:
+                # Row names are short phrases ("Uncertainty about whether a building permit is required");
+                # give them a little more room than a full question before cutting them.
+                return _compact_question_label(item, fallback=fallback, limit=80)
+    return _compact_question_label(text, fallback=fallback)
 
 
 def _build_realism_label(realism_scorecard: dict[str, Any]) -> str:

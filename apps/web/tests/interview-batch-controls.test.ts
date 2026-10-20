@@ -70,6 +70,7 @@ function harness(savedBatches: any[] = [], comparisonFetcher?: Parameters<typeof
   const mocks: Record<string, any> = {
     react,
     "@/components/demo/demo-mode": { DemoScreens: "demo-screens", DemoNotice: "demo-notice", useDemoActivity() {} },
+    "@/components/walkthrough/watch-step-button": { WatchStepButton: "watch-step-button" },
     "@/lib/demo-mode": { useDemoMode: () => [demoEnabled, () => {}], isDemoMode: () => demoEnabled },
     "framer-motion": { AnimatePresence: "presence", motion: { div: "div" } },
     "@/lib/api": api,

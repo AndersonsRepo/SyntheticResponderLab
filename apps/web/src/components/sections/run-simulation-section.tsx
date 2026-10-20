@@ -405,6 +405,7 @@ export function RunSimulationSection() {
           <RevealOnScroll>
             <SectionHeader
               index={7}
+              videoStep="run"
               eyebrow="Run Simulation"
               title="Generate Synthetic Survey Responses"
               description="Review the saved setup, then generate synthetic responses before moving into analysis."

@@ -240,6 +240,7 @@ export function ResearchBriefSection() {
           <RevealOnScroll>
             <SectionHeader
               index={11}
+              videoStep="research_brief"
               eyebrow="Research Brief"
               title="Frame your research intent before exploring interview insights."
               description="This brief tells the insights layer what question you're trying to answer, what you expect to find, and which decisions the interviews should inform."

@@ -466,6 +466,7 @@ export function ExperimentSection() {
           <RevealOnScroll>
             <SectionHeader
               index={6}
+              videoStep="experiment"
               eyebrow="Experiment Design"
               title="Define how this study should execute."
               description="Choose how many responses to generate, which models to use, and how you want to compare them before running the study."
