@@ -227,6 +227,14 @@ def test_r022_prereg_rule_is_parsed_and_runs_on_s2_personas() -> None:
     assert "R022" not in attr.DEFAULT_EXPERIMENTS
 
 
+def test_r022_rule_is_checked_against_its_prereg_commit() -> None:
+    rows = attr.read_registry(attr.DEFAULT_REGISTRY)
+    text, source = attr.rule_text(attr.DEFAULT_REGISTRY, rows, "R022")
+    assert attr.PREREG_COMMITS["R022"] == "07991f2" and source["prereg_commit"] == "07991f2"
+    assert source["checked_against_commit"] is True and source["unchanged_since_prereg"] is True
+    assert text == rows["R022"]["hypothesis"]
+
+
 def test_r022_scores_without_s1_panels_on_the_s2_persona_file(tmp_path: Path, fake_real_csv: Path) -> None:
     assets = tmp_path / "assets"
     runs = assets / "5_experiments" / "2026-10-20_R022" / "survey_runs"

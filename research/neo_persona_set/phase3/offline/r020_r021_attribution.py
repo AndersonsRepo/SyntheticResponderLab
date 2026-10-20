@@ -131,10 +131,10 @@ EXPERIMENTS: Dict[str, Dict[str, Any]] = {
 }
 # Run when --only is not given: the reproductions. R022 is a new experiment, scored with --only R022.
 DEFAULT_EXPERIMENTS = ("R020", "R021")
-# R022 is pre-registered by the commit that adds its registry row; a commit cannot name itself, so its
-# sha is added here afterwards. Until then its rule is read from the working registry (and the verdict
-# records checked_against_commit: false).
-PREREG_COMMITS = {"R020": "9caba69", "R020b": "9caba69", "R021": "c5bb11d", "R021b": "c5bb11d"}
+# R022 is pre-registered by 07991f2, the commit that adds its registry row; a commit cannot name itself, so
+# its sha was added here by the next commit. Its rule is read from that commit, so a later edit to the
+# hypothesis is reported and ignored (the verdict records checked_against_commit: true).
+PREREG_COMMITS = {"R020": "9caba69", "R020b": "9caba69", "R021": "c5bb11d", "R021b": "c5bb11d", "R022": "07991f2"}
 # What each attribution hypothesis predicts (credited or not, per metric), and the registry phrase it
 # comes from; the phrase must still be in the hypothesis or the script stops.
 PREDICTIONS: Dict[str, Tuple[Tuple[str, ...], Dict[str, bool]]] = {
