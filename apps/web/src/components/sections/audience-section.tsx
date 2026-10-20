@@ -404,6 +404,7 @@ export function AudienceSection() {
           <RevealOnScroll>
             <SectionHeader
               index={2}
+              videoStep="audience"
               eyebrow="Audience Builder"
               title="Who do you want to hear from?"
               description="Set the audience for your synthetic respondents. These filters define who gets represented in the simulation."

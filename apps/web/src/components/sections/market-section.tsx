@@ -315,6 +315,7 @@ export function MarketSection() {
           <RevealOnScroll>
             <SectionHeader
               index={4}
+              videoStep="market"
               eyebrow="Competitor & Market Context"
               title="What else will people compare this product to?"
               description="Set the market context respondents will use when judging your product, including alternatives, expectations, and common concerns."

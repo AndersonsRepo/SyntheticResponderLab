@@ -602,6 +602,7 @@ export function ProductSection() {
           <RevealOnScroll>
             <SectionHeader
               index={3}
+              videoStep="product"
               eyebrow="Business & Product Context"
               title="What are people reacting to?"
               description="Describe your product, who it is for, and why it matters. This gives respondents the context they need to give useful feedback."

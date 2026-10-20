@@ -1,0 +1,356 @@
+WEBVTT
+
+1
+00:00:00.200 --> 00:00:03.429
+Welcome to the Grounded
+Synthetic Respondent Lab.
+
+2
+00:00:03.429 --> 00:00:06.066
+It's a place to practice market research
+
+3
+00:00:06.066 --> 00:00:09.624
+with AI respondents before
+you talk to real customers.
+
+4
+00:00:09.624 --> 00:00:14.040
+We built it at Cal Poly Pomona with
+Dr. Fan Wang and Dr. Yufan Lin.
+
+5
+00:00:14.040 --> 00:00:17.335
+First, turn on the Demo
+(no AI) switch at the top.
+
+6
+00:00:17.335 --> 00:00:20.499
+It replays saved answers,
+so nothing is charged.
+
+7
+00:00:21.100 --> 00:00:24.453
+Under Set Up, choose the Neo
+Smart Living guided demo.
+
+8
+00:00:24.453 --> 00:00:27.496
+One click fills in every
+step for a real product,
+
+9
+00:00:27.496 --> 00:00:30.352
+a small backyard studio
+called the Tahoe Mini.
+
+10
+00:00:30.352 --> 00:00:33.457
+A custom study starts blank,
+for your own product.
+
+11
+00:00:34.059 --> 00:00:37.414
+Audience says who you want
+to hear from: location,
+
+12
+00:00:37.414 --> 00:00:40.233
+age, income, home ownership and lifestyle.
+
+13
+00:00:40.233 --> 00:00:43.588
+Respondent traits are drawn
+from US Census tables,
+
+14
+00:00:43.588 --> 00:00:47.011
+so the mix of ages, incomes
+and homes is realistic.
+
+15
+00:00:47.611 --> 00:00:52.309
+Product describes what people are
+reacting to: the business, the product,
+
+16
+00:00:52.309 --> 00:00:56.235
+its price range, key features,
+use cases and likely concerns.
+
+17
+00:00:56.235 --> 00:00:59.646
+Every respondent reads this
+context before answering.
+
+18
+00:01:00.247 --> 00:01:03.452
+Market adds the alternatives
+people compare against,
+
+19
+00:01:03.452 --> 00:01:06.040
+like a shed conversion or a home addition,
+
+20
+00:01:06.040 --> 00:01:10.231
+plus the features they expect and
+the objections they usually raise.
+
+21
+00:01:10.832 --> 00:01:12.814
+Survey holds the questionnaire.
+
+22
+00:01:12.814 --> 00:01:15.628
+The guided demo loads
+the Tahoe Mini survey,
+
+23
+00:01:15.628 --> 00:01:18.953
+or you can upload your own
+as Markdown, Word or PDF.
+
+24
+00:01:18.953 --> 00:01:21.191
+You can also add your own question.
+
+25
+00:01:21.191 --> 00:01:25.540
+I'll ask how interested people would
+be in solar panels on the roof,
+
+26
+00:01:25.540 --> 00:01:27.011
+on a one to five scale.
+
+27
+00:01:27.610 --> 00:01:30.484
+Experiment sets the sample
+size and the models.
+
+28
+00:01:30.484 --> 00:01:35.131
+You can mix models and pick Split Sample
+to divide respondents between them,
+
+29
+00:01:35.131 --> 00:01:38.311
+or Mirror to have each model
+answer the same people.
+
+30
+00:01:38.311 --> 00:01:41.674
+I'll ask for one hundred
+respondents and save the plan.
+
+31
+00:01:42.323 --> 00:01:46.570
+With Demo on, Run live is locked,
+so I'll show the preloaded demo.
+
+32
+00:01:46.570 --> 00:01:49.401
+These are one hundred
+synthetic respondents,
+
+33
+00:01:49.401 --> 00:01:54.549
+answered earlier by four models that drew
+each answer from the odds they stated.
+
+34
+00:01:54.549 --> 00:01:55.578
+No AI is called.
+
+35
+00:01:55.578 --> 00:01:59.632
+My solar question isn't in that
+saved run; it needs a live run.
+
+36
+00:02:00.233 --> 00:02:03.385
+Result turns every question
+into a small dashboard.
+
+37
+00:02:03.385 --> 00:02:05.424
+You can read the overall answers,
+
+38
+00:02:05.424 --> 00:02:09.132
+or filter by model to see how
+one model answered on its own.
+
+39
+00:02:09.732 --> 00:02:13.121
+Insights pulls the signals
+together: the leading use case,
+
+40
+00:02:13.121 --> 00:02:16.919
+the heaviest barriers, and which
+concepts lift purchase interest.
+
+41
+00:02:16.919 --> 00:02:19.198
+Read it as directional, not a forecast.
+
+42
+00:02:19.198 --> 00:02:21.769
+It tells you what to
+check with real people.
+
+43
+00:02:22.370 --> 00:02:24.826
+Now I turn Demo off and press Run live.
+
+44
+00:02:24.826 --> 00:02:27.911
+With the class key set,
+the guided demo uses Jev,
+
+45
+00:02:27.911 --> 00:02:29.485
+which answers every scale
+
+46
+00:02:29.485 --> 00:02:32.948
+and choice question by drawing
+from the odds it states.
+
+47
+00:02:32.948 --> 00:02:35.656
+One hundred respondents
+take a few seconds,
+
+48
+00:02:35.656 --> 00:02:38.363
+and every answer comes
+live from the model.
+
+49
+00:02:38.363 --> 00:02:41.952
+In Result, my solar panel
+question now has its own chart.
+
+50
+00:02:41.952 --> 00:02:45.101
+Then I turn Demo back on
+for the rest of the tour.
+
+51
+00:02:45.700 --> 00:02:50.129
+Interview runs synthetic depth interviews
+with the same kind of personas.
+
+52
+00:02:50.129 --> 00:02:53.041
+In the guided demo these
+are seeded transcripts,
+
+53
+00:02:53.041 --> 00:02:55.711
+so no model is called,
+and the page says so.
+
+54
+00:02:55.711 --> 00:02:58.441
+You can open each
+transcript pair to read it.
+
+55
+00:02:59.042 --> 00:03:03.045
+The Research Brief frames what you
+want to learn: your main question,
+
+56
+00:03:03.045 --> 00:03:06.758
+your hypotheses, and the decisions
+the interviews should inform.
+
+57
+00:03:06.758 --> 00:03:09.775
+It tells the insights step
+which themes matter most.
+
+58
+00:03:10.376 --> 00:03:14.031
+Interview Insights groups the
+transcripts into recurring themes,
+
+59
+00:03:14.031 --> 00:03:15.916
+each with a representative quote.
+
+60
+00:03:15.916 --> 00:03:20.085
+With a live key, you can also keep
+interviewing any persona in character.
+
+61
+00:03:20.686 --> 00:03:23.696
+Student Interview is a
+separate page for class.
+
+62
+00:03:23.696 --> 00:03:27.089
+Each persona is one household
+drawn from Census data.
+
+63
+00:03:27.089 --> 00:03:31.572
+Students pick one, ask their own
+questions, and export the transcript.
+
+64
+00:03:31.572 --> 00:03:35.542
+In demo mode it plays back
+pre-recorded interviews at no cost.
+
+65
+00:03:36.142 --> 00:03:38.949
+Focus Group puts you in
+the moderator's seat.
+
+66
+00:03:38.949 --> 00:03:42.629
+The personas hear each other
+and react, across five stages,
+
+67
+00:03:42.629 --> 00:03:45.998
+from an icebreaker through
+price reactions to a close.
+
+68
+00:03:45.998 --> 00:03:49.179
+You tag quotes into themes
+and write your own memo.
+
+69
+00:03:49.179 --> 00:03:51.425
+The demo replays a recorded session.
+
+70
+00:03:52.024 --> 00:03:56.728
+That's the whole loop: set up, survey,
+run, read the results, and interview.
+
+71
+00:03:56.728 --> 00:03:59.204
+These answers are a rehearsal, not data.
+
+72
+00:03:59.204 --> 00:04:01.370
+Use them to sharpen your questions,
+
+73
+00:04:01.370 --> 00:04:06.507
+and always compare what the AI says with
+real customers before you decide anything.
+
+74
+00:04:06.507 --> 00:04:10.592
+The student team behind the lab is
+Anderson Edmond, Minh and Yaza.

@@ -1,4 +1,5 @@
 import { DemoSwitch } from "@/components/demo/demo-mode";
+import { WalkthroughProvider } from "@/components/walkthrough/walkthrough-provider";
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 
@@ -34,7 +35,10 @@ export default function RootLayout({
 
   const content = (
     <html lang="en">
-      <body><DemoSwitch />{children}</body>
+      <body>
+        <DemoSwitch />
+        <WalkthroughProvider>{children}</WalkthroughProvider>
+      </body>
     </html>
   );
 

@@ -9,6 +9,8 @@ import { MetricPill } from "@/components/ui/metric-pill";
 import { RevealOnScroll } from "@/components/ui/reveal-on-scroll";
 import { AppLogoMark } from "@/components/ui/workflow-nav";
 import { useBackendReadiness } from "@/hooks/use-backend-readiness";
+import { WALKTHROUGH } from "@/lib/walkthrough-chapters";
+import { formatTime, walkthroughHref } from "@/lib/walkthrough";
 
 export function PublicLandingShell({ classroomNoLogin = false }: { classroomNoLogin?: boolean }) {
   const readiness = useBackendReadiness();
@@ -94,6 +96,12 @@ export function PublicLandingShell({ classroomNoLogin = false }: { classroomNoLo
                   <ArrowRightIcon />
                 </Button>
               )}
+              <Link href={walkthroughHref()} className="w-full sm:w-auto">
+                <Button variant="secondary" className="w-full sm:w-auto">
+                  <span aria-hidden="true">{"\u25B6\uFE0E"}</span>
+                  Watch the walkthrough ({formatTime(WALKTHROUGH.duration)})
+                </Button>
+              </Link>
             </div>
 
             <BackendReadinessNotice

@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { isAlwaysPublicPath } from "../src/lib/public-paths";
+
 import {
   canAskStage,
   collectedAnswers,
@@ -297,7 +299,8 @@ test("classroom students can drive a room without hitting a login wall", () => {
 
 test("a student can end their session so the next one on the device starts clean", () => {
   assert.match(endSessionSource, /cookies\.delete\(CLASSROOM_SESSION_COOKIE_NAME\)/);
-  assert.match(middlewareSource, /pathname\.startsWith\("\/api\/classroom\/"\)/);
+  assert.equal(isAlwaysPublicPath("/api/classroom/end-session"), true);
+  assert.match(middlewareSource, /isAlwaysPublicPath\(pathname\)/);
   // The control moved off the page and into the nav, where a sign-out would be. It is
   // reachable from both student pages, and only where there is no Clerk session to end.
   const userMenuSource = readFileSync(

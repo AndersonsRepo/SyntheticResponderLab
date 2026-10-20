@@ -337,6 +337,7 @@ export function InterviewSynthesisSection() {
           <RevealOnScroll>
             <SectionHeader
               index={10}
+              videoStep="interview"
               eyebrow="Interview"
               title="Generate synthetic depth interviews grounded in your personas."
               description={

@@ -134,6 +134,7 @@ export function InsightsSection() {
           <RevealOnScroll>
             <SectionHeader
               index={9}
+              videoStep="insights"
               eyebrow="Insights"
               title={header.title}
               description={header.description}

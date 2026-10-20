@@ -117,6 +117,7 @@ export function AnalysisSection() {
           <RevealOnScroll>
             <SectionHeader
               index={8}
+              videoStep="result"
               eyebrow="Analysis"
               title="Read every survey question as a response dashboard."
               description="Review the latest run question by question, switch the model view when needed, then optionally check repeatability at the bottom."

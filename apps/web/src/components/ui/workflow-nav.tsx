@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { BadgeChip } from "@/components/ui/badge-chip";
 import { UserMenuSlot } from "@/components/ui/user-menu-slot";
+import { useWalkthrough } from "@/components/walkthrough/walkthrough-provider";
 import { canOpenCompactAppMenu, standaloneAppLinks } from "@/lib/app-navigation";
 import { isClassroomStudentPage } from "@/lib/classroom-access";
 import { workflowSections, WorkflowSectionId } from "@/lib/workflow-sections";
@@ -35,6 +36,7 @@ export function WorkflowNav() {
     registry?.scrollToSection ??
     ((id: WorkflowSectionId) => router.push(id === "main" ? "/" : `/#${id}`));
   const { isReady, theme, toggleTheme } = useTheme();
+  const walkthrough = useWalkthrough();
   const [isCompactMenuOpen, setIsCompactMenuOpen] = useState(false);
   const compactMenuDisabled = !canOpenCompactAppMenu(
     navigationLocked,
@@ -169,6 +171,15 @@ export function WorkflowNav() {
 
           <button
             type="button"
+            onClick={() => walkthrough.open()}
+            className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full border px-3.5 text-[0.8rem] font-medium text-app-text transition hover:text-app-cyan [background:var(--button-secondary-bg)] [border-color:var(--button-secondary-border)]"
+          >
+            <span aria-hidden="true">{"\u25B6\uFE0E"}</span>
+            <span className="whitespace-nowrap">Video guide</span>
+          </button>
+
+          <button
+            type="button"
             onClick={toggleTheme}
             className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border text-app-text transition hover:text-app-cyan [background:var(--button-secondary-bg)] [border-color:var(--button-secondary-border)]"
             aria-label={
@@ -213,6 +224,15 @@ export function WorkflowNav() {
             </button>
 
             <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={() => walkthrough.open()}
+                aria-label="Video guide"
+                title="Video guide"
+                className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border text-[0.8rem] text-app-text transition hover:text-app-cyan [background:var(--button-secondary-bg)] [border-color:var(--button-secondary-border)]"
+              >
+                <span aria-hidden="true">{"\u25B6\uFE0E"}</span>
+              </button>
               <button
                 type="button"
                 onClick={toggleTheme}

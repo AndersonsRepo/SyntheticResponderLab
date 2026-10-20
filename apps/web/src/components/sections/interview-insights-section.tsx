@@ -337,6 +337,7 @@ export function InterviewInsightsSection() {
           <RevealOnScroll>
             <SectionHeader
               index={12}
+              videoStep="interview_insights"
               eyebrow="Interview Insights"
               title="Recurring themes, representative quotes, and persona follow-up chat."
               description="The LLM extracts shared themes across the interview corpus, then lets you continue the conversation with any persona as if you were asking follow-up interview questions."

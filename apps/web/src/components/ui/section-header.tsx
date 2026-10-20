@@ -1,4 +1,6 @@
 import { BadgeChip } from "@/components/ui/badge-chip";
+import { WatchStepButton } from "@/components/walkthrough/watch-step-button";
+import type { WalkthroughStep } from "@/lib/walkthrough-chapters";
 import { formatSectionIndex } from "@/lib/utils";
 
 type SectionHeaderProps = {
@@ -6,6 +8,8 @@ type SectionHeaderProps = {
   eyebrow: string;
   title: string;
   description: string;
+  /** This step's chapter in the video guide, shown as "Watch this step". */
+  videoStep?: WalkthroughStep;
 };
 
 export function SectionHeader({
@@ -13,6 +17,7 @@ export function SectionHeader({
   eyebrow,
   title,
   description,
+  videoStep,
 }: SectionHeaderProps) {
   return (
     <div className="max-w-2xl">
@@ -20,6 +25,7 @@ export function SectionHeader({
         <BadgeChip tone="gold">
           {formatSectionIndex(index)}. {eyebrow}
         </BadgeChip>
+        {videoStep ? <WatchStepButton step={videoStep} /> : null}
       </div>
       <h2 className="font-display text-[2.45rem] font-medium leading-[0.95] tracking-[-0.05em] text-app-text sm:text-[2.9rem] md:text-[3.35rem] lg:text-[3.75rem]">
         {title}

@@ -2,6 +2,7 @@
 
 import { DemoScreens, DemoNotice, useDemoActivity } from "@/components/demo/demo-mode";
 import { isDemoMode } from "@/lib/demo-mode";
+import { WatchStepButton } from "@/components/walkthrough/watch-step-button";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -429,7 +430,10 @@ function FocusGroupPageContent({ demoPlayback = false }: { demoPlayback?: boolea
       {demoPlayback && error ? <Button onClick={() => setDemoRetry(n => n + 1)}>Retry demo load</Button> : null}
 
       <header className="flex flex-col gap-2">
-        <h1 className="text-3xl font-semibold">Simulated focus group</h1>
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="text-3xl font-semibold">Simulated focus group</h1>
+          <WatchStepButton step="focus_group" />
+        </div>
         <p role="note" className="text-sm font-semibold" data-testid="rehearsal-label">
           {REHEARSAL_LABEL}. The participants are simulated personas, not real people.
         </p>

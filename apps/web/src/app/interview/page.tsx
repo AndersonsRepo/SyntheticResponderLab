@@ -40,6 +40,7 @@ import {
 } from "@/lib/interview-models";
 import { cn } from "@/lib/utils";
 import { WorkflowNav } from "@/components/ui/workflow-nav";
+import { WatchStepButton } from "@/components/walkthrough/watch-step-button";
 import { StudyProvider, useStudy } from "@/providers/study-provider";
 import { ThemeProvider } from "@/providers/theme-provider";
 
@@ -603,6 +604,7 @@ function InterviewPageContent({ demoPlayback = false }: { demoPlayback?: boolean
           <BadgeChip tone="gold">Interview</BadgeChip>
           <BadgeChip>Student interviews a persona</BadgeChip>
           {source ? <BadgeChip>{source}</BadgeChip> : null}
+          <WatchStepButton step="interview_page" />
         </div>
         <h1 className="font-display text-[2.45rem] font-medium leading-[0.95] tracking-[-0.05em] text-app-text sm:text-[2.9rem] lg:text-[3.35rem]">
           Interview a persona

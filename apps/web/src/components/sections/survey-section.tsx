@@ -307,6 +307,7 @@ export function SurveySection() {
         <RevealOnScroll>
           <SectionHeader
             index={5}
+            videoStep="survey"
             eyebrow="Survey Upload"
             title="Upload the survey respondents should answer."
             description="Upload your survey file, review how it was interpreted, and confirm the final question set before simulation."
