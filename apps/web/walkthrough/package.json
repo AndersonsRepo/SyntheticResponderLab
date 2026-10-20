@@ -1,0 +1,15 @@
+{
+  "name": "srl-walkthrough-video",
+  "private": true,
+  "type": "module",
+  "description": "Records, narrates and assembles the app walkthrough video. Kept apart from the web app's own dependencies.",
+  "scripts": {
+    "tts": "./tts.sh",
+    "selectors": "MODE=quick node record.mjs",
+    "record": "MODE=full node record.mjs",
+    "compose": "./compose.sh"
+  },
+  "devDependencies": {
+    "playwright": "1.62.0"
+  }
+}
