@@ -45,6 +45,7 @@ EXPERIMENTS = OrderedDict([
     ("2026-10-02_R021_drawing_only_vs_drivers_only", "R021 / R021b: drawing alone and drivers alone, to separate R020's two changes."),
     ("2026-10-05_jev_drawn_offline", "Jev with answers drawn from its own saved Sept 24 odds (two seeds), scored on Dr. Lin's standard; offline, no API calls. The run manifests are copies of the Sept 24 Jev manifest (see NOTE_reproduction.md)."),
     ("2026-10-05_noise_check_and_average_shape", "Paired persona bootstrap on the drivers' effect (R020 vs R021, R021b vs R018u), the exact gaps for Anderson's tie table, and the average human answer shape as a baseline; offline, no API calls. README.md has the results and the item-split caveat."),
+    ("2026-10-20_R022_S2_confirmation", "R022 / R022u: the R020 setup (driver personas + answers drawn from stated probabilities, unstyled four-model mix) on Dr. Lin's S2 against the same mix without drivers or drawing, with the S2 random control; pre-registered in 07991f2, judged by Dr. Lin's rule. `real_comparison/` holds the scores and spread diagnostics, `lin_rule_verdict/` the verdict (offline/r020_r021_attribution.py --only R022), `noise_check/` the persona bootstrap and tie-band gaps, `logs/` the runner output."),
 ])
 RUN_FILES = OrderedDict([
     ("answers_long.csv", "one row per persona x question: run_id, model, repeat, seed, persona_id, respondent_id, question_id, question_type, answer, answer_json, is_fallback. Drop rows with is_fallback = true."),

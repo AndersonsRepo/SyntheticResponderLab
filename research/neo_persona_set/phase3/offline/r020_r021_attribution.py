@@ -8,7 +8,14 @@ analyze_r021.py of 2026-10-02/03 (the R021 / R021b attribution rule).
     apps/api/.venv/bin/python research/neo_persona_set/phase3/offline/r020_r021_attribution.py \\
         --real "../SyntheticResponderLab-Assets/2_real_data_aytm/survey-760085-2026-03-25-raw-data.csv"
 
-Per experiment (R020 and R021; --only picks one):
+R022, the S2 confirmation of R020 (pre-registered 2026-10-19), is scored by the same code with
+--only R022: R022 against R022u under Dr. Lin's rule, on Dr. Lin's S2 personas
+(4_persona_sets/hybrid_drivers/run_ready/s2lin_drv.csv, never the S1 default) with its own random
+control. It needs none of the S1 panels, writes to <its folder>/lin_rule_verdict unless --out-name
+says otherwise, and is not compared with the experiment log (it is not a reproduction). The default
+run (no --only) is R020 and R021.
+
+Per experiment (R020 and R021; --only picks one, or R022):
 1. Finds the panels by run tag under <assets>/5_experiments/*/survey_runs (r1 and r2 of R018u,
    R018b, R020, R020b, R021, R021b and the random control; --run overrides). It builds nothing: a
    missing mixed panel is reported with the make_mixed_panel.py step that would make it, and
@@ -78,6 +85,9 @@ DEFAULT_ASSETS = REPO_ROOT.parent / "SyntheticResponderLab-Assets"
 DEFAULT_REGISTRY = PHASE3 / "registry.csv"
 REAL_IDS_REL = Path("3_scoring_standard/real_splits/lin-seed42/score_ids.txt")
 PERSONAS_REL = Path("4_persona_sets/hybrid_drivers/run_ready/s1_drv.csv")
+# Dr. Lin's S2 (his seed 20260920): the persona file R022 runs on. R022u runs the same 100 persona rows
+# of the matched-600 file, whose income columns equal this file's, so one file serves both arms.
+PERSONAS_S2_REL = Path("4_persona_sets/hybrid_drivers/run_ready/s2lin_drv.csv")
 LOG_REL = Path("0_logs/EXPERIMENT_LOG.md")
 OUT_FOLDER = "reproduced_2026-10-18"
 ITEMS = "lin13-validation"
@@ -95,20 +105,36 @@ ARMS: Dict[str, Tuple[str, str]] = {
     "R021": ("mixed-panel", "s1-R021-draw-mixed"),
     "R021b": ("mixed-panel", "s1-R021b-hybrid-mixed"),
     "random": ("random-uniform", "s1-RANDOM"),
+    # R022 (S2): the run tags its pre-registration gives make_mixed_panel.py / make_random_panel.py.
+    "R022u": ("mixed-panel", "s2lin-R022u-mixed"),
+    "R022": ("mixed-panel", "s2lin-R022-hybrid-mixed"),
+    "random_s2": ("random-uniform", "s2lin-RANDOM"),
 }
 # The single-model runs each new panel was dealt from (scored for the record, not used by the rules).
 SINGLE_TAGS = {"R020": "s1-R020-hybrid-draw-unstyled", "R020b": "s1-R020b-hybrid-draw-styled",
-               "R021": "s1-R021-draw-only", "R021b": "s1-R021b-hybrid-drivers-only"}
+               "R021": "s1-R021-draw-only", "R021b": "s1-R021b-hybrid-drivers-only",
+               "R022": "s2lin-R022-hybrid-draw-unstyled", "R022u": "s2lin-R022u-single-unstyled"}
 # Persona deal each panel must share with its baseline: (reference arm, fields that must agree).
 PAIRING = {"R020": ("R018u", ("model",)), "R020b": ("R018b", ("model", "trait")),
-           "R021": ("R018u", ("model",)), "R021b": ("R018u", ("model",))}
+           "R021": ("R018u", ("model",)), "R021b": ("R018u", ("model",)),
+           "R022": ("R022u", ("model",))}
+# personas: the persona CSV the income link is read from (relative to --assets; --personas overrides it).
+# log_heading: the EXPERIMENT_LOG.md section the numbers are checked against; None for a new experiment.
+# out_name: the output subfolder when --out-name is not given.
 EXPERIMENTS: Dict[str, Dict[str, Any]] = {
     "R020": {"arms": ["R018u", "R018b", "R020", "R020b", "random"], "singles": ["R020", "R020b"], "prefix": "r020",
-             "lin_rule": ["R020", "R020b"], "attribution": [], "log_heading": "R020 / R020b"},
+             "lin_rule": ["R020", "R020b"], "attribution": [], "log_heading": "R020 / R020b", "personas": PERSONAS_REL, "out_name": OUT_FOLDER},
     "R021": {"arms": ["R018u", "R021", "R021b", "R020", "random"], "singles": ["R021", "R021b"], "prefix": "r021",
-             "lin_rule": [], "attribution": ["R021", "R021b"], "log_heading": "R021 / R021b"},
+             "lin_rule": [], "attribution": ["R021", "R021b"], "log_heading": "R021 / R021b", "personas": PERSONAS_REL, "out_name": OUT_FOLDER},
+    "R022": {"arms": ["R022u", "R022", "random_s2"], "singles": ["R022", "R022u"], "prefix": "r022",
+             "lin_rule": ["R022"], "attribution": [], "log_heading": None, "personas": PERSONAS_S2_REL, "out_name": "lin_rule_verdict"},
 }
-PREREG_COMMITS = {"R020": "9caba69", "R020b": "9caba69", "R021": "c5bb11d", "R021b": "c5bb11d"}
+# Run when --only is not given: the reproductions. R022 is a new experiment, scored with --only R022.
+DEFAULT_EXPERIMENTS = ("R020", "R021")
+# R022 is pre-registered by 07991f2, the commit that adds its registry row; a commit cannot name itself, so
+# its sha was added here by the next commit. Its rule is read from that commit, so a later edit to the
+# hypothesis is reported and ignored (the verdict records checked_against_commit: true).
+PREREG_COMMITS = {"R020": "9caba69", "R020b": "9caba69", "R021": "c5bb11d", "R021b": "c5bb11d", "R022": "07991f2"}
 # What each attribution hypothesis predicts (credited or not, per metric), and the registry phrase it
 # comes from; the phrase must still be in the hypothesis or the script stops.
 PREDICTIONS: Dict[str, Tuple[Tuple[str, ...], Dict[str, bool]]] = {
@@ -239,15 +265,23 @@ def missing_message(arm: str, rep: int) -> str:
         return f"{arm} r{rep}: run missing ({where})"
     single = SINGLE_TAGS.get(arm, "<its single-model runs>")
     return (f"{arm} r{rep}: mixed panel missing ({where}); not built here. To build it: make_mixed_panel.py --keep-arm-order "
-            f"--repeat {rep} --run-tag {tag} --arm <the four r{rep} *_{single} runs, in R018u's model order: qwen, gemini, gpt-5-mini, mistral>")
+            f"--repeat {rep} --run-tag {tag} --arm <the four r{rep} *_{single} runs, in the pre-registered (R018u's) model order: "
+            f"qwen, gemini, gpt-5-mini, mistral>")
 
 
 def find_singles(survey_runs: Path, arms: Sequence[str]) -> List[Path]:
+    """The single-model runs behind each panel, named '<time>_<model>_r<k>[_n<N>][_p<N>]_<tag>'.
+
+    phase2/run_survey.make_run_id adds _n<N> under --limit and _p<N> under --persona-ids, so R022u's runs
+    (the same 100 rows picked from the matched-600 file) are '<time>_<model>_r<k>_p100_s2lin-R022u-single-unstyled'.
+    """
     out: List[Path] = []
     for arm in arms:
+        tag = SINGLE_TAGS[arm]
         for rep in REPEATS:
-            out += sorted(p.resolve() for p in survey_runs.glob(f"*_r{rep}_{SINGLE_TAGS[arm]}")
-                          if p.is_dir() and "mixed-panel" not in p.name and not p.name.endswith("_failed"))
+            name = re.compile(rf"_r{rep}(?:_n\d+)?(?:_p\d+)?_{re.escape(tag)}$")
+            out += sorted(p.resolve() for p in survey_runs.glob(f"*_r{rep}_*{tag}")
+                          if p.is_dir() and name.search(p.name) and "mixed-panel" not in p.name and not p.name.endswith("_failed"))
     return out
 
 
@@ -641,13 +675,14 @@ def load_rules(name: str, registry: Path, registry_rows: Dict[str, Dict[str, str
     return rules
 
 
-def run_experiment(name: str, panels: Dict[str, Dict[int, Path]], args: argparse.Namespace, rules: Dict[str, Any], incomes: Dict[str, int]) -> int:
+def run_experiment(name: str, panels: Dict[str, Dict[int, Path]], args: argparse.Namespace, rules: Dict[str, Any], personas: Path) -> int:
     spec = EXPERIMENTS[name]
     exp_dir = panels[name][REPEATS[0]].parent.parent
     if any(panels[name][rep].parent.parent != exp_dir for rep in REPEATS):
         raise InputProblem(f"{name}'s r1 and r2 panels are in different experiment folders")
+    incomes = spread_diagnostics.read_incomes(personas)
 
-    out_dir = realdata.assert_not_real_data_path(exp_dir / args.out_name, "--out-name")
+    out_dir = realdata.assert_not_real_data_path(exp_dir / (args.out_name or spec["out_name"]), "--out-name")
     out_dir = make_real_split.assert_outside_repo(out_dir, "--out-name")
     out_dir = realdata.assert_outside_real_folder(out_dir, args.real, "--out-name")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -672,7 +707,7 @@ def run_experiment(name: str, panels: Dict[str, Dict[int, Path]], args: argparse
 
     # 4
     table = {arm: [measure_run(arm, rep, panels[arm][rep], summaries[str(panels[arm][rep])], incomes) for rep in REPEATS] for arm in spec["arms"]}
-    spread_rows = [spread_diagnostics.diagnose_arm(arm, [panels[arm][rep] for rep in REPEATS], personas_csv=args.personas) for arm in spec["arms"]]
+    spread_rows = [spread_diagnostics.diagnose_arm(arm, [panels[arm][rep] for rep in REPEATS], personas_csv=personas) for arm in spec["arms"]]
     spread = {row["arm"]: row for row in spread_rows}
     on_ev = any(rules[rid].get("belief_on_expected") for rid in spec["attribution"])
     for arm, rows in table.items():
@@ -708,7 +743,7 @@ def run_experiment(name: str, panels: Dict[str, Dict[int, Path]], args: argparse
     # 6
     prefix = spec["prefix"]
     checks = [] if args.no_check else (
-        log_checks(args.assets / LOG_REL, spec["log_heading"], table, spread, words, thresholds)
+        (log_checks(args.assets / LOG_REL, spec["log_heading"], table, spread, words, thresholds) if spec["log_heading"] else [])
         + saved_checks(exp_dir, summaries, spread_rows, table, attributions))
     table_rows = [dict(row, experiment=name) for rows in table.values() for row in rows]
     write_csv(out_dir / f"{prefix}_table.csv", TABLE_COLUMNS, table_rows)
@@ -718,7 +753,7 @@ def run_experiment(name: str, panels: Dict[str, Dict[int, Path]], args: argparse
     payload = {
         "created_at": datetime.now(timezone.utc).isoformat(), "experiment": name, "experiment_folder": exp_dir,
         "script": {"path": "research/neo_persona_set/phase3/offline/r020_r021_attribution.py", **compare_real.git_info()},
-        "inputs": {"real": args.real, "real_ids": args.real_ids, "items": ITEMS, "personas": args.personas, "registry": args.registry,
+        "inputs": {"real": args.real, "real_ids": args.real_ids, "items": ITEMS, "personas": personas, "registry": args.registry,
                    "comparison": out_dir / ITEMS},
         "panels": {arm: [panels[arm][rep] for rep in REPEATS] for arm in spec["arms"]}, "singles": singles,
         "pairing": pairing, "pairing_ok": all(p["ok"] for p in pairing.values()),
@@ -750,11 +785,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--real", type=Path, required=True, help="the AYTM raw-data CSV (read by compare_real.py only; never copied)")
     parser.add_argument("--assets", type=Path, default=DEFAULT_ASSETS, help="the research data folder (default: next to the repository)")
     parser.add_argument("--real-ids", type=Path, default=None, help=f"Dr. Lin's val half (default: <assets>/{REAL_IDS_REL.as_posix()})")
-    parser.add_argument("--personas", type=Path, default=None, help=f"persona CSV with exact_household_income (default: <assets>/{PERSONAS_REL.as_posix()})")
+    parser.add_argument("--personas", type=Path, default=None,
+                        help=f"persona CSV with exact_household_income (default: per experiment, <assets>/{PERSONAS_REL.as_posix()} "
+                             f"for R020 and R021, <assets>/{PERSONAS_S2_REL.as_posix()} for R022)")
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
-    parser.add_argument("--only", choices=sorted(EXPERIMENTS), default=None, help="one experiment (default: both)")
+    parser.add_argument("--only", choices=sorted(EXPERIMENTS), default=None, help=f"one experiment (default: {' and '.join(DEFAULT_EXPERIMENTS)})")
     parser.add_argument("--run", action="append", default=[], metavar="ARM=R1_DIR,R2_DIR", help="use these folders instead of finding the arm by run tag")
-    parser.add_argument("--out-name", default=OUT_FOLDER, help="subfolder of each experiment folder for the outputs")
+    parser.add_argument("--out-name", default=None,
+                        help=f"subfolder of each experiment folder for the outputs (default: {OUT_FOLDER} for R020 and R021, "
+                             f"{EXPERIMENTS['R022']['out_name']} for R022)")
     parser.add_argument("--no-singles", action="store_true", help="score only the panels, not the single-model runs behind them")
     parser.add_argument("--no-check", action="store_true", help="skip the comparison with the log and the saved outputs")
     return parser
@@ -765,13 +804,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     args.assets = Path(args.assets).expanduser().resolve()
     args.real = Path(args.real).expanduser().resolve()
     args.real_ids = Path(args.real_ids or args.assets / REAL_IDS_REL).expanduser().resolve()
-    args.personas = Path(args.personas or args.assets / PERSONAS_REL).expanduser().resolve()
+    args.personas = Path(args.personas).expanduser().resolve() if args.personas else None
     args.registry = Path(args.registry).expanduser().resolve()
+    names = [args.only] if args.only else list(DEFAULT_EXPERIMENTS)
+    # Each experiment reads incomes from its own persona file (R022: S2, never the S1 default).
+    personas = {name: args.personas or (args.assets / EXPERIMENTS[name]["personas"]).resolve() for name in names}
     try:
-        for label, path in (("--real", args.real), ("--real-ids", args.real_ids), ("--personas", args.personas), ("--registry", args.registry)):
+        if args.personas and len({EXPERIMENTS[name]["personas"] for name in names}) > 1:
+            raise InputProblem("--personas would replace different persona files for " + ", ".join(names) + "; pick one with --only")
+        for label, path in [("--real", args.real), ("--real-ids", args.real_ids), ("--registry", args.registry)] + [(f"--personas ({n})", p) for n, p in personas.items()]:
             if not path.is_file():
                 raise InputProblem(f"{label} {path} is not a file")
-        names = [args.only] if args.only else list(EXPERIMENTS)
         overrides = parse_overrides(args.run)
         wanted = sorted({arm for n in names for arm in EXPERIMENTS[n]["arms"]} | {PAIRING[a][0] for n in names for a in EXPERIMENTS[n]["arms"] if a in PAIRING})
         found = {arm: find_panels(args.assets, arm, overrides) for arm in wanted}
@@ -782,8 +825,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         panels = {arm: {rep: p for rep, p in reps.items() if p is not None} for arm, reps in found.items()}
         registry_rows = read_registry(args.registry)
         rules = {name: load_rules(name, args.registry, registry_rows) for name in names}  # every rule read before anything is written
-        incomes = spread_diagnostics.read_incomes(args.personas)
-        codes = [run_experiment(name, panels, args, rules[name], incomes) for name in names]
+        codes = [run_experiment(name, panels, args, rules[name], personas[name]) for name in names]
     except InputProblem as problem:
         print(f"r020_r021_attribution: {problem}", file=sys.stderr)
         return 2
